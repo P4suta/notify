@@ -1,10 +1,8 @@
 # syntax=docker/dockerfile:1.7
-ARG ERLANG_IMAGE=erlang:29-alpine
-ARG GLEAM_VERSION=1.18.1
 
-FROM ghcr.io/gleam-lang/gleam:v${GLEAM_VERSION}-erlang-alpine AS gleam
+FROM ghcr.io/gleam-lang/gleam:v1.18.1-erlang-alpine@sha256:7c82e4a284b7c05c26eac34db497ea0e63ce7cb04bd019d966d70338eb172b68 AS gleam
 
-FROM ${ERLANG_IMAGE} AS build
+FROM erlang:29-alpine@sha256:77074ad338ad7303c2f127eb686759721dffbff952f7c8db162bb4adac1e1e1c AS build
 COPY --from=gleam /bin/gleam /bin/gleam
 RUN apk add --no-cache bsd-compat-headers build-base git
 WORKDIR /source
@@ -14,7 +12,7 @@ RUN cd web && gleam run -m lustre/dev build \
       --outdir=../priv/public
 RUN gleam export erlang-shipment
 
-FROM ${ERLANG_IMAGE} AS runtime
+FROM erlang:29-alpine@sha256:77074ad338ad7303c2f127eb686759721dffbff952f7c8db162bb4adac1e1e1c AS runtime
 RUN apk add --no-cache ca-certificates libgcc libstdc++ \
   && addgroup -S notify \
   && adduser -S -G notify -h /app notify \
