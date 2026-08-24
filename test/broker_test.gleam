@@ -191,3 +191,20 @@ pub fn duplicate_multi_topic_registration_delivers_once_and_prunes_index_test() 
   assert stats.subscriber_count == 0
   assert stats.topic_count == 0
 }
+
+pub fn confirmed_dispatch_applies_delivery_before_returning_test() {
+  let assert Ok(bus) = broker.start()
+  let subject = process.new_subject()
+  let assert Ok(alerts) = topic.parse("alerts")
+  let _ = bus.subscribe([alerts], subject, 1)
+
+  assert bus.dispatch(fixture("B000000014XY")) == Nil
+  let assert Ok(broker.Message(delivered)) = process.receive(subject, 1000)
+  assert delivered.id == "B000000014XY"
+
+  assert bus.dispatch(fixture("B000000015XY")) == Nil
+  let assert Ok(broker.Overflow) = process.receive(subject, 1000)
+  let stats = bus.stats()
+  assert stats.subscriber_count == 0
+  assert stats.topic_count == 0
+}

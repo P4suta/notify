@@ -237,7 +237,10 @@ fn start_after_lock(
           postgres_config(config),
           adapter,
           config.node_id,
-          bus.broadcast,
+          fn(message) {
+            bus.dispatch(message)
+            Ok(Nil)
+          },
         ),
       )
     _, _ -> supervision

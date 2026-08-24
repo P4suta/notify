@@ -199,13 +199,15 @@ single URL, after which reuse is rejected across the cluster.
 
 The durable PostgreSQL event log is authoritative. LISTEN/NOTIFY only wakes
 nodes; each node resumes from its stored cursor after lost notifications or a
-restart. Cursor heartbeats protect active readers, cursors stale for seven days
-are removed, and compaction deletes only acknowledged event rows whose message
-has already expired. Scheduled publication uses `FOR UPDATE SKIP LOCKED` and
-commits the released message plus its event in one transaction. These paths
-have real-PostgreSQL contract coverage; multi-node outage and long-duration
-soak coverage remain open. SQLite uses WAL plus a per-database live-process
-lock and is strictly single-node.
+restart. A node advances its cursor only after the broker has synchronously
+applied every remote event in sequence; a dispatch or cursor-write failure
+leaves the batch available for at-least-once retry. Cursor heartbeats protect
+active readers, cursors stale for seven days are removed, and compaction deletes
+only acknowledged event rows whose message has already expired. Scheduled
+publication uses `FOR UPDATE SKIP LOCKED` and commits the released message plus
+its event in one transaction. These paths have real-PostgreSQL contract
+coverage; multi-node outage and long-duration soak coverage remain open. SQLite
+uses WAL plus a per-database live-process lock and is strictly single-node.
 
 Within each node, the live broker indexes subscription IDs by topic and keeps
 credit state by subscription ID. A publish visits only registrations for its

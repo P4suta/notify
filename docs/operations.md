@@ -192,14 +192,23 @@ rollback guarantees are covered separately by the migration contract suite.
 
 `LISTEN/NOTIFY` is only a wake-up signal; the PostgreSQL event log is the source
 of truth. A node reads after its durable cursor and acknowledges only after the
-batch has been processed. Cleanup first removes seven-day-stale cursors, then
-uses the minimum remaining cursor as a watermark. It deletes only event rows at
-or below that watermark whose message row no longer exists.
+batch has been processed. Remote, non-scheduled events pass through a synchronous
+broker dispatch barrier in sequence. If any dispatch fails, the cursor is not
+written; if the cursor write itself fails, the complete fetched batch remains
+eligible for replay. Either recovery path may redeliver an earlier message, so
+clients de-duplicate with the 12-character message ID. HTTP publish still
+returns after the durable commit and uses asynchronous local fan-out, keeping
+subscriber work outside publish commit latency.
 
-The current real-PostgreSQL contract exercises paging, cursor resume,
-acknowledgement, scheduled release, and compaction. Listener disconnect,
-multi-node crash, lease expiry, duplicate wake-up, and prolonged outage tests
-remain required before production certification.
+Cleanup first removes seven-day-stale cursors, then uses the minimum remaining
+cursor as a watermark. It deletes only event rows at or below that watermark
+whose message row no longer exists.
+
+The current contract exercises paging, cursor resume, dispatch-before-ACK,
+dispatch failure, ACK failure and at-least-once batch replay, scheduled release,
+and compaction; persistence cases also run against real PostgreSQL. Listener
+disconnect, multi-node crash, lease expiry, duplicate wake-up, and prolonged
+outage tests remain required before production certification.
 
 ## Durable delivery recovery
 

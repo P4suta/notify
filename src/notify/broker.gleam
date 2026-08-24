@@ -33,6 +33,7 @@ pub type Broker {
     ack: fn(Int) -> Nil,
     unsubscribe: fn(Int) -> Nil,
     broadcast: fn(Notification) -> Nil,
+    dispatch: fn(Notification) -> Nil,
     stats: fn() -> Stats,
   )
 }
@@ -84,6 +85,7 @@ type Command {
   Ack(Int)
   Unsubscribe(Int)
   Broadcast(Notification)
+  Dispatch(Notification, Subject(Nil))
   Inspect(Subject(Stats))
 }
 
@@ -140,6 +142,9 @@ pub fn start() -> Result(Broker, actor.StartError) {
       ack: fn(id) { process.send(subject, Ack(id)) },
       unsubscribe: fn(id) { process.send(subject, Unsubscribe(id)) },
       broadcast: fn(message) { process.send(subject, Broadcast(message)) },
+      dispatch: fn(message) {
+        process.call(subject, 5000, fn(reply) { Dispatch(message, reply) })
+      },
       stats: fn() { process.call(subject, 5000, Inspect) },
     ),
   )
@@ -198,15 +203,11 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
     }
     Ack(id) -> actor.continue(ack_subscriber(state, id))
     Unsubscribe(id) -> actor.continue(remove_subscriber(state, id))
-    Broadcast(message) -> {
-      let candidates =
-        dict.get(state.topics, topic.to_string(message.topic))
-        |> result.unwrap([])
-      actor.continue(deliver_candidates(
-        candidates,
-        message,
-        State(..state, last_broadcast_candidates: list.length(candidates)),
-      ))
+    Broadcast(message) -> actor.continue(deliver_message(state, message))
+    Dispatch(message, reply) -> {
+      let updated = deliver_message(state, message)
+      process.send(reply, Nil)
+      actor.continue(updated)
     }
     Inspect(reply) -> {
       process.send(
@@ -220,6 +221,17 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
       actor.continue(state)
     }
   }
+}
+
+fn deliver_message(state: State, message: Notification) -> State {
+  let candidates =
+    dict.get(state.topics, topic.to_string(message.topic))
+    |> result.unwrap([])
+  deliver_candidates(
+    candidates,
+    message,
+    State(..state, last_broadcast_candidates: list.length(candidates)),
+  )
 }
 
 fn unique_topics(topics: List(Topic)) -> List(Topic) {
