@@ -101,8 +101,10 @@ failures in one run with an actionable `FIX` line and exits non-zero.
 
 Sensitive PostgreSQL, S3, Web Push, and relay credentials are accepted from
 environment variables and are never printed by `config show`. Request logs do
-not include bodies, authorization headers, or query strings. Set
-`NOTIFY_LOG_FORMAT=json` for structured logs.
+not include bodies, authorization headers, or query strings. Human log fields
+are quoted and escape control characters; JSON logs use structural encoding.
+Set `NOTIFY_LOG_FORMAT=json` for structured logs. Session CSRF digests are
+checked with constant-time binary comparison.
 
 Useful operational commands include:
 

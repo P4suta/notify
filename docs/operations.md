@@ -60,6 +60,15 @@ required. If message publication fails after object promotion, the unreferenced
 content-addressed object remains until its configured expiry; immediate
 reference-counted compensation is still open.
 
+## Session and log safety
+
+Web sessions use Secure, HttpOnly, SameSite=Strict cookies. Mutating requests
+authenticated by that cookie require the CSRF digest returned by the session
+API, and comparison uses constant-time binary equality. Authorization headers,
+cookies, query strings, and request bodies are not included in request logs.
+Human-format fields are quoted and escape quotes, backslashes, and ASCII
+control characters; JSON format uses structural string encoding.
+
 ## Not yet certified
 
 The following are acceptance targets, not current benchmark results:

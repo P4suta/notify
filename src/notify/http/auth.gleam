@@ -137,7 +137,7 @@ pub fn uses_session(request: Request(body)) -> Bool {
 pub fn valid_csrf(request: Request(body)) -> Bool {
   case session_token(request), request.get_header(request, "x-csrf-token") {
     Some(session), Ok(presented) ->
-      presented == token.digest("csrf:" <> session)
+      token.secure_equal(presented, token.digest("csrf:" <> session))
     _, _ -> False
   }
 }

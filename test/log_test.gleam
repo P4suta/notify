@@ -33,14 +33,18 @@ pub fn human_request_logs_cannot_be_split_by_untrusted_values_test() {
     log.request_line(
       log.Human,
       at: 100,
-      request_id: "safe\nforged",
+      request_id: "safe\nforged\t\u{1b}[31m\" status=500",
       client_ip: "unknown",
       method: "GET",
-      target: "/alerts\r\nforged?auth=secret",
+      target: "/alerts path\r\nforged\t\u{1b}[31m\"?auth=secret",
       status: 200,
       duration_ms: 1,
     )
   assert !string.contains(line, "\n")
   assert !string.contains(line, "\r")
+  assert !string.contains(line, "\t")
+  assert !string.contains(line, "\u{1b}")
   assert !string.contains(line, "secret")
+  assert string.contains(line, "request_id=\"")
+  assert string.contains(line, " path=\"")
 }

@@ -2,11 +2,13 @@ import gleam/bit_array
 import gleam/http
 import gleam/http/request
 import gleam/option
+import gleam/string
 import notify/access
 import notify/http/auth as http_auth
 import notify/http/router
 import notify/identity/sqlite as identity_sqlite
 import notify/runtime
+import notify/security/token
 import notify/storage/memory
 
 const setup_entropy = "abcdefghijklmnopqrstuvwxyz123"
@@ -119,4 +121,29 @@ pub fn websocket_auth_query_decodes_like_ntfy_test() {
     |> request.set_query([#("auth", encoded)])
     |> request.set_body(<<>>)
   assert http_auth.credentials(req) == Ok(access.Basic("admin", "password"))
+}
+
+pub fn session_csrf_requires_the_exact_derived_digest_test() {
+  let session = "tk_abcdefghijklmnopqrstuvwxyz123"
+  let expected = token.digest("csrf:" <> session)
+  let base =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/api/v1/users")
+    |> request.set_header("cookie", "other=x; notify_session=" <> session)
+    |> request.set_body(<<>>)
+
+  assert base
+    |> request.set_header("x-csrf-token", expected)
+    |> http_auth.valid_csrf
+  let changed =
+    base
+    |> request.set_header("x-csrf-token", "0" <> string.drop_start(expected, 1))
+    |> http_auth.valid_csrf
+  assert changed == False
+  let extended =
+    base
+    |> request.set_header("x-csrf-token", expected <> "0")
+    |> http_auth.valid_csrf
+  assert extended == False
 }
