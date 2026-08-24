@@ -147,6 +147,23 @@ pub fn api_cursor_is_opaque_versioned_and_resource_scoped_test() {
   assert cursor.decode("not+base64", "audit") == Error(cursor.InvalidCursor)
 }
 
+pub fn api_string_cursor_is_canonical_opaque_and_filter_scoped_test() {
+  let encoded = cursor.encode_key("tokens:alice", "tok:日本語:42")
+  assert !string.contains(encoded, "alice")
+  assert !string.contains(encoded, "tok")
+  assert !string.contains(encoded, ":")
+  assert cursor.decode_key(encoded, "tokens:alice") == Ok("tok:日本語:42")
+  assert cursor.decode_key(encoded, "tokens:bob") == Error(cursor.InvalidCursor)
+  assert cursor.decode_key(encoded <> "=", "tokens:alice")
+    == Error(cursor.InvalidCursor)
+  assert cursor.decode_key(cursor.encode_key("users", ""), "users")
+    == Error(cursor.InvalidCursor)
+  assert cursor.decode_key(string.repeat("A", 513), "users")
+    == Error(cursor.InvalidCursor)
+  assert cursor.decode_key("not+base64", "tokens:alice")
+    == Error(cursor.InvalidCursor)
+}
+
 fn temporary_path() -> String {
   let assert Ok(directory) = make_temporary_directory()
   string.trim_end(directory) <> "/notify.db"

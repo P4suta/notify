@@ -3,7 +3,9 @@ import gleam/dynamic/decode
 import gleam/http
 import gleam/http/request
 import gleam/http/response
+import gleam/int
 import gleam/json
+import gleam/list
 import gleam/option.{Some}
 import gleam/string
 import notify/access
@@ -354,6 +356,242 @@ pub fn admin_can_list_and_delete_attachments_without_reading_the_body_test() {
     |> router.handle(runtime)
   assert deleted.status == 204
   assert attachments.head(stored.key) == Error(attachment_store.NotFound)
+}
+
+pub fn every_management_collection_rejects_invalid_paging_parameters_test() {
+  let #(runtime, setup_token) = managed_runtime()
+  complete_setup(runtime, setup_token)
+  let collections = [
+    #("/api/v1/users", []),
+    #("/api/v1/tokens", [#("username", "admin")]),
+    #("/api/v1/acl", []),
+    #("/api/v1/delivery-jobs", []),
+    #("/api/v1/attachments", []),
+  ]
+
+  list.each(collections, fn(collection) {
+    let #(path, base_query) = collection
+    let invalid_limit =
+      admin_request(http.Get, path, "")
+      |> request.set_query(list.append(base_query, [#("limit", "101")]))
+      |> router.handle(runtime)
+    assert invalid_limit.status == 400
+
+    let invalid_cursor =
+      admin_request(http.Get, path, "")
+      |> request.set_query(list.append(base_query, [#("cursor", "not+base64")]))
+      |> router.handle(runtime)
+    assert invalid_cursor.status == 400
+  })
+}
+
+pub fn management_collections_use_filter_scoped_keyset_pages_test() {
+  let #(initial, setup_token) = managed_runtime()
+  let assert Ok(attachments) =
+    attachment_memory.start(max_file_bytes: 1024, max_total_bytes: 4096)
+  let runtime =
+    runtime.with_attachments(
+      initial,
+      attachments,
+      base_url: "https://notify.example",
+      retention_seconds: 3600,
+    )
+  complete_setup(runtime, setup_token)
+
+  list.each(["pat", "sam"], fn(username) {
+    let created =
+      admin_request(
+        http.Post,
+        "/api/v1/users",
+        "{\"username\":\""
+          <> username
+          <> "\",\"password\":\"a different secure password\",\"role\":\"user\"}",
+      )
+      |> router.handle(runtime)
+    assert created.status == 201
+  })
+  list.each(["first", "second"], fn(label) {
+    let created =
+      admin_request(
+        http.Post,
+        "/api/v1/tokens",
+        "{\"username\":\"pat\",\"label\":\"" <> label <> "\"}",
+      )
+      |> router.handle(runtime)
+    assert created.status == 201
+  })
+  list.each(["jobs-a", "jobs-b"], fn(pattern) {
+    let granted =
+      admin_request(
+        http.Put,
+        "/api/v1/acl",
+        "{\"username\":\"pat\",\"topic_pattern\":\""
+          <> pattern
+          <> "\",\"permission\":\"read\"}",
+      )
+      |> router.handle(runtime)
+    assert granted.status == 200
+  })
+  let assert Some(outbox) = runtime.deliveries
+  list.each(["job-a", "job-b"], fn(id) {
+    let assert Ok(_) =
+      outbox.enqueue(delivery.NewJob(
+        id:,
+        kind: delivery.MobileRelay,
+        endpoint: "https://relay.example/private",
+        payload: <<"private":utf8>>,
+        message_id: "Message001",
+        topic_hash: "safe-hash",
+        available_at: 1000,
+      ))
+  })
+  let assert Ok(_) =
+    attachments.put(attachment_store.Upload(<<"attachment-a":utf8>>, 5000))
+  let assert Ok(_) =
+    attachments.put(attachment_store.Upload(<<"attachment-b":utf8>>, 5000))
+
+  let users_cursor = assert_first_page(runtime, "/api/v1/users", [])
+  assert users_cursor != "admin"
+  let tokens_cursor =
+    assert_first_page(runtime, "/api/v1/tokens", [#("username", "pat")])
+  let acl_cursor =
+    assert_first_page(runtime, "/api/v1/acl", [#("username", "pat")])
+  let delivery_cursor =
+    assert_first_page(runtime, "/api/v1/delivery-jobs", [
+      #("kind", "mobile_relay"),
+    ])
+  let attachments_cursor = assert_first_page(runtime, "/api/v1/attachments", [])
+
+  assert_second_page(runtime, "/api/v1/users", [], users_cursor)
+  assert_second_page(
+    runtime,
+    "/api/v1/tokens",
+    [#("username", "pat")],
+    tokens_cursor,
+  )
+  assert_second_page(runtime, "/api/v1/acl", [#("username", "pat")], acl_cursor)
+  assert_second_page(
+    runtime,
+    "/api/v1/delivery-jobs",
+    [#("kind", "mobile_relay")],
+    delivery_cursor,
+  )
+  assert_second_page(runtime, "/api/v1/attachments", [], attachments_cursor)
+
+  let cross_resource =
+    admin_request(http.Get, "/api/v1/attachments", "")
+    |> request.set_query([#("cursor", users_cursor)])
+    |> router.handle(runtime)
+  assert cross_resource.status == 400
+  let cross_filter =
+    admin_request(http.Get, "/api/v1/tokens", "")
+    |> request.set_query([
+      #("username", "admin"),
+      #("cursor", tokens_cursor),
+    ])
+    |> router.handle(runtime)
+  assert cross_filter.status == 400
+  let cross_delivery_filter =
+    admin_request(http.Get, "/api/v1/delivery-jobs", "")
+    |> request.set_query([
+      #("kind", "webpush"),
+      #("cursor", delivery_cursor),
+    ])
+    |> router.handle(runtime)
+  assert cross_delivery_filter.status == 400
+}
+
+pub fn management_collection_default_is_fifty_and_maximum_is_one_hundred_test() {
+  let #(runtime, setup_token) = managed_runtime()
+  complete_setup(runtime, setup_token)
+  let assert Some(outbox) = runtime.deliveries
+  int.range(from: 1, to: 52, with: Nil, run: fn(_, index) {
+    let id = "job-" <> int.to_string(index)
+    let assert Ok(_) =
+      outbox.enqueue(delivery.NewJob(
+        id:,
+        kind: delivery.MobileRelay,
+        endpoint: "https://relay.example/private",
+        payload: <<"private":utf8>>,
+        message_id: "Message001",
+        topic_hash: "safe-hash",
+        available_at: 1000,
+      ))
+    Nil
+  })
+
+  let default_page =
+    admin_request(http.Get, "/api/v1/delivery-jobs", "")
+    |> router.handle(runtime)
+  assert default_page.status == 200
+  let assert Ok(default_body) = bit_array.to_string(default_page.body)
+  assert page_item_count(default_body) == 50
+  assert string.contains(default_body, "\"next_cursor\":\"")
+
+  let maximum_page =
+    admin_request(http.Get, "/api/v1/delivery-jobs", "")
+    |> request.set_query([#("limit", "100")])
+    |> router.handle(runtime)
+  assert maximum_page.status == 200
+  let assert Ok(maximum_body) = bit_array.to_string(maximum_page.body)
+  assert page_item_count(maximum_body) == 51
+  assert string.contains(maximum_body, "\"next_cursor\":null")
+}
+
+fn assert_first_page(
+  runtime: runtime.Runtime,
+  path: String,
+  base_query: List(#(String, String)),
+) -> String {
+  let response =
+    admin_request(http.Get, path, "")
+    |> request.set_query(list.append(base_query, [#("limit", "1")]))
+    |> router.handle(runtime)
+  assert response.status == 200
+  let assert Ok(body) = bit_array.to_string(response.body)
+  let assert Ok(#(items, next_cursor)) =
+    json.parse(body, {
+      use items <- decode.field("items", decode.list(decode.dynamic))
+      use next_cursor <- decode.field("next_cursor", decode.string)
+      decode.success(#(items, next_cursor))
+    })
+  assert list.length(items) == 1
+  assert !string.contains(next_cursor, ":")
+  next_cursor
+}
+
+fn assert_second_page(
+  runtime: runtime.Runtime,
+  path: String,
+  base_query: List(#(String, String)),
+  cursor: String,
+) {
+  let response =
+    admin_request(http.Get, path, "")
+    |> request.set_query(
+      list.append(base_query, [
+        #("limit", "1"),
+        #("cursor", cursor),
+      ]),
+    )
+    |> router.handle(runtime)
+  assert response.status == 200
+  let assert Ok(body) = bit_array.to_string(response.body)
+  let assert Ok(items) =
+    json.parse(body, {
+      use items <- decode.field("items", decode.list(decode.dynamic))
+      decode.success(items)
+    })
+  assert list.length(items) == 1
+}
+
+fn page_item_count(body: String) -> Int {
+  let assert Ok(items) =
+    json.parse(body, {
+      use items <- decode.field("items", decode.list(decode.dynamic))
+      decode.success(items)
+    })
+  list.length(items)
 }
 
 fn list_first(values: List(String)) -> String {

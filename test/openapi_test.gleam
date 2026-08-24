@@ -117,6 +117,67 @@ pub fn every_openapi_operation_is_bound_to_a_runtime_route_test() {
   assert unbound == []
 }
 
+pub fn management_collection_openapi_contracts_are_keyset_paginated_test() {
+  let body = openapi_body()
+  let assert Ok(paths) =
+    json.parse(body, {
+      use paths <- decode.field(
+        "paths",
+        decode.dict(decode.string, decode.dict(decode.string, decode.dynamic)),
+      )
+      decode.success(paths)
+    })
+  list.each(
+    [
+      #("/api/v1/users", "UserPage"),
+      #("/api/v1/tokens", "TokenPage"),
+      #("/api/v1/acl", "AclPage"),
+      #("/api/v1/delivery-jobs", "DeliveryJobPage"),
+      #("/api/v1/attachments", "AttachmentPage"),
+    ],
+    fn(contract) {
+      let #(path, page_schema) = contract
+      let assert Ok(path_item) = dict.get(paths, path)
+      let assert Ok(document) = dict.get(path_item, "get")
+      let assert Ok(parameters) =
+        decode.run(document, {
+          use parameters <- decode.field(
+            "parameters",
+            decode.list(decode.dynamic),
+          )
+          decode.success(parameters)
+        })
+      let references =
+        list.filter_map(parameters, fn(parameter) {
+          decode.run(parameter, {
+            use reference <- decode.field("$ref", decode.string)
+            decode.success(reference)
+          })
+        })
+      assert list.contains(references, "#/components/parameters/cursor")
+      assert list.contains(references, "#/components/parameters/limit")
+      let assert Ok(response_schema) =
+        decode.run(
+          document,
+          decode.at(
+            [
+              "responses",
+              "200",
+              "content",
+              "application/json",
+              "schema",
+              "$ref",
+            ],
+            decode.string,
+          ),
+        )
+      assert response_schema == "#/components/schemas/" <> page_schema
+    },
+  )
+  assert string.contains(body, "resource-scoped base64url keyset cursor")
+  assert string.contains(body, "bound to the collection and active filters")
+}
+
 fn documented_operations(body: String) -> List(Operation) {
   let assert Ok(paths) =
     json.parse(body, {

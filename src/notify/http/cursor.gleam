@@ -36,6 +36,54 @@ pub fn decode(encoded: String, resource: String) -> Result(Int, Error) {
   }
 }
 
+pub fn encode_key(resource: String, key: String) -> String {
+  let payload = "v1k:" <> encode_segment(resource) <> ":" <> encode_segment(key)
+  encode_segment(payload)
+}
+
+pub fn decode_key(encoded: String, resource: String) -> Result(String, Error) {
+  case string.length(encoded) >= 1 && string.length(encoded) <= 512 {
+    False -> Error(InvalidCursor)
+    True -> decode_key_payload(encoded, resource)
+  }
+}
+
+fn decode_key_payload(
+  encoded: String,
+  resource: String,
+) -> Result(String, Error) {
+  case decode_segment(encoded) {
+    Error(_) -> Error(InvalidCursor)
+    Ok(payload) ->
+      case string.split(payload, ":") {
+        ["v1k", encoded_resource, encoded_key] ->
+          case decode_segment(encoded_resource), decode_segment(encoded_key) {
+            Ok(found_resource), Ok(key)
+              if found_resource == resource && key != ""
+            ->
+              case encode_key(resource, key) == encoded {
+                True -> Ok(key)
+                False -> Error(InvalidCursor)
+              }
+            _, _ -> Error(InvalidCursor)
+          }
+        _ -> Error(InvalidCursor)
+      }
+  }
+}
+
+fn encode_segment(value: String) -> String {
+  value
+  |> bit_array.from_string
+  |> bit_array.base64_url_encode(False)
+}
+
+fn decode_segment(value: String) -> Result(String, Nil) {
+  value
+  |> bit_array.base64_url_decode
+  |> result_to_string
+}
+
 fn result_to_string(value: Result(BitArray, Nil)) -> Result(String, Nil) {
   case value {
     Error(error) -> Error(error)

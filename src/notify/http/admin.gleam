@@ -46,6 +46,16 @@ type GrantRequest {
   )
 }
 
+type KeysetRequest {
+  KeysetRequest(resource: String, limit: Int, after: Option(String))
+}
+
+type DeliveryFilter {
+  AllDeliveryJobs
+  WebPushDeliveryJobs
+  MobileRelayDeliveryJobs
+}
+
 pub fn route(
   req: Request(BitArray),
   runtime: Runtime,
@@ -450,29 +460,14 @@ fn audit_unavailable() -> Response(BitArray) {
 }
 
 fn list_users(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
-  case access.list_users(runtime.access) {
-    Error(_) -> problem(503, "Users unavailable", "Could not list users")
-    Ok(users) -> {
-      let limit = page_limit(req)
-      let after = query(req, "cursor")
-      let selected = case after {
-        None -> users
-        Some(cursor) ->
-          list.filter(users, fn(user) {
-            string.compare(user.username, cursor) == order.Gt
-          })
+  case keyset_request(req, "users") {
+    Error(_) -> invalid_page()
+    Ok(page) ->
+      case access.list_users(runtime.access) {
+        Error(_) -> problem(503, "Users unavailable", "Could not list users")
+        Ok(users) ->
+          keyset_response(page, users, fn(user) { user.username }, user_json)
       }
-      let page = list.take(selected, limit)
-      let next_cursor = case list.length(selected) > limit {
-        False -> None
-        True ->
-          page
-          |> list.last
-          |> result.map(fn(user) { user.username })
-          |> option_from_result
-      }
-      page_response(page, next_cursor, user_json)
-    }
   }
 }
 
@@ -555,13 +550,25 @@ fn change_password(
 fn list_tokens(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
   case query(req, "username") {
     None -> problem(400, "Username required", "Pass ?username=<name>")
-    Some(username) ->
-      case access.list_tokens(runtime.access, username) {
-        Ok(tokens) -> page_response(tokens, None, stored_token_json)
-        Error(access.IdentityError(identity.NotFound)) ->
-          problem(404, "User not found", "No user has that username")
-        Error(_) -> problem(503, "Tokens unavailable", "Could not list tokens")
+    Some(username) -> {
+      case keyset_request(req, "tokens:" <> username) {
+        Error(_) -> invalid_page()
+        Ok(page) ->
+          case access.list_tokens(runtime.access, username) {
+            Ok(tokens) ->
+              keyset_response(
+                page,
+                tokens,
+                fn(token) { token.id },
+                stored_token_json,
+              )
+            Error(access.IdentityError(identity.NotFound)) ->
+              problem(404, "User not found", "No user has that username")
+            Error(_) ->
+              problem(503, "Tokens unavailable", "Could not list tokens")
+          }
       }
+    }
   }
 }
 
@@ -618,9 +625,19 @@ fn revoke_token(id: String, runtime: Runtime) -> Response(BitArray) {
 }
 
 fn list_acl(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
-  case access.list_grants(runtime.access, query(req, "username")) {
-    Ok(rules) -> page_response(rules, None, rule_json)
-    Error(_) -> problem(503, "ACL unavailable", "Could not list access rules")
+  let username = query(req, "username")
+  let resource = case username {
+    None -> "acl:all"
+    Some(username) -> "acl:user:" <> username
+  }
+  case keyset_request(req, resource) {
+    Error(_) -> invalid_page()
+    Ok(page) ->
+      case access.list_grants(runtime.access, username) {
+        Ok(rules) -> keyset_response(page, rules, rule_key, rule_json)
+        Error(_) ->
+          problem(503, "ACL unavailable", "Could not list access rules")
+      }
   }
 }
 
@@ -845,31 +862,71 @@ fn list_delivery_jobs(
   req: Request(BitArray),
   runtime: Runtime,
 ) -> Response(BitArray) {
-  case runtime.deliveries {
-    None -> page_response([], None, delivery_job_json)
-    Some(store) -> {
-      let selected = case query(req, "kind") {
-        Some("webpush") -> store.list(delivery.WebPush)
-        Some("mobile_relay") | Some("relay") -> store.list(delivery.MobileRelay)
-        Some(_) -> Error(delivery.NotFound)
-        None ->
-          case store.list(delivery.WebPush), store.list(delivery.MobileRelay) {
-            Ok(webpush), Ok(relay) -> Ok(list.append(webpush, relay))
-            Error(error), _ | _, Error(error) -> Error(error)
+  case delivery_filter(req) {
+    Error(_) ->
+      problem(400, "Invalid delivery kind", "Use webpush or mobile_relay")
+    Ok(filter) ->
+      case keyset_request(req, delivery_resource(filter)) {
+        Error(_) -> invalid_page()
+        Ok(page) ->
+          case runtime.deliveries {
+            None ->
+              keyset_response(
+                page,
+                [],
+                fn(job: delivery.Job) { job.id },
+                delivery_job_json,
+              )
+            Some(store) ->
+              case selected_delivery_jobs(store, filter) {
+                Ok(jobs) ->
+                  keyset_response(
+                    page,
+                    jobs,
+                    fn(job) { job.id },
+                    delivery_job_json,
+                  )
+                Error(_) ->
+                  problem(
+                    503,
+                    "Delivery outbox unavailable",
+                    "Could not list durable delivery jobs",
+                  )
+              }
           }
       }
-      case selected {
-        Ok(jobs) -> page_response(jobs, None, delivery_job_json)
-        Error(delivery.NotFound) ->
-          problem(400, "Invalid delivery kind", "Use webpush or mobile_relay")
-        Error(_) ->
-          problem(
-            503,
-            "Delivery outbox unavailable",
-            "Could not list durable delivery jobs",
-          )
+  }
+}
+
+fn delivery_filter(req: Request(body)) -> Result(DeliveryFilter, Nil) {
+  case query(req, "kind") {
+    None -> Ok(AllDeliveryJobs)
+    Some("webpush") -> Ok(WebPushDeliveryJobs)
+    Some("mobile_relay") | Some("relay") -> Ok(MobileRelayDeliveryJobs)
+    Some(_) -> Error(Nil)
+  }
+}
+
+fn delivery_resource(filter: DeliveryFilter) -> String {
+  case filter {
+    AllDeliveryJobs -> "delivery_jobs:all"
+    WebPushDeliveryJobs -> "delivery_jobs:webpush"
+    MobileRelayDeliveryJobs -> "delivery_jobs:mobile_relay"
+  }
+}
+
+fn selected_delivery_jobs(
+  store: delivery.Store,
+  filter: DeliveryFilter,
+) -> Result(List(delivery.Job), delivery.Error) {
+  case filter {
+    WebPushDeliveryJobs -> store.list(delivery.WebPush)
+    MobileRelayDeliveryJobs -> store.list(delivery.MobileRelay)
+    AllDeliveryJobs ->
+      case store.list(delivery.WebPush), store.list(delivery.MobileRelay) {
+        Ok(webpush), Ok(relay) -> Ok(list.append(webpush, relay))
+        Error(error), _ | _, Error(error) -> Error(error)
       }
-    }
   }
 }
 
@@ -959,36 +1016,33 @@ fn list_attachments(
   req: Request(BitArray),
   runtime: Runtime,
 ) -> Response(BitArray) {
-  case runtime.attachments {
-    None -> page_response([], None, attachment_json)
-    Some(store) ->
-      case store.list() {
-        Error(_) ->
-          problem(
-            503,
-            "Attachments unavailable",
-            "Could not list attachment metadata",
+  case keyset_request(req, "attachments") {
+    Error(_) -> invalid_page()
+    Ok(page) ->
+      case runtime.attachments {
+        None ->
+          keyset_response(
+            page,
+            [],
+            fn(item: attachment_store.Stored) { item.key },
+            attachment_json,
           )
-        Ok(items) -> {
-          let limit = page_limit(req)
-          let selected = case query(req, "cursor") {
-            None -> items
-            Some(cursor) ->
-              list.filter(items, fn(item) {
-                string.compare(item.key, cursor) == order.Gt
-              })
+        Some(store) ->
+          case store.list() {
+            Error(_) ->
+              problem(
+                503,
+                "Attachments unavailable",
+                "Could not list attachment metadata",
+              )
+            Ok(items) ->
+              keyset_response(
+                page,
+                items,
+                fn(item) { item.key },
+                attachment_json,
+              )
           }
-          let page = list.take(selected, limit)
-          let next_cursor = case list.length(selected) > limit {
-            False -> None
-            True ->
-              page
-              |> list.last
-              |> result.map(fn(item) { item.key })
-              |> option_from_result
-          }
-          page_response(page, next_cursor, attachment_json)
-        }
       }
   }
 }
@@ -1118,6 +1172,63 @@ fn rule_json(rule: acl.Rule) -> json.Json {
   ])
 }
 
+fn rule_key(rule: acl.Rule) -> String {
+  rule.username <> "\t" <> rule.topic_pattern
+}
+
+fn keyset_request(
+  req: Request(body),
+  resource: String,
+) -> Result(KeysetRequest, Nil) {
+  use limit <- result.try(strict_page_limit(req))
+  use after <- result.try(case query(req, "cursor") {
+    None -> Ok(None)
+    Some(encoded) ->
+      cursor.decode_key(encoded, resource)
+      |> result.map(Some)
+      |> result.map_error(fn(_) { Nil })
+  })
+  Ok(KeysetRequest(resource:, limit:, after:))
+}
+
+fn keyset_response(
+  paging: KeysetRequest,
+  items: List(a),
+  key: fn(a) -> String,
+  encode: fn(a) -> json.Json,
+) -> Response(BitArray) {
+  let KeysetRequest(resource:, limit:, after:) = paging
+  let sorted =
+    list.sort(items, by: fn(left, right) {
+      string.compare(key(left), key(right))
+    })
+  let selected = case after {
+    None -> sorted
+    Some(after) ->
+      list.filter(sorted, fn(item) {
+        string.compare(key(item), after) == order.Gt
+      })
+  }
+  let items = list.take(selected, limit)
+  let next_cursor = case list.length(selected) > limit {
+    False -> None
+    True ->
+      items
+      |> list.last
+      |> result.map(fn(item) { cursor.encode_key(resource, key(item)) })
+      |> option_from_result
+  }
+  page_response(items, next_cursor, encode)
+}
+
+fn invalid_page() -> Response(BitArray) {
+  problem(
+    400,
+    "Invalid page",
+    "Use a limit from 1 to 100 and an unmodified cursor from this collection",
+  )
+}
+
 fn page_response(
   items: List(a),
   next_cursor: Option(String),
@@ -1130,13 +1241,6 @@ fn page_response(
       #("next_cursor", json.nullable(next_cursor, json.string)),
     ]),
   )
-}
-
-fn page_limit(req: Request(body)) -> Int {
-  case query(req, "limit") |> option_then_int {
-    Some(limit) if limit >= 1 && limit <= 100 -> limit
-    _ -> 50
-  }
 }
 
 fn query(req: Request(body), name: String) -> Option(String) {
@@ -1198,13 +1302,6 @@ fn option_from_result(value: Result(a, Nil)) -> Option(a) {
   case value {
     Ok(value) -> Some(value)
     Error(_) -> None
-  }
-}
-
-fn option_then_int(value: Option(String)) -> Option(Int) {
-  case value {
-    Some(value) -> int.parse(value) |> option_from_result
-    None -> None
   }
 }
 

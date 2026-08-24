@@ -73,14 +73,29 @@ fully refilled inactive entries. Active-active mode stores them in
 across nodes, and the indexed stale-row cleanup bounds retained subjects. All
 nodes must use the same capacities and refill period.
 
+## Management collection pagination
+
+`GET /api/v1/users`, `/tokens`, `/acl`, `/delivery-jobs`, and `/attachments`
+use the same keyset page envelope as audit: `items` and `next_cursor`. The
+default limit is 50 and the maximum is 100. Limits outside 1–100, malformed or
+non-canonical cursors, cursors from another collection, and cursors issued for
+different username/kind filters fail with HTTP 400.
+
+Cursors are opaque canonical base64url values. Ordering keys are username for
+users, token ID within a username, username/topic-pattern for ACL rules, job ID
+within a delivery-kind filter, and content hash for attachments. The current
+identity, delivery, and attachment store ports still return complete metadata
+sets before the HTTP keyset slice is applied; pushing these pages into their
+storage adapters remains necessary for very large administration inventories.
+
 ## Audit durability and redaction
 
 SQLite persists audit events in `audit_log`; PostgreSQL uses
 `notify_audit_log` with a cluster-wide sequence. Both stores are append-only at
-the application boundary and return newest-first keyset pages. The management
-API accepts a default limit of 50 and a maximum of 100, and binds its opaque
-base64url cursor to the audit resource so a cursor from another endpoint or an
-altered cursor is rejected with HTTP 400.
+the application boundary and return newest-first keyset pages. The audit cursor
+uses the same strict 50-default/100-maximum contract and is bound to the audit
+resource, so a cursor from another endpoint or a malformed/non-canonical cursor
+is rejected with HTTP 400.
 
 Before applying its idempotent migration, each adapter inspects an existing
 audit table for the required columns. An unsupported table is left unchanged
