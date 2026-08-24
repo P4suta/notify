@@ -1,7 +1,7 @@
 import gleam/bit_array
 import gleam/int
 import gleam/list
-import gleam/option.{type Option, None}
+import gleam/option.{type Option, None, Some}
 import gleam/string
 import notify/core/topic.{type Topic}
 
@@ -125,13 +125,18 @@ pub fn materialise(
     draft.message
     |> bit_array.from_string
     |> bit_array.byte_size
-  case message_bytes, valid_id(id), expires > now {
-    0, _, _ -> Error(EmptyMessage)
-    size, _, _ if size > max_message_bytes ->
+  let sequence_id_valid = case draft.sequence_id {
+    None -> True
+    Some(value) -> valid_sequence_id(value)
+  }
+  case message_bytes, valid_id(id), expires > now, sequence_id_valid {
+    0, _, _, _ -> Error(EmptyMessage)
+    size, _, _, _ if size > max_message_bytes ->
       Error(MessageTooLarge(max_message_bytes, size))
-    _, False, _ -> Error(InvalidId)
-    _, _, False -> Error(InvalidExpiry)
-    _, True, True ->
+    _, False, _, _ -> Error(InvalidId)
+    _, _, False, _ -> Error(InvalidExpiry)
+    _, _, _, False -> Error(InvalidSequenceId)
+    _, True, True, True ->
       Ok(Message(
         id:,
         time: now,
@@ -233,8 +238,18 @@ pub fn valid_id(value: String) -> Bool {
   })
 }
 
-fn valid_sequence_id(value: String) -> Bool {
-  string.length(value) > 0 && string.length(value) <= 64
+pub fn valid_sequence_id(value: String) -> Bool {
+  let length = string.length(value)
+  length > 0
+  && length <= 64
+  && value
+  |> string.to_graphemes
+  |> list.all(fn(character) {
+    string.contains(
+      "-_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+      character,
+    )
+  })
 }
 
 pub fn priority_from_int(value: Int) -> Result(Priority, ValidationError) {

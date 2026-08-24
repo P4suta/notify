@@ -54,6 +54,29 @@ pub fn message_ids_are_exactly_twelve_ascii_alphanumerics_test() {
   assert !message.valid_id("AbCdEf1234-_")
 }
 
+pub fn sequence_ids_use_the_pinned_ntfy_charset_and_length_test() {
+  let sixty_four =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+  assert message.valid_sequence_id("a")
+  assert message.valid_sequence_id("job_42-nightly")
+  assert message.valid_sequence_id(sixty_four)
+  assert !message.valid_sequence_id("")
+  assert !message.valid_sequence_id(sixty_four <> "a")
+  assert !message.valid_sequence_id("invalid*sequence")
+  assert !message.valid_sequence_id("invalid.sequence")
+  assert !message.valid_sequence_id("ジョブ42")
+}
+
+pub fn materialise_rejects_invalid_sequence_parameters_test() {
+  let invalid =
+    message.Draft(
+      ..message.plaintext_draft(fixture_topic(), "Backup complete"),
+      sequence_id: Some("invalid*sequence"),
+    )
+  let assert Error(message.InvalidSequenceId) =
+    message.materialise(invalid, id: "AbCdEf1234XY", now: 1, expires: 2)
+}
+
 pub fn message_body_is_limited_to_four_kibibytes_test() {
   let draft =
     message.plaintext_draft(fixture_topic(), string.repeat("a", times: 4096))

@@ -240,6 +240,81 @@ pub fn sequence_id_short_alias_is_supported_test() {
   assert value.sequence_id == option.Some("nightly-43")
 }
 
+pub fn invalid_sequence_parameter_uses_ntfy_40049_error_test() {
+  let runtime = test_runtime()
+  let too_long =
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+  let header_response =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/jobs")
+    |> request.set_header("x-sequence-id", too_long)
+    |> request.set_body(<<"Backup running":utf8>>)
+    |> router.handle(runtime)
+  assert header_response.status == 400
+  assert string.contains(body(header_response), "\"code\":40049")
+  assert string.contains(
+    body(header_response),
+    "invalid request: sequence ID invalid",
+  )
+
+  let query_response =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/jobs")
+    |> request.set_query([#("sequence-id", "invalid*sequence")])
+    |> request.set_body(<<"Backup running":utf8>>)
+    |> router.handle(runtime)
+  assert query_response.status == 400
+  assert string.contains(body(query_response), "\"code\":40049")
+
+  let json_response =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/")
+    |> request.set_header("content-type", "application/json")
+    |> request.set_body(<<
+      "{\"topic\":\"jobs\",\"message\":\"Backup running\",\"sequence_id\":\"invalid*sequence\"}":utf8,
+    >>)
+    |> router.handle(runtime)
+  assert json_response.status == 400
+  assert string.contains(body(json_response), "\"code\":40049")
+}
+
+pub fn invalid_sequence_path_is_a_route_miss_like_ntfy_test() {
+  let runtime = test_runtime()
+  let too_long =
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+  let delete_response =
+    request.new()
+    |> request.set_method(http.Delete)
+    |> request.set_path("/jobs/" <> too_long)
+    |> request.set_body(<<>>)
+    |> router.handle(runtime)
+  assert delete_response.status == 404
+  assert string.contains(body(delete_response), "\"code\":40401")
+
+  let update_response =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/jobs/invalid*sequence")
+    |> request.set_body(<<"Backup running":utf8>>)
+    |> router.handle(runtime)
+  assert update_response.status == 404
+  assert string.contains(body(update_response), "\"code\":40401")
+
+  let clear_response =
+    request.new()
+    |> request.set_method(http.Put)
+    |> request.set_path("/jobs/invalid*sequence/clear")
+    |> request.set_body(<<>>)
+    |> router.handle(runtime)
+  assert clear_response.status == 404
+  assert string.contains(body(clear_response), "\"code\":40401")
+}
+
 pub fn cache_disabled_message_is_committed_but_not_returned_by_poll_test() {
   let runtime = test_runtime()
   let publish =

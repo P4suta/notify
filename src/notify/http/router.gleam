@@ -108,41 +108,53 @@ fn handle_protocol(
     Head, ["file", topic, key] -> download(req, topic, key, None, True, runtime)
     Post, ["api", "v1", "setup"] -> setup(req, runtime)
     Put, [topic, sequence_id, action] if action == "clear" || action == "read" ->
-      publish_control(
-        req,
-        topic,
-        sequence_id,
-        message.MessageClearEvent,
-        runtime,
-      )
+      with_valid_sequence_path(sequence_id, fn() {
+        publish_control(
+          req,
+          topic,
+          sequence_id,
+          message.MessageClearEvent,
+          runtime,
+        )
+      })
     Get, [topic, sequence_id, action] if action == "clear" || action == "read" ->
-      publish_control(
-        req,
-        topic,
-        sequence_id,
-        message.MessageClearEvent,
-        runtime,
-      )
+      with_valid_sequence_path(sequence_id, fn() {
+        publish_control(
+          req,
+          topic,
+          sequence_id,
+          message.MessageClearEvent,
+          runtime,
+        )
+      })
     Delete, [topic, sequence_id] ->
-      publish_control(
-        req,
-        topic,
-        sequence_id,
-        message.MessageDeleteEvent,
-        runtime,
-      )
+      with_valid_sequence_path(sequence_id, fn() {
+        publish_control(
+          req,
+          topic,
+          sequence_id,
+          message.MessageDeleteEvent,
+          runtime,
+        )
+      })
     Get, [topic, sequence_id, "delete"] ->
-      publish_control(
-        req,
-        topic,
-        sequence_id,
-        message.MessageDeleteEvent,
-        runtime,
-      )
+      with_valid_sequence_path(sequence_id, fn() {
+        publish_control(
+          req,
+          topic,
+          sequence_id,
+          message.MessageDeleteEvent,
+          runtime,
+        )
+      })
     Post, [topic, sequence_id] ->
-      publish_update(req, topic, sequence_id, runtime)
+      with_valid_sequence_path(sequence_id, fn() {
+        publish_update(req, topic, sequence_id, runtime)
+      })
     Put, [topic, sequence_id] ->
-      publish_update(req, topic, sequence_id, runtime)
+      with_valid_sequence_path(sequence_id, fn() {
+        publish_update(req, topic, sequence_id, runtime)
+      })
     Post, [topic] -> publish_plaintext(req, topic, runtime)
     Put, [topic] -> publish_plaintext(req, topic, runtime)
     Post, [] -> publish_json(req, runtime)
@@ -521,6 +533,16 @@ fn publish_update(
           }
         }
       })
+  }
+}
+
+fn with_valid_sequence_path(
+  sequence_id: String,
+  handler: fn() -> Response(BitArray),
+) -> Response(BitArray) {
+  case message.valid_sequence_id(sequence_id) {
+    True -> handler()
+    False -> page_not_found()
   }
 }
 
@@ -1002,6 +1024,13 @@ fn publish_draft(draft: Draft, runtime: Runtime) -> Response(BitArray) {
   case service.publish(draft, runtime) {
     Ok(message) ->
       json_response(200, message_json.encode(message) |> json.to_string)
+    Error(service.InvalidMessage(message.InvalidSequenceId)) ->
+      ntfy_error(
+        400,
+        40_049,
+        "invalid request: sequence ID invalid",
+        "https://ntfy.sh/docs/publish/#updating-deleting-notifications",
+      )
     Error(service.InvalidMessage(_)) ->
       ntfy_error(400, 40_000, "invalid request", "")
     Error(service.InvalidDelay(error)) -> delay_error(error)
