@@ -278,6 +278,7 @@ explicitly configured PostgreSQL, S3, Web Push endpoints, and mobile relay.
 gleam format --check src test packages/notify_core/src packages/notify_core/test
 test/lint.sh
 test/security_lint.sh
+python3 test/check_licenses.py --root .
 gleam test
 (cd packages/notify_core && gleam test)
 (cd packages/notify_core && gleam run -m gleam_mutants -- run --strict)
@@ -285,6 +286,9 @@ gleam test
 (cd web && gleam test)
 gleam export erlang-shipment
 docker build --check .
+docker build --tag notify:security .
+test/vulnerability_scan.sh notify:security
+test/generate_sbom.sh notify:security /tmp/notify-sbom
 ```
 
 `test/security_lint.sh` runs actionlint, hadolint, ShellCheck, zizmor, and
@@ -295,11 +299,24 @@ working-tree Gitleaks scan; source, configuration, fixtures, and workflows
 remain in scope. Dependabot applies a seven-day cooldown to routine version
 updates; Dependabot security updates are not delayed by that setting.
 
-The `Supply-chain lint / Static supply-chain policy` job is a required-check
-candidate. Add it to the repository ruleset only after its exact check name has
-completed successfully on GitHub Actions. This gate does not claim CodeQL
-coverage for Gleam or Erlang, and vulnerability, image, SBOM, and license gates
-remain separate production-readiness work.
+The `Supply-chain lint / Static supply-chain policy`,
+`Supply-chain security / Vulnerability, license, and SBOM`, and CodeQL jobs are
+required-check candidates. Add each exact check name to the repository ruleset
+only after it has completed successfully on GitHub Actions. CodeQL intentionally
+analyzes only JavaScript/TypeScript and GitHub Actions; this project does not
+claim CodeQL coverage for Gleam or Erlang.
+
+The supply-chain security gate converts all locked Gleam, npm, Mix, exact Mix
+archive, and pinned Git dependencies to one strict inventory. It scans that
+inventory with OSV-Scanner and scans both the source tree and locally built
+runtime image with Trivy. It
+generates and validates separate CycloneDX source and image SBOMs. CI retains
+those workflow artifacts for three days; it does not attach them to a release
+or publish them externally. `supply-chain/locked-licenses.json` is reviewed and
+checked against the allowlist and NOTICE requirements. Refresh it deliberately
+with `python3 test/refresh_locked_licenses.py --root .` after changing a lock
+file; the refresh verifies Hex tarball checksums and fails rather than guessing
+when structured license metadata is unavailable.
 
 The core suite includes deterministic, shrinking property tests for topic,
 priority, delay, JSON codec, and ACL invariants. Accepted Birdie snapshots pin

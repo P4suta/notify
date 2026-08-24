@@ -7,7 +7,7 @@ defmodule Notify.MixProject do
       version: "0.1.0",
       elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
-      archives: [mix_gleam: "~> 0.6"],
+      archives: [mix_gleam: "== 0.6.2"],
       compilers: [:gleam | Mix.compilers()],
       aliases: ["deps.get": ["deps.get", "gleam.deps.get"]],
       erlc_paths: [

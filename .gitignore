@@ -17,3 +17,5 @@
 /deps
 /burrito_out
 /.elixir_ls
+__pycache__/
+*.py[cod]

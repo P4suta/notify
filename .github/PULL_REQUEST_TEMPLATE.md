@@ -8,6 +8,9 @@ Describe the user-visible behavior and the reason for the change.
 - [ ] `gleam format --check src test packages/notify_core/src packages/notify_core/test`
 - [ ] `test/lint.sh`
 - [ ] `test/security_lint.sh`
+- [ ] `python3 test/check_licenses.py --root .`
+- [ ] `test/vulnerability_scan.sh [local-image-reference]`
+- [ ] `test/generate_sbom.sh local-image-reference output-directory`
 - [ ] `gleam test`
 - [ ] `(cd packages/notify_core && gleam test)`
 - [ ] `(cd web && gleam test)`
