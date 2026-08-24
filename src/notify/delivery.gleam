@@ -43,10 +43,30 @@ pub type Job {
   )
 }
 
+pub type Summary {
+  Summary(
+    id: String,
+    kind: Kind,
+    message_id: String,
+    topic_hash: String,
+    state: State,
+    attempts: Int,
+    available_at: Int,
+    lease_owner: Option(String),
+    lease_until: Option(Int),
+    last_error: Option(String),
+  )
+}
+
+pub type Page(a) {
+  Page(items: List(a), has_more: Bool)
+}
+
 pub type Error {
   NotFound
   Conflict
   LeaseLost
+  InvalidPage
   Unavailable(String)
 }
 
@@ -70,6 +90,7 @@ pub type Store {
     requeue: fn(String, Int) -> Result(Job, Error),
     purge: fn(String) -> Result(Nil, Error),
     list: fn(Kind) -> Result(List(Job), Error),
+    page: fn(Option(Kind), Option(String), Int) -> Result(Page(Summary), Error),
     stats: fn() -> Result(Stats, Error),
     health: fn() -> Result(Nil, Error),
   )
@@ -89,6 +110,21 @@ pub fn job_from_new(job: NewJob) -> Job {
     lease_owner: option.None,
     lease_until: option.None,
     last_error: option.None,
+  )
+}
+
+pub fn summary(job: Job) -> Summary {
+  Summary(
+    id: job.id,
+    kind: job.kind,
+    message_id: job.message_id,
+    topic_hash: job.topic_hash,
+    state: job.state,
+    attempts: job.attempts,
+    available_at: job.available_at,
+    lease_owner: job.lease_owner,
+    lease_until: job.lease_until,
+    last_error: job.last_error,
   )
 }
 

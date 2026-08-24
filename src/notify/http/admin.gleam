@@ -885,7 +885,8 @@ fn list_delivery_jobs(
     Ok(filter) ->
       case keyset_request(req, delivery_resource(filter)) {
         Error(_) -> invalid_page()
-        Ok(page) ->
+        Ok(page) -> {
+          let KeysetRequest(after:, limit:, ..) = page
           case runtime.deliveries {
             None ->
               keyset_response(
@@ -895,14 +896,15 @@ fn list_delivery_jobs(
                 delivery_job_json,
               )
             Some(store) ->
-              case selected_delivery_jobs(store, filter) {
+              case store.page(delivery_filter_kind(filter), after, limit) {
                 Ok(jobs) ->
-                  keyset_response(
+                  delivery_keyset_response(
                     page,
                     jobs,
                     fn(job) { job.id },
-                    delivery_job_json,
+                    delivery_summary_json,
                   )
+                Error(delivery.InvalidPage) -> invalid_page()
                 Error(_) ->
                   problem(
                     503,
@@ -911,6 +913,7 @@ fn list_delivery_jobs(
                   )
               }
           }
+        }
       }
   }
 }
@@ -932,22 +935,30 @@ fn delivery_resource(filter: DeliveryFilter) -> String {
   }
 }
 
-fn selected_delivery_jobs(
-  store: delivery.Store,
-  filter: DeliveryFilter,
-) -> Result(List(delivery.Job), delivery.Error) {
+fn delivery_filter_kind(filter: DeliveryFilter) -> Option(delivery.Kind) {
   case filter {
-    WebPushDeliveryJobs -> store.list(delivery.WebPush)
-    MobileRelayDeliveryJobs -> store.list(delivery.MobileRelay)
-    AllDeliveryJobs ->
-      case store.list(delivery.WebPush), store.list(delivery.MobileRelay) {
-        Ok(webpush), Ok(relay) -> Ok(list.append(webpush, relay))
-        Error(error), _ | _, Error(error) -> Error(error)
-      }
+    AllDeliveryJobs -> None
+    WebPushDeliveryJobs -> Some(delivery.WebPush)
+    MobileRelayDeliveryJobs -> Some(delivery.MobileRelay)
   }
 }
 
 fn delivery_job_json(job: delivery.Job) -> json.Json {
+  json.object([
+    #("id", json.string(job.id)),
+    #("kind", json.string(delivery_kind_string(job.kind))),
+    #("message_id", json.string(job.message_id)),
+    #("topic_hash", json.string(job.topic_hash)),
+    #("state", json.string(delivery_state_string(job.state))),
+    #("attempts", json.int(job.attempts)),
+    #("available_at", json.int(job.available_at)),
+    #("lease_owner", json.nullable(job.lease_owner, json.string)),
+    #("lease_until", json.nullable(job.lease_until, json.int)),
+    #("last_error", json.nullable(job.last_error, json.string)),
+  ])
+}
+
+fn delivery_summary_json(job: delivery.Summary) -> json.Json {
   json.object([
     #("id", json.string(job.id)),
     #("kind", json.string(delivery_kind_string(job.kind))),
@@ -1267,6 +1278,25 @@ fn stored_keyset_response(
 ) -> Response(BitArray) {
   let KeysetRequest(resource:, ..) = paging
   let identity.Page(items:, has_more:) = stored
+  let next_cursor = case has_more {
+    False -> None
+    True ->
+      items
+      |> list.last
+      |> result.map(fn(item) { cursor.encode_key(resource, key(item)) })
+      |> option_from_result
+  }
+  page_response(items, next_cursor, encode)
+}
+
+fn delivery_keyset_response(
+  paging: KeysetRequest,
+  stored: delivery.Page(a),
+  key: fn(a) -> String,
+  encode: fn(a) -> json.Json,
+) -> Response(BitArray) {
+  let KeysetRequest(resource:, ..) = paging
+  let delivery.Page(items:, has_more:) = stored
   let next_cursor = case has_more {
     False -> None
     True ->

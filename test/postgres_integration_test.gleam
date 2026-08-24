@@ -113,6 +113,18 @@ fn fixture_on_topic(
   message.Message(..fixture(id, scheduled, timestamp), topic: parsed_topic)
 }
 
+fn delivery_fixture(id: String, kind: delivery.Kind) -> delivery.NewJob {
+  delivery.NewJob(
+    id:,
+    kind:,
+    endpoint: "https://relay.example",
+    payload: <<"{}":utf8>>,
+    message_id: "PgStore001XY",
+    topic_hash: "hash",
+    available_at: 100,
+  )
+}
+
 pub fn postgres_audit_is_shared_and_keyset_paginated_test() {
   case test_database() {
     Error(_) -> Nil
@@ -660,16 +672,20 @@ pub fn postgres_delivery_webpush_and_rate_limit_contract_test() {
       let TestDatabase(configuration:, ..) = database
 
       let assert Ok(outbox) = delivery_postgres.start(configuration)
+      let assert Ok(index_connection) = postgleam.connect(configuration)
+      let assert Ok(1) =
+        postgleam.query_one(
+          index_connection,
+          "SELECT COUNT(*)::bigint FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'notify_delivery_outbox_kind_id'",
+          [],
+          {
+            use count <- decode.element(0, decode.int)
+            decode.success(count)
+          },
+        )
+      postgleam.disconnect(index_connection)
       let assert Ok(_) =
-        outbox.enqueue(delivery.NewJob(
-          id: "postgres-job",
-          kind: delivery.MobileRelay,
-          endpoint: "https://relay.example",
-          payload: <<"{}":utf8>>,
-          message_id: "PgStore001XY",
-          topic_hash: "hash",
-          available_at: 100,
-        ))
+        outbox.enqueue(delivery_fixture("postgres-job", delivery.MobileRelay))
       let assert Ok([claimed]) =
         outbox.claim(delivery.MobileRelay, "node-a", 100, 30, 1)
       assert claimed.lease_until == Some(130)
@@ -687,6 +703,31 @@ pub fn postgres_delivery_webpush_and_rate_limit_contract_test() {
         outbox.fail(claimed_again.id, "node-b", 201, "HTTP 503", 1, 10)
       assert outbox.purge(claimed.id) == Ok(Nil)
       assert outbox.list(delivery.MobileRelay) == Ok([])
+
+      list.each(
+        [
+          delivery_fixture("page-c", delivery.MobileRelay),
+          delivery_fixture("page-a", delivery.MobileRelay),
+          delivery_fixture("page-b", delivery.WebPush),
+        ],
+        fn(job) {
+          let assert Ok(_) = outbox.enqueue(job)
+        },
+      )
+      let assert Ok(delivery.Page([first_job, second_job], True)) =
+        outbox.page(None, None, 2)
+      assert [first_job.id, second_job.id] == ["page-a", "page-b"]
+      let assert Ok(delivery.Page([last_job], False)) =
+        outbox.page(None, Some(second_job.id), 2)
+      assert last_job.id == "page-c"
+      let assert Ok(delivery.Page([first_relay], True)) =
+        outbox.page(Some(delivery.MobileRelay), None, 1)
+      assert first_relay.id == "page-a"
+      let assert Ok(delivery.Page([second_relay], False)) =
+        outbox.page(Some(delivery.MobileRelay), Some(first_relay.id), 1)
+      assert second_relay.id == "page-c"
+      assert outbox.page(None, None, 0) == Error(delivery.InvalidPage)
+      assert outbox.page(None, None, 101) == Error(delivery.InvalidPage)
 
       let assert Ok(webpush_store) =
         webpush_postgres.start(configuration, max_endpoints_per_ip: 10)

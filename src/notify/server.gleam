@@ -760,6 +760,7 @@ pub fn error_message(error: Error) -> String {
     DeliveryStartError(delivery.NotFound) -> "delivery outbox record not found"
     DeliveryStartError(delivery.Conflict) -> "delivery outbox conflict"
     DeliveryStartError(delivery.LeaseLost) -> "delivery outbox lease lost"
+    DeliveryStartError(delivery.InvalidPage) -> "delivery outbox page invalid"
     DeliveryStartError(delivery.Unavailable(detail)) ->
       "delivery outbox unavailable: " <> detail
     WebPushStartError(webpush.InvalidSubscription) ->

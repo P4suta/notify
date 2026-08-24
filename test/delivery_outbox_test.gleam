@@ -115,6 +115,44 @@ pub fn sqlite_outbox_supports_manual_requeue_purge_and_stats_test() {
   management_contract(outbox)
 }
 
+fn management_page_contract(outbox: delivery.Store) {
+  let fixtures = [
+    delivery.NewJob(..pending("job-c"), kind: delivery.MobileRelay),
+    delivery.NewJob(..pending("job-a"), kind: delivery.MobileRelay),
+    delivery.NewJob(..pending("job-b"), kind: delivery.WebPush),
+  ]
+  list.each(fixtures, fn(job) {
+    let assert Ok(_) = outbox.enqueue(job)
+  })
+
+  let assert Ok(delivery.Page([first, second], True)) =
+    outbox.page(None, None, 2)
+  assert [first.id, second.id] == ["job-a", "job-b"]
+  let assert Ok(delivery.Page([last], False)) =
+    outbox.page(None, Some(second.id), 2)
+  assert last.id == "job-c"
+
+  let assert Ok(delivery.Page([first_relay], True)) =
+    outbox.page(Some(delivery.MobileRelay), None, 1)
+  assert first_relay.id == "job-a"
+  let assert Ok(delivery.Page([second_relay], False)) =
+    outbox.page(Some(delivery.MobileRelay), Some(first_relay.id), 1)
+  assert second_relay.id == "job-c"
+
+  assert outbox.page(None, None, 0) == Error(delivery.InvalidPage)
+  assert outbox.page(None, None, 101) == Error(delivery.InvalidPage)
+}
+
+pub fn memory_outbox_management_pages_are_bounded_keysets_test() {
+  let assert Ok(outbox) = memory.start()
+  management_page_contract(outbox)
+}
+
+pub fn sqlite_outbox_management_pages_are_bounded_keysets_test() {
+  let assert Ok(outbox) = sqlite.start(":memory:")
+  management_page_contract(outbox)
+}
+
 pub fn retry_backoff_has_bounded_deterministic_jitter_test() {
   let first = delivery.retry_delay_with_jitter(10, 1, "job-a")
   assert first == delivery.retry_delay_with_jitter(10, 1, "job-a")

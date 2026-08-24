@@ -1,8 +1,10 @@
 import gleam/erlang/process.{type Subject}
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
+import gleam/order
 import gleam/otp/actor
 import gleam/result
+import gleam/string
 import notify/delivery.{type Job, type Store}
 
 type Command {
@@ -28,6 +30,12 @@ type Command {
   Requeue(String, Int, Subject(Result(Job, delivery.Error)))
   Purge(String, Subject(Result(Nil, delivery.Error)))
   List(delivery.Kind, Subject(Result(List(Job), delivery.Error)))
+  Page(
+    Option(delivery.Kind),
+    Option(String),
+    Int,
+    Subject(Result(delivery.Page(delivery.Summary), delivery.Error)),
+  )
   Stats(Subject(Result(delivery.Stats, delivery.Error)))
   Health(Subject(Result(Nil, delivery.Error)))
 }
@@ -65,6 +73,11 @@ pub fn start() -> Result(Store, actor.StartError) {
       },
       list: fn(kind) {
         process.call(subject, 5000, fn(reply) { List(kind, reply) })
+      },
+      page: fn(kind, after, limit) {
+        process.call(subject, 5000, fn(reply) {
+          Page(kind, after, limit, reply)
+        })
       },
       stats: fn() { process.call(subject, 5000, Stats) },
       health: fn() { process.call(subject, 5000, Health) },
@@ -240,6 +253,10 @@ fn handle(jobs: List(Job), command: Command) -> actor.Next(List(Job), Command) {
       process.send(reply, Ok(list.filter(jobs, fn(job) { job.kind == kind })))
       actor.continue(jobs)
     }
+    Page(kind, after, limit, reply) -> {
+      process.send(reply, page_jobs(jobs, kind, after, limit))
+      actor.continue(jobs)
+    }
     Stats(reply) -> {
       process.send(reply, Ok(delivery.count(jobs)))
       actor.continue(jobs)
@@ -247,6 +264,37 @@ fn handle(jobs: List(Job), command: Command) -> actor.Next(List(Job), Command) {
     Health(reply) -> {
       process.send(reply, Ok(Nil))
       actor.continue(jobs)
+    }
+  }
+}
+
+fn page_jobs(
+  jobs: List(Job),
+  kind: Option(delivery.Kind),
+  after: Option(String),
+  limit: Int,
+) -> Result(delivery.Page(delivery.Summary), delivery.Error) {
+  case limit >= 1 && limit <= 100 {
+    False -> Error(delivery.InvalidPage)
+    True -> {
+      let selected =
+        jobs
+        |> list.filter(fn(job) {
+          let matches_kind = case kind {
+            None -> True
+            Some(kind) -> job.kind == kind
+          }
+          let follows_cursor = case after {
+            None -> True
+            Some(after) -> string.compare(job.id, after) == order.Gt
+          }
+          matches_kind && follows_cursor
+        })
+        |> list.sort(by: fn(left, right) { string.compare(left.id, right.id) })
+      Ok(delivery.Page(
+        items: selected |> list.take(limit) |> list.map(delivery.summary),
+        has_more: list.length(selected) > limit,
+      ))
     }
   }
 }

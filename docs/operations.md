@@ -86,10 +86,11 @@ users, token ID within a username, username/topic-pattern for ACL rules, job ID
 within a delivery-kind filter, and content hash for attachments. Identity
 pages execute indexed `LIMIT (requested + 1)` keyset queries in both SQLite
 and PostgreSQL, so users, tokens, and ACL rules are bounded at the storage
-boundary. Delivery and attachment store ports still return complete metadata
-sets before the HTTP keyset slice is applied; pushing those two pages into
-their storage adapters remains necessary for very large administration
-inventories.
+boundary. Delivery-job pages use the same bounded query strategy, including a
+`(kind, id)` index for filtered pages. The attachment store port still returns
+complete metadata sets before the HTTP keyset slice is applied; pushing that
+page into each attachment adapter remains necessary for very large
+administration inventories.
 
 ## Audit durability and redaction
 

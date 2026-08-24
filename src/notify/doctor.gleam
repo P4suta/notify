@@ -527,6 +527,7 @@ fn delivery_error(error: delivery.Error) -> String {
     delivery.NotFound -> "delivery job was not found"
     delivery.Conflict -> "delivery job conflicts with an existing record"
     delivery.LeaseLost -> "delivery worker lease was lost"
+    delivery.InvalidPage -> "delivery page is invalid"
     delivery.Unavailable(detail) -> detail
   }
 }
