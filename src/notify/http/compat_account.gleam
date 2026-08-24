@@ -1,4 +1,5 @@
 import gleam/bit_array
+import gleam/crypto
 import gleam/dynamic/decode
 import gleam/http.{Delete, Get, Patch, Post, Put}
 import gleam/http/request.{type Request}
@@ -147,52 +148,114 @@ fn account_get(
         Error(_) -> unavailable("storage unavailable")
         Ok(statistics) -> {
           let #(username, role) = principal_identity(principal)
-          let token_json = case principal {
-            acl.Anonymous -> []
-            acl.Authenticated(username, _) ->
-              access.list_tokens(runtime.access, username)
-              |> result.unwrap([])
-              |> list.map(stored_token_json)
+          case
+            account_user(principal, runtime.access),
+            account_tokens(principal, runtime.access)
+          {
+            Error(_), _ | _, Error(_) ->
+              unavailable("identity storage unavailable")
+            Ok(user), Ok(tokens) -> {
+              let identity_fields =
+                [
+                  #("username", json.string(username)),
+                  #("role", json.string(role)),
+                ]
+                |> append_sync_topic(user)
+                |> append_tokens(tokens)
+              json_response(
+                200,
+                json.object(
+                  list.append(identity_fields, [
+                    #(
+                      "limits",
+                      json.object([
+                        #("basis", json.string("ip")),
+                        #("messages", json.int(0)),
+                        #(
+                          "messages_expiry_duration",
+                          json.int(runtime.retention_seconds),
+                        ),
+                        #("emails", json.int(0)),
+                        #("calls", json.int(0)),
+                        #("reservations", json.int(0)),
+                        #(
+                          "attachment_total_size",
+                          json.int(runtime.attachment_total_size_bytes),
+                        ),
+                        #(
+                          "attachment_file_size",
+                          json.int(runtime.attachment_file_size_bytes),
+                        ),
+                        #(
+                          "attachment_expiry_duration",
+                          json.int(runtime.attachment_retention_seconds),
+                        ),
+                        #("attachment_bandwidth", json.int(0)),
+                      ]),
+                    ),
+                    #("stats", account_stats(statistics)),
+                  ]),
+                ),
+              )
+            }
           }
-          json_response(
-            200,
-            json.object([
-              #("username", json.string(username)),
-              #("role", json.string(role)),
-              #("tokens", json.array(token_json, fn(value) { value })),
-              #(
-                "limits",
-                json.object([
-                  #("basis", json.string("ip")),
-                  #("messages", json.int(0)),
-                  #(
-                    "messages_expiry_duration",
-                    json.int(runtime.retention_seconds),
-                  ),
-                  #("emails", json.int(0)),
-                  #("calls", json.int(0)),
-                  #("reservations", json.int(0)),
-                  #(
-                    "attachment_total_size",
-                    json.int(runtime.attachment_total_size_bytes),
-                  ),
-                  #(
-                    "attachment_file_size",
-                    json.int(runtime.attachment_file_size_bytes),
-                  ),
-                  #(
-                    "attachment_expiry_duration",
-                    json.int(runtime.attachment_retention_seconds),
-                  ),
-                  #("attachment_bandwidth", json.int(0)),
-                ]),
-              ),
-              #("stats", account_stats(statistics)),
-            ]),
-          )
         }
       }
   }
+}
+
+fn account_user(
+  principal: acl.Principal,
+  control: access.Access,
+) -> Result(Option(identity.User), access.Error) {
+  case principal {
+    acl.Anonymous -> Ok(None)
+    acl.Authenticated(username, _) ->
+      access.user_by_name(control, username) |> result.map(Some)
+  }
+}
+
+fn account_tokens(
+  principal: acl.Principal,
+  control: access.Access,
+) -> Result(List(identity.Token), access.Error) {
+  case principal {
+    acl.Anonymous -> Ok([])
+    acl.Authenticated(username, _) -> access.list_tokens(control, username)
+  }
+}
+
+fn append_sync_topic(
+  fields: List(#(String, json.Json)),
+  user: Option(identity.User),
+) -> List(#(String, json.Json)) {
+  case user {
+    None -> fields
+    Some(user) ->
+      list.append(fields, [#("sync_topic", json.string(sync_topic(user)))])
+  }
+}
+
+fn append_tokens(
+  fields: List(#(String, json.Json)),
+  tokens: List(identity.Token),
+) -> List(#(String, json.Json)) {
+  case tokens {
+    [] -> fields
+    tokens ->
+      list.append(fields, [
+        #("tokens", json.array(tokens, stored_token_json)),
+      ])
+  }
+}
+
+fn sync_topic(user: identity.User) -> String {
+  let digest =
+    user.id
+    |> bit_array.from_string
+    |> fn(value) { crypto.hash(crypto.Sha256, value) }
+    |> bit_array.base64_url_encode(False)
+  "st_" <> string.slice(digest, at_index: 0, length: 13)
 }
 
 fn account_stats(statistics: storage.Stats) -> json.Json {
@@ -775,6 +838,7 @@ fn stored_token_json(stored: identity.Token) -> json.Json {
     #("token", json.string(stored.prefix)),
     #("label", json.string(stored.label)),
     #("expires", json.nullable(stored.expires, json.int)),
+    #("last_access", json.nullable(stored.last_access, json.int)),
   ])
 }
 

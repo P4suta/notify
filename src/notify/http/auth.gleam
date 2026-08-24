@@ -29,16 +29,11 @@ pub fn check(
   )
   let principal = case access.authenticate(control, credentials, now) {
     Ok(principal) -> Ok(principal)
-    // ntfy treats an invalid credential on a topic endpoint as an anonymous
-    // request when the anonymous ACL permits the operation. Authentication-only
-    // endpoints continue to reject it through `authenticate` below.
-    Error(access.InvalidCredentials) ->
-      case authorize(control, acl.Anonymous, topics, operation) {
-        Ok(acl.Anonymous) -> Ok(acl.Anonymous)
-        Ok(_) -> Error(Unauthenticated)
-        Error(Forbidden) -> Error(Unauthenticated)
-        Error(error) -> Error(error)
-      }
+    // With authentication configured, ntfy rejects an explicitly invalid
+    // credential even when the anonymous ACL would permit the operation.
+    // OpenAccess already returns Anonymous above and therefore still ignores
+    // credentials exactly like an auth-disabled ntfy server.
+    Error(access.InvalidCredentials) -> Error(Unauthenticated)
     Error(access.SetupRequired) -> Error(SetupRequired)
     Error(_) -> Error(Unavailable)
   }

@@ -35,6 +35,8 @@ import notify/webpush
 
 const ntfy_docs = "https://ntfy.sh/docs/publish/"
 
+const auth_docs = "https://ntfy.sh/docs/publish/#authentication"
+
 pub fn handle(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
   let reply = case admin.route(req, runtime) {
     Some(reply) -> reply
@@ -458,7 +460,7 @@ fn with_webpush_authorization(
         Ok(principal) -> next(principal)
         Error(http_auth.MalformedCredentials)
         | Error(http_auth.Unauthenticated) ->
-          ntfy_error(401, 40_101, "unauthorized", ntfy_docs)
+          ntfy_error(401, 40_101, "unauthorized", auth_docs)
           |> response.set_header("www-authenticate", "Basic realm=\"notify\"")
         Error(http_auth.Forbidden) ->
           ntfy_error(403, 40_303, "forbidden", ntfy_docs)
@@ -1703,7 +1705,7 @@ fn with_authorization(
         Ok(_) -> next()
         Error(http_auth.MalformedCredentials)
         | Error(http_auth.Unauthenticated) ->
-          ntfy_error(401, 40_101, "unauthorized", ntfy_docs)
+          ntfy_error(401, 40_101, "unauthorized", auth_docs)
           |> response.set_header("www-authenticate", "Basic realm=\"notify\"")
         Error(http_auth.Forbidden) ->
           ntfy_error(403, 40_303, "forbidden", ntfy_docs)

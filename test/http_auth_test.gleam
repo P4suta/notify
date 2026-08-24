@@ -86,7 +86,7 @@ pub fn setup_gate_then_acl_protects_publish_and_poll_test() {
     == 200
 }
 
-pub fn invalid_bearer_falls_back_to_permitted_anonymous_acl_test() {
+pub fn managed_auth_rejects_invalid_bearer_even_when_anonymous_is_allowed_test() {
   let #(runtime, setup_token) = managed_runtime()
   let setup =
     request.new()
@@ -105,7 +105,31 @@ pub fn invalid_bearer_falls_back_to_permitted_anonymous_acl_test() {
     |> request.set_method(http.Post)
     |> request.set_path("/public")
     |> request.set_header("authorization", "Bearer invalid")
-    |> request.set_body(<<"anonymous fallback":utf8>>)
+    |> request.set_body(<<"must authenticate":utf8>>)
+    |> router.handle(runtime)
+  assert publish.status == 401
+  let assert Ok(body) = bit_array.to_string(publish.body)
+  assert string.contains(
+    body,
+    "\"link\":\"https://ntfy.sh/docs/publish/#authentication\"",
+  )
+}
+
+pub fn auth_disabled_open_access_ignores_invalid_bearer_test() {
+  let assert Ok(messages) = memory.start()
+  let runtime =
+    runtime.new(
+      storage: messages,
+      clock: runtime.Clock(fn() { 1001 }),
+      ids: runtime.IdGenerator(fn() { "AuthId0001XY" }),
+      retention_seconds: 43_200,
+    )
+  let publish =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/public")
+    |> request.set_header("authorization", "Bearer invalid")
+    |> request.set_body(<<"auth disabled":utf8>>)
     |> router.handle(runtime)
   assert publish.status == 200
 }

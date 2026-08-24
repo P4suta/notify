@@ -8,6 +8,7 @@ import gleam/option.{Some}
 import gleam/string
 import notify/access
 import notify/audit/memory as audit_memory
+import notify/core/topic
 import notify/http/router
 import notify/identity/sqlite as identity_sqlite
 import notify/runtime
@@ -87,6 +88,8 @@ pub fn ntfy_account_login_token_revoke_and_password_contract_test() {
   assert anonymous.status == 200
   assert string.contains(response_text(anonymous), "\"username\":\"*\"")
   assert string.contains(response_text(anonymous), "\"role\":\"anonymous\"")
+  assert !string.contains(response_text(anonymous), "\"tokens\"")
+  assert !string.contains(response_text(anonymous), "\"sync_topic\"")
 
   let admin_basic = authorization("admin", "correct horse battery staple")
   let login =
@@ -108,6 +111,15 @@ pub fn ntfy_account_login_token_revoke_and_password_contract_test() {
     |> router.handle(runtime)
   assert account.status == 200
   assert string.contains(response_text(account), "\"username\":\"admin\"")
+  let assert Ok(sync_topic) =
+    json.parse(response_text(account), {
+      use value <- decode.field("sync_topic", decode.string)
+      decode.success(value)
+    })
+  assert string.starts_with(sync_topic, "st_")
+  assert string.length(sync_topic) == 16
+  let assert Ok(_) = topic.parse(sync_topic)
+  assert string.contains(response_text(account), "\"last_access\":1001")
   assert !string.contains(response_text(account), login_token)
 
   let issued =
@@ -155,6 +167,20 @@ pub fn ntfy_account_login_token_revoke_and_password_contract_test() {
     |> router.handle(runtime)
     |> fn(response) { response.status }
     == 200
+  let changed_account =
+    api_request(
+      http.Get,
+      "/v1/account",
+      "",
+      authorization("admin", "another secure password"),
+    )
+    |> router.handle(runtime)
+  let assert Ok(changed_sync_topic) =
+    json.parse(response_text(changed_account), {
+      use value <- decode.field("sync_topic", decode.string)
+      decode.success(value)
+    })
+  assert changed_sync_topic == sync_topic
 
   let audit_response =
     api_request(
