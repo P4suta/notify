@@ -4,8 +4,10 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
+import notify/access
 import notify/attachment_store
 import notify/attachment_store/postgres as attachment_postgres
+import notify/core/acl
 import notify/core/filter
 import notify/core/message
 import notify/core/topic
@@ -60,6 +62,57 @@ fn fixture(id: String, scheduled: Bool, timestamp: Int) -> message.Message {
     cached: True,
     sequence_id: None,
   )
+}
+
+pub fn postgres_identity_token_activity_contract_test() {
+  case test_config() {
+    Error(_) -> Nil
+    Ok(configuration) -> {
+      let assert Ok(identity) = identity_postgres.open_store(configuration)
+      let assert Ok(control) = access.managed(identity)
+      let assert Ok(user) =
+        access.add_user(
+          control,
+          "u_pg_token_contract",
+          "pg_token_contract",
+          "correct horse battery staple",
+          acl.User,
+          2000,
+        )
+      let assert Ok(#(created_token, raw_token)) =
+        access.create_token(
+          control,
+          "tok_pg_token_contract",
+          user.id,
+          "postgres-token-contract",
+          None,
+          2001,
+          fn() { "0123456789ABCDEFGHIJKLMNOPQRS" },
+        )
+      let assert Ok(#(expired_token, expired_raw)) =
+        access.create_token(
+          control,
+          "tok_pg_expired_contract",
+          user.id,
+          "expired-token-contract",
+          Some(2000),
+          1999,
+          fn() { "abcdefghijklmnopqrstuvwxyz012" },
+        )
+      assert created_token.last_access == None
+      assert expired_token.last_access == None
+      assert access.authenticate(control, access.Bearer(raw_token), 2003)
+        == Ok(acl.Authenticated("pg_token_contract", acl.User))
+      assert access.authenticate(control, access.Bearer(raw_token), 2002)
+        == Ok(acl.Authenticated("pg_token_contract", acl.User))
+      assert access.authenticate(control, access.Bearer(expired_raw), 2003)
+        == Error(access.InvalidCredentials)
+      let assert Ok([used_token, unused_expired]) =
+        access.list_tokens(control, "pg_token_contract")
+      assert used_token.last_access == Some(2003)
+      assert unused_expired.last_access == None
+    }
+  }
 }
 
 pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
@@ -148,11 +201,22 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
       let assert Ok(other_topic) = topic.parse("other")
       assert messages.has_attachment(other_topic, attachment_key) == Ok(False)
 
-      let assert Ok(identity_postgres.Started(identity, Some(_))) =
+      let assert Ok(identity_postgres.Started(identity, Some(setup_token))) =
         identity_postgres.start(configuration, fn() { 1000 }, fn() {
           "abcdefghijklmnopqrstuvwxyz123"
         })
       assert identity.setup_required() == Ok(True)
+      let assert Ok(control) = access.managed(identity)
+      let assert Ok(_) =
+        access.complete_setup(
+          control,
+          setup_token,
+          "u_pg_admin",
+          "pg-admin",
+          "correct horse battery staple",
+          acl.Deny,
+          1001,
+        )
 
       let assert Ok(blobs) =
         attachment_postgres.start(

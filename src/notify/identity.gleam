@@ -52,6 +52,7 @@ pub type Token {
     label: String,
     created_at: Int,
     expires: Option(Int),
+    last_access: Option(Int),
   )
 }
 

@@ -151,6 +151,7 @@ pub fn admin_user_token_and_acl_api_never_lists_raw_secrets_test() {
   let assert Ok(tokens_body) = bit_array.to_string(tokens.body)
   assert tokens.status == 200
   assert string.contains(tokens_body, "tk_")
+  assert string.contains(tokens_body, "\"last_access\":null")
   assert !string.contains(tokens_body, raw)
 
   let last_admin =

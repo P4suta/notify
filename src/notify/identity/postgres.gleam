@@ -76,6 +76,11 @@ CREATE TABLE IF NOT EXISTS notify_access_tokens (
 CREATE INDEX IF NOT EXISTS notify_access_tokens_user
   ON notify_access_tokens(user_id);
 
+CREATE TABLE IF NOT EXISTS notify_access_token_activity (
+  token_id TEXT PRIMARY KEY REFERENCES notify_access_tokens(id) ON DELETE CASCADE,
+  last_access BIGINT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS notify_acl_rules (
   id BIGSERIAL PRIMARY KEY,
   username TEXT NOT NULL,
@@ -434,7 +439,7 @@ fn user_by_token_hash(
 ) -> Result(User, identity.Error) {
   query_one_user(
     connection,
-    "SELECT u.id, u.username, u.role, u.password_hash, u.created_at FROM notify_users u JOIN notify_access_tokens t ON t.user_id = u.id WHERE t.token_hash = $1 AND (t.expires IS NULL OR t.expires >= $2)",
+    "WITH matched AS (SELECT t.id AS token_id, u.id, u.username, u.role, u.password_hash, u.created_at FROM notify_users u JOIN notify_access_tokens t ON t.user_id = u.id WHERE t.token_hash = $1 AND (t.expires IS NULL OR t.expires >= $2)), touched AS (INSERT INTO notify_access_token_activity(token_id, last_access) SELECT token_id, $2 FROM matched ON CONFLICT(token_id) DO UPDATE SET last_access = GREATEST(notify_access_token_activity.last_access, excluded.last_access) RETURNING token_id) SELECT m.id, m.username, m.role, m.password_hash, m.created_at FROM matched m JOIN touched t ON t.token_id = m.token_id",
     [postgleam.text(hash), postgleam.int(now)],
   )
 }
@@ -584,7 +589,15 @@ fn add_token(
     ],
   )
   |> result.map(fn(_) {
-    identity.Token(id:, user_id:, prefix:, label:, created_at:, expires:)
+    identity.Token(
+      id:,
+      user_id:,
+      prefix:,
+      label:,
+      created_at:,
+      expires:,
+      last_access: None,
+    )
   })
   |> result.map_error(map_error)
 }
@@ -595,7 +608,7 @@ fn list_tokens(
 ) -> Result(List(Token), identity.Error) {
   postgleam.query_with(
     connection,
-    "SELECT id, user_id, token_prefix, label, created_at, expires FROM notify_access_tokens WHERE user_id = $1 ORDER BY created_at DESC, id ASC",
+    "SELECT t.id, t.user_id, t.token_prefix, t.label, t.created_at, t.expires, a.last_access FROM notify_access_tokens t LEFT JOIN notify_access_token_activity a ON a.token_id = t.id WHERE t.user_id = $1 ORDER BY t.created_at DESC, t.id ASC",
     [postgleam.text(user_id)],
     token_decoder(),
   )
@@ -729,6 +742,7 @@ fn token_decoder() -> decode.RowDecoder(Token) {
   use label <- decode.element(3, decode.text)
   use created_at <- decode.element(4, decode.int)
   use expires <- decode.element(5, decode.optional(decode.int))
+  use last_access <- decode.element(6, decode.optional(decode.int))
   decode.success(identity.Token(
     id:,
     user_id:,
@@ -736,6 +750,7 @@ fn token_decoder() -> decode.RowDecoder(Token) {
     label:,
     created_at:,
     expires:,
+    last_access:,
   ))
 }
 

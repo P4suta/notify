@@ -144,8 +144,12 @@ from the ntfy YAML file. The importer accepts ntfy SQLite cache schemas 9–15,
 auth schemas 1–9, Web Push subscriptions, and content-addresses local
 attachments in the configured Notify backend. Apply uses one SQLite
 transaction and is idempotent; newly copied attachment objects are removed if
-the database transaction fails. Migrated bcrypt passwords are upgraded to
-Argon2id on the first successful login.
+the database transaction fails. Migrated token activity is preserved. Migrated
+bcrypt passwords and verified older Argon2 encodings are upgraded to the fixed
+Argon2id policy (19,456 KiB, two iterations, one lane, 32-byte output) on the
+first successful login. The lock-file's Argus 1.0.4/Jargon 1.1.0 pair emits
+the PHC version field `v=13`; that exact dependency output is pinned so a
+future correction requires an explicit migration review.
 
 ## PostgreSQL active-active example
 
@@ -186,8 +190,10 @@ certification; the exact evidence is recorded in
   delete/clear controls, and local/remote attachments.
 - Subscribe: JSON, SSE, raw, and WebSocket; multi-topic filters, `since`, poll,
   scheduled events, keepalive, and bounded credit-based fan-out.
-- Identity: setup gate, Argon2id passwords, one-time bearer-token display,
-  Basic/Bearer authentication, wildcard ACLs, CSRF-protected admin sessions.
+- Identity: setup gate, fixed-policy Argon2id passwords with successful-login
+  legacy rehash, one-time bearer-token display, monotonic token last-access
+  tracking, Basic/Bearer authentication, wildcard ACLs, and CSRF-protected
+  admin sessions.
 - Attachments: filesystem/shared-filesystem, PostgreSQL chunk, and S3-compatible
   stores with `begin/write/finish/abort`, incremental SHA-256,
   content-addressed promotion, byte ranges, quotas, expiry, and one-hour staging

@@ -32,8 +32,8 @@ Status terms used below:
 | Update/delete/clear and sequence ID | Contract | Routes and wire shapes have local tests. Differential coverage is pending. |
 | Actions and attachments | Contract | Action parsing and 10-character action IDs are in the differential corpus. The attachment port now uses `begin/write/finish/abort`, incremental SHA-256, content-addressed promotion, deduplication, quotas, expiry, ETags, filename-safe downloads, and one-hour orphan cleanup. Filesystem, real PostgreSQL (1 MiB chunks), and real MinIO (5 MiB multipart) contracts cover aborts and chunk-boundary ranges. The Mist HTTP transport still materialises complete request/response bodies; per-object owner/MIME metadata, sendfile, cluster-atomic filesystem/S3 quotas, and immediate publish-failure compensation remain open. |
 | Cache and replay | Contract | Uncached messages are delivered but not replayed. A replay database error now returns 503 before stream headers rather than becoming an empty successful stream. |
-| Basic/Bearer auth, setup, ACL | Implemented | Local tests cover setup, authentication, wildcard ACLs, account routes, and ntfy's invalid-credential fallback when anonymous ACLs allow a topic operation. Full v2.27 auth/account differential coverage and the complete audit contract are pending. |
-| Account, token, Web Push APIs | Implemented | Core routes and stores exist; OpenAPI and full operation execution coverage remain incomplete. |
+| Basic/Bearer auth, setup, ACL | Contract | Local tests cover setup, authentication, the lock-file's exact Argus/Jargon Argon2id output (`v=13`, 19,456 KiB, two iterations, one lane, 32-byte output), successful-login rehash of bcrypt and other valid Argon2 encodings, wildcard ACLs, account routes, and ntfy's invalid-credential fallback when anonymous ACLs allow a topic operation. A dependency correction to the PHC version field requires an explicit migration review. Full v2.27 auth/account differential coverage and the complete audit contract are pending. |
+| Account, token, Web Push APIs | Implemented | Raw token hashes, expiry, and monotonic successful-use `last_access` are persisted by SQLite and PostgreSQL; ntfy migration preserves token activity. Core routes and stores exist, but full operation execution coverage remains incomplete. |
 | Message templates | Open | The bounded, independently implemented v2.27 template language is not present yet. Template parameters must not be treated as compatible. |
 
 The 24-case differential corpus is deliberately bounded. Passing it
@@ -43,8 +43,8 @@ compatibility.
 ## Intentional differences
 
 - Raw bearer tokens are shown once and only their hashes are persisted. Token
-  listings expose IDs and prefixes; they cannot reproduce an already-issued raw
-  token.
+  listings expose IDs, prefixes, expiry, and last access; they cannot reproduce
+  an already-issued raw token.
 - Delivery across reconnects is at-least-once. Clients must de-duplicate using
   the 12-character message ID; exactly-once reconnect delivery is not offered.
 - Notify never connects to public `ntfy.sh` automatically. Mobile relay tests

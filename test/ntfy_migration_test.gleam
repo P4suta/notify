@@ -184,7 +184,8 @@ pub fn ntfy_v227_migration_is_dry_runnable_source_preserving_and_idempotent_test
   let assert Ok(grants) = access.list_grants(control, None)
   assert list.length(grants) == 2
   let assert Ok(tokens) = access.list_tokens(control, "phil")
-  assert list.length(tokens) == 1
+  let assert [migrated_token] = tokens
+  assert migrated_token.last_access == Some(1_690_000_001)
 
   let assert Ok(push) = webpush_sqlite.start(destination, 10)
   let assert Ok([subscription]) = push.for_topic("alerts")

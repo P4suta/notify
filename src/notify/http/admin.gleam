@@ -403,6 +403,7 @@ fn create_token(
           #("prefix", json.string(stored.prefix)),
           #("created_at", json.int(stored.created_at)),
           #("expires", json.nullable(stored.expires, json.int)),
+          #("last_access", json.nullable(stored.last_access, json.int)),
         ]),
       )
     Error(access.InvalidTokenLabel) ->
@@ -828,6 +829,7 @@ fn stored_token_json(stored: identity.Token) -> json.Json {
     #("label", json.string(stored.label)),
     #("created_at", json.int(stored.created_at)),
     #("expires", json.nullable(stored.expires, json.int)),
+    #("last_access", json.nullable(stored.last_access, json.int)),
   ])
 }
 

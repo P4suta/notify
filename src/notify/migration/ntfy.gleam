@@ -103,6 +103,7 @@ type SourceToken {
     label: String,
     created_at: Int,
     expires: Option(Int),
+    last_access: Option(Int),
   )
 }
 
@@ -704,6 +705,7 @@ fn load_auth_current(
             False -> now
           },
           expires: positive(expires),
+          last_access: positive(last_access),
         ))
       },
     )
@@ -1287,8 +1289,32 @@ fn insert_tokens(
         0 -> verify_existing_token(connection, token, digest)
         _ -> Ok(Nil)
       })
+      use _ <- result.try(record_token_last_access(
+        connection,
+        digest,
+        token.last_access,
+      ))
       insert_tokens(connection, rest, inserted + changed)
     }
+  }
+}
+
+fn record_token_last_access(
+  connection: Connection,
+  digest: String,
+  last_access: Option(Int),
+) -> Result(Nil, Error) {
+  case last_access {
+    None -> Ok(Nil)
+    Some(last_access) ->
+      sqlight.query(
+        "INSERT INTO access_token_activity(token_id, last_access) SELECT id, ? FROM access_tokens WHERE token_hash = ? ON CONFLICT(token_id) DO UPDATE SET last_access = MAX(access_token_activity.last_access, excluded.last_access)",
+        on: connection,
+        with: [sqlight.int(last_access), sqlight.text(digest)],
+        expecting: decode.dynamic,
+      )
+      |> result.map(fn(_) { Nil })
+      |> result.map_error(destination_sql_error)
   }
 }
 

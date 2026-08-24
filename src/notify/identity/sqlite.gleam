@@ -83,6 +83,12 @@ CREATE TABLE IF NOT EXISTS access_tokens (
 );
 CREATE INDEX IF NOT EXISTS access_tokens_user_id ON access_tokens(user_id);
 
+CREATE TABLE IF NOT EXISTS access_token_activity (
+  token_id TEXT PRIMARY KEY,
+  last_access INTEGER NOT NULL,
+  FOREIGN KEY(token_id) REFERENCES access_tokens(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS acl_rules (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT NOT NULL,
@@ -461,11 +467,25 @@ fn user_by_token_hash(
   hash: String,
   now: Int,
 ) -> Result(User, identity.Error) {
-  query_one_user(
-    connection,
-    "SELECT u.id, u.username, u.role, u.password_hash, u.created_at FROM users u JOIN access_tokens t ON t.user_id = u.id WHERE t.token_hash = ? AND (t.expires IS NULL OR t.expires >= ?)",
-    [sqlight.text(hash), sqlight.int(now)],
-  )
+  in_transaction(connection, fn() {
+    use user <- result.try(
+      query_one_user(
+        connection,
+        "SELECT u.id, u.username, u.role, u.password_hash, u.created_at FROM users u JOIN access_tokens t ON t.user_id = u.id WHERE t.token_hash = ? AND (t.expires IS NULL OR t.expires >= ?)",
+        [sqlight.text(hash), sqlight.int(now)],
+      ),
+    )
+    use _ <- result.try(
+      sqlight.query(
+        "INSERT INTO access_token_activity(token_id, last_access) SELECT id, ? FROM access_tokens WHERE token_hash = ? AND (expires IS NULL OR expires >= ?) ON CONFLICT(token_id) DO UPDATE SET last_access = MAX(access_token_activity.last_access, excluded.last_access)",
+        on: connection,
+        with: [sqlight.int(now), sqlight.text(hash), sqlight.int(now)],
+        expecting: decode.dynamic,
+      )
+      |> result.map_error(map_error),
+    )
+    Ok(user)
+  })
 }
 
 fn default_access(
@@ -627,7 +647,15 @@ fn add_token(
     )
     |> result.map_error(map_error),
   )
-  Ok(identity.Token(id:, user_id:, prefix:, label:, created_at:, expires:))
+  Ok(identity.Token(
+    id:,
+    user_id:,
+    prefix:,
+    label:,
+    created_at:,
+    expires:,
+    last_access: None,
+  ))
 }
 
 fn list_tokens(
@@ -635,7 +663,7 @@ fn list_tokens(
   user_id: String,
 ) -> Result(List(Token), identity.Error) {
   sqlight.query(
-    "SELECT id, user_id, token_prefix, label, created_at, expires FROM access_tokens WHERE user_id = ? ORDER BY created_at DESC, id ASC",
+    "SELECT t.id, t.user_id, t.token_prefix, t.label, t.created_at, t.expires, a.last_access FROM access_tokens t LEFT JOIN access_token_activity a ON a.token_id = t.id WHERE t.user_id = ? ORDER BY t.created_at DESC, t.id ASC",
     on: connection,
     with: [sqlight.text(user_id)],
     expecting: token_decoder(),
@@ -786,6 +814,7 @@ fn token_decoder() -> decode.Decoder(Token) {
   use label <- decode.field(3, decode.string)
   use created_at <- decode.field(4, decode.int)
   use expires <- decode.field(5, decode.optional(decode.int))
+  use last_access <- decode.field(6, decode.optional(decode.int))
   decode.success(identity.Token(
     id:,
     user_id:,
@@ -793,6 +822,7 @@ fn token_decoder() -> decode.Decoder(Token) {
     label:,
     created_at:,
     expires:,
+    last_access:,
   ))
 }
 
