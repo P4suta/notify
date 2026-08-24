@@ -37,23 +37,9 @@ updates:
     commit-message:
       prefix: build
 
-  - package-ecosystem: mix
-    directory: "/"
-    schedule:
-      interval: weekly
-      day: monday
-      time: "04:30"
-      timezone: Asia/Tokyo
-    groups:
-      native-packaging:
-        patterns:
-          - "*"
-    labels:
-      - dependencies
-    open-pull-requests-limit: 3
-    commit-message:
-      prefix: build
-
+  # The native wrapper uses MixGleam as a Mix archive. Dependabot's Mix
+  # updater cannot install project archives before evaluating mix.exs, so it
+  # cannot safely update this build-only dependency.
   - package-ecosystem: docker
     directory: "/"
     schedule:
