@@ -11,6 +11,7 @@ Describe the user-visible behavior and the reason for the change.
 - [ ] `python3 test/check_licenses.py --root .`
 - [ ] `test/vulnerability_scan.sh [local-image-reference]`
 - [ ] `test/generate_sbom.sh local-image-reference output-directory`
+- [ ] `test/container_smoke.sh local-image-reference`
 - [ ] `gleam test`
 - [ ] `(cd packages/notify_core && gleam test)`
 - [ ] `(cd web && gleam test)`

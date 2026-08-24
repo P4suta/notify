@@ -120,3 +120,5 @@ jobs:
         run: docker build --tag notify:ci .
       - name: Smoke-test image entrypoint
         run: docker run --rm notify:ci run help
+      - name: Smoke-test SQLite container lifecycle
+        run: test/container_smoke.sh notify:ci

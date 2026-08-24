@@ -287,6 +287,7 @@ gleam test
 gleam export erlang-shipment
 docker build --check .
 docker build --tag notify:security .
+test/container_smoke.sh notify:security
 test/vulnerability_scan.sh notify:security
 test/generate_sbom.sh notify:security /tmp/notify-sbom
 ```
@@ -341,6 +342,13 @@ test/e2e/run.sh
 With the SQLite Compose example running, `test/smoke/admin_session.sh` verifies
 the real Secure-cookie/CSRF management flow, user/token/ACL mutations, inventory
 endpoints, cleanup, and that a raw token cannot be recovered from listings.
+
+`test/container_smoke.sh IMAGE` uses an isolated, throwaway Docker volume and a
+loopback-only ephemeral port. It performs CLI setup, authenticated publish and
+poll, a restart with the same SQLite data, 12-character message-ID recovery,
+and graceful SIGTERM shutdown. The test runs the image with dropped
+capabilities, `no-new-privileges`, and a read-only root filesystem, then removes
+its container and volume.
 
 Set `NOTIFY_TEST_POSTGRES_HOST` (plus optional `PORT` and `PASSWORD` variants)
 to enable the real PostgreSQL contract suite. Set `NOTIFY_TEST_S3_ENDPOINT`
