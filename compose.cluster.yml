@@ -1,3 +1,4 @@
+---
 x-notify: &notify
   build: .
   depends_on:

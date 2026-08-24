@@ -14,4 +14,4 @@ esac
 
 export BURRITO_TARGET="$target"
 export MIX_ENV=prod
-mix do deps.get, release
+mix "do" deps.get, release

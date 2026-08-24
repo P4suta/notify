@@ -1,3 +1,4 @@
+---
 services:
   ntfy-v227:
     image: binwiederhier/ntfy:v2.27.0
