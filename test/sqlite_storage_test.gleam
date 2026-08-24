@@ -116,6 +116,28 @@ pub fn sqlite_round_trips_complete_wire_payload_test() {
   assert loaded == complete
 }
 
+pub fn sqlite_attachment_reference_is_scoped_to_its_message_topic_test() {
+  let assert Ok(store) = sqlite.start(":memory:")
+  let key = string.repeat("a", times: 64)
+  let attached =
+    message.Message(
+      ..fixture("SAttach001XY", 100, "one"),
+      attachment: Some(message.Attachment(
+        name: "report.txt",
+        url: "https://notify.example/file/one/" <> key <> "/report.txt",
+        mime_type: Some("text/plain"),
+        size: Some(12),
+        expires: Some(200),
+      )),
+    )
+  assert store.save(attached) == Ok(attached)
+  let assert Ok(one) = topic.parse("one")
+  let assert Ok(other) = topic.parse("other")
+  assert store.has_attachment(one, key) == Ok(True)
+  assert store.has_attachment(other, key) == Ok(False)
+  assert store.has_attachment(one, string.repeat("b", times: 64)) == Ok(False)
+}
+
 pub fn sqlite_claims_each_due_message_only_once_test() {
   let assert Ok(store) = sqlite.start(":memory:")
   let scheduled =

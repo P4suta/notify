@@ -18,6 +18,48 @@ enforced limits from acceptance targets that have not yet been demonstrated.
   inactive for seven days is stale; cleanup may then compact acknowledged event
   rows after their messages have expired.
 
+## Attachment durability and limits
+
+The attachment-store boundary is chunk-oriented: `begin`, repeated `write`,
+`finish`, and idempotent `abort`. SHA-256 is updated incrementally and `finish`
+promotes the staging object under its 64-character content hash. Re-uploading
+the same bytes does not consume quota twice and only extends the expiry.
+
+- Filesystem uploads append to an exclusive `.upload-*.tmp` file and atomically
+  rename it on promotion. Range reads use positioned file reads rather than
+  loading bytes before the requested range. Staging files older than one hour
+  are orphans and cleanup removes them.
+- PostgreSQL stores staging and promoted data in chunks no larger than 1 MiB.
+  Promotion, deduplication, and quota accounting share a transaction protected
+  by an advisory lock, and Range reads fetch only overlapping chunks. Durable
+  staging rows older than one hour are deleted with their chunks.
+- S3-compatible storage uses 5 MiB multipart parts, completes into a staging
+  key, and server-side copies to the content key. Cleanup lists and aborts
+  incomplete multipart uploads older than one hour and removes completed
+  staging objects by expiry. GET Range is delegated to the object store.
+
+The defaults are a 15 MiB object limit, 100 MiB attachment inventory limit,
+and three-hour retention. The surrounding Mist request currently arrives as a
+complete body (bounded by the 16 MiB request limit), and complete downloads are
+also materialised before the response is sent; transport streaming and
+filesystem sendfile are not implemented. Name and MIME remain message metadata,
+so the download endpoint uses the percent-decoded URL filename and serves
+`application/octet-stream` with `nosniff`. It returns a strong content-hash
+ETag and supports HEAD, a single byte Range, and If-None-Match.
+
+Before returning an object, the server verifies that a persisted notification
+under the authorised topic actually references that content key. Merely
+substituting another readable topic into a known attachment URL therefore does
+not grant access.
+
+PostgreSQL quota promotion is atomic across nodes. Filesystem/shared-filesystem
+and S3 inventory checks are serialized only inside one adapter process; their
+total-quota check is not cluster-atomic. Enforce a backend quota externally or
+use the PostgreSQL attachment backend when strict active-active quota is
+required. If message publication fails after object promotion, the unreferenced
+content-addressed object remains until its configured expiry; immediate
+reference-counted compensation is still open.
+
 ## Not yet certified
 
 The following are acceptance targets, not current benchmark results:

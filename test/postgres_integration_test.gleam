@@ -1,3 +1,4 @@
+import gleam/bit_array
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
@@ -128,6 +129,25 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
       assert list.length(after_page) == 4
       assert list.first(after_page) == Ok(page_fixture(257))
 
+      let attachment_key = string.repeat("a", times: 64)
+      let attached =
+        message.Message(
+          ..fixture("PgAttach01XY", False, 300),
+          attachment: Some(message.Attachment(
+            name: "report.txt",
+            url: "https://notify.example/file/postgres-contract/"
+              <> attachment_key
+              <> "/report.txt",
+            mime_type: Some("text/plain"),
+            size: Some(12),
+            expires: Some(400),
+          )),
+        )
+      assert messages.save(attached) == Ok(attached)
+      assert messages.has_attachment(topic, attachment_key) == Ok(True)
+      let assert Ok(other_topic) = topic.parse("other")
+      assert messages.has_attachment(other_topic, attachment_key) == Ok(False)
+
       let assert Ok(identity_postgres.Started(identity, Some(_))) =
         identity_postgres.start(configuration, fn() { 1000 }, fn() {
           "abcdefghijklmnopqrstuvwxyz123"
@@ -148,7 +168,81 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
           Some(attachment_store.ByteRange(start: 1, end: 3)),
         )
       assert partial.data == <<"bcd":utf8>>
-      assert blobs.cleanup(100) == Ok(1)
+      let assert Ok(upload) =
+        blobs.begin(attachment_store.BeginUpload(expires: 100))
+      assert blobs.write(upload, <<"gh":utf8>>)
+        == Ok(attachment_store.Progress(bytes_written: 2))
+      assert blobs.write(upload, <<"ijkl":utf8>>)
+        == Ok(attachment_store.Progress(bytes_written: 6))
+      let assert Ok(streamed) = blobs.finish(upload)
+      assert streamed.key == attachment_store.content_key(<<"ghijkl":utf8>>)
+      let assert Ok(streamed_download) = blobs.get(streamed.key, None)
+      assert streamed_download.data == <<"ghijkl":utf8>>
+      let assert Ok(empty_upload) =
+        blobs.begin(attachment_store.BeginUpload(expires: 100))
+      let assert Ok(empty) = blobs.finish(empty_upload)
+      assert empty.size == 0
+      let assert Ok(empty_download) = blobs.get(empty.key, None)
+      assert empty_download.data == <<>>
+      let assert Ok(aborted) =
+        blobs.begin(attachment_store.BeginUpload(expires: 100))
+      let assert Ok(_) = blobs.write(aborted, <<"discard":utf8>>)
+      assert blobs.abort(aborted) == Ok(Nil)
+      assert blobs.finish(aborted) == Error(attachment_store.NotFound)
+      assert blobs.cleanup(100) == Ok(3)
+
+      let assert Ok(chunked_blobs) =
+        attachment_postgres.start(
+          configuration,
+          max_file_bytes: 2_000_000,
+          max_total_bytes: 3_000_000,
+        )
+      let large =
+        string.repeat("x", times: 1_048_577)
+        |> bit_array.from_string
+      let assert Ok(chunked_upload) =
+        chunked_blobs.begin(attachment_store.BeginUpload(expires: 200))
+      let assert Ok(_) = chunked_blobs.write(chunked_upload, large)
+      let assert Ok(chunked) = chunked_blobs.finish(chunked_upload)
+      assert chunked.size == 1_048_577
+      let assert Ok(chunk_boundary) =
+        chunked_blobs.get(
+          chunked.key,
+          Some(attachment_store.ByteRange(1_048_575, 1_048_576)),
+        )
+      assert chunk_boundary.data == <<"xx":utf8>>
+      assert chunked_blobs.cleanup(200) == Ok(1)
+
+      let assert Ok(quota_a) =
+        attachment_postgres.start(
+          configuration,
+          max_file_bytes: 10,
+          max_total_bytes: 10,
+        )
+      let assert Ok(quota_b) =
+        attachment_postgres.start(
+          configuration,
+          max_file_bytes: 10,
+          max_total_bytes: 10,
+        )
+      let assert Ok(quota_first) =
+        quota_a.begin(attachment_store.BeginUpload(expires: 300))
+      let assert Ok(quota_second) =
+        quota_b.begin(attachment_store.BeginUpload(expires: 300))
+      let assert Ok(_) = quota_a.write(quota_first, <<"123456":utf8>>)
+      let assert Ok(_) = quota_b.write(quota_second, <<"abcdef":utf8>>)
+      let assert Ok(_) = quota_a.finish(quota_first)
+      assert quota_b.finish(quota_second)
+        == Error(attachment_store.QuotaExceeded(10))
+      assert quota_a.cleanup(300) == Ok(1)
+
+      let assert Ok(orphan) =
+        quota_a.begin(attachment_store.BeginUpload(
+          expires: unix_seconds() + 7200,
+        ))
+      let assert Ok(_) = quota_a.write(orphan, <<"orphan":utf8>>)
+      let assert Ok(_) = quota_a.cleanup(unix_seconds() + 3601)
+      assert quota_a.finish(orphan) == Error(attachment_store.NotFound)
 
       let assert Ok(outbox) = delivery_postgres.start(configuration)
       let assert Ok(_) =
@@ -237,3 +331,6 @@ fn page_id(index: Int) -> String {
 
 @external(erlang, "notify_ffi", "getenv")
 fn getenv(name: String) -> Result(String, Nil)
+
+@external(erlang, "notify_ffi", "unix_seconds")
+fn unix_seconds() -> Int

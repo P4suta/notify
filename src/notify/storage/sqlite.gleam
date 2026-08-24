@@ -21,6 +21,7 @@ type Command {
     Subject(Result(Message, storage.Error)),
   )
   RunQuery(Query, Subject(Result(List(Message), storage.Error)))
+  HasAttachment(topic.Topic, String, Subject(Result(Bool, storage.Error)))
   ReleaseDue(Int, Int, Subject(Result(List(Message), storage.Error)))
   CleanupExpired(Int, Subject(Result(Int, storage.Error)))
   Stats(Subject(Result(storage.Stats, storage.Error)))
@@ -198,6 +199,11 @@ fn start_actor(connection: Connection) -> Result(Adapter, storage.Error) {
       query: fn(query) {
         process.call(subject, 10_000, fn(reply) { RunQuery(query, reply) })
       },
+      has_attachment: fn(topic, key) {
+        process.call(subject, 10_000, fn(reply) {
+          HasAttachment(topic, key, reply)
+        })
+      },
       release_due: fn(now, limit) {
         process.call(subject, 10_000, fn(reply) {
           ReleaseDue(now, limit, reply)
@@ -232,6 +238,10 @@ fn handle(
     }
     RunQuery(query, reply) -> {
       process.send(reply, run_query(connection, query))
+      actor.continue(connection)
+    }
+    HasAttachment(topic, key, reply) -> {
+      process.send(reply, has_attachment(connection, topic, key))
       actor.continue(connection)
     }
     ReleaseDue(now, limit, reply) -> {
@@ -710,6 +720,35 @@ fn health(connection: Connection) -> Result(Nil, storage.Error) {
   })
   |> result.map(fn(_) { Nil })
   |> result.map_error(map_error)
+}
+
+fn has_attachment(
+  connection: Connection,
+  attached_topic: topic.Topic,
+  key: String,
+) -> Result(Bool, storage.Error) {
+  let path = "/file/" <> topic.to_string(attached_topic) <> "/" <> key
+  use rows <- result.try(
+    sqlight.query(
+      "SELECT EXISTS(SELECT 1 FROM messages WHERE topic = ? AND (instr(COALESCE(json_extract(payload, '$.attachment.url'), ''), ? || '/') > 0 OR substr(COALESCE(json_extract(payload, '$.attachment.url'), ''), -length(?)) = ?))",
+      on: connection,
+      with: [
+        sqlight.text(topic.to_string(attached_topic)),
+        sqlight.text(path),
+        sqlight.text(path),
+        sqlight.text(path),
+      ],
+      expecting: {
+        use found <- decode.field(0, decode.int)
+        decode.success(found != 0)
+      },
+    )
+    |> result.map_error(map_error),
+  )
+  case rows {
+    [found] -> Ok(found)
+    _ -> Error(storage.Corrupt("attachment reference query returned no row"))
+  }
 }
 
 fn cleanup_expired(

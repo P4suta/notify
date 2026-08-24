@@ -119,6 +119,7 @@ pub fn readiness_fails_but_liveness_survives_dependency_failure_test() {
       migrate: fn() { Ok(Nil) },
       save: fn(message) { Ok(message) },
       query: fn(_) { Ok([]) },
+      has_attachment: fn(_, _) { Ok(False) },
       release_due: fn(_, _) { Ok([]) },
       cleanup_expired: fn(_) { Ok(0) },
       stats: fn() { Error(storage.Unavailable("offline")) },

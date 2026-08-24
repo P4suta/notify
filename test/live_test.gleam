@@ -10,6 +10,7 @@ pub fn replay_query_failure_is_not_converted_to_an_empty_success_test() {
       migrate: fn() { Ok(Nil) },
       save: fn(message) { Ok(message) },
       query: fn(_) { Error(storage.Unavailable("database offline")) },
+      has_attachment: fn(_, _) { Ok(False) },
       release_due: fn(_, _) { Ok([]) },
       cleanup_expired: fn(_) { Ok(0) },
       stats: fn() { Ok(storage.Stats(0, 0, 0)) },

@@ -9,6 +9,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import gleam/uri
 import notify/access
 import notify/attachment_store
 import notify/core/acl
@@ -96,8 +97,12 @@ fn handle_protocol(
     Get, ["v1", "config"] -> compatibility_config(runtime)
     Post, ["v1", "webpush"] -> webpush_update(req, runtime)
     Delete, ["v1", "webpush"] -> webpush_delete(req, runtime)
-    Get, ["file", topic, key] -> download(req, topic, key, False, runtime)
-    Head, ["file", topic, key] -> download(req, topic, key, True, runtime)
+    Get, ["file", topic, key, filename] ->
+      download(req, topic, key, Some(filename), False, runtime)
+    Head, ["file", topic, key, filename] ->
+      download(req, topic, key, Some(filename), True, runtime)
+    Get, ["file", topic, key] -> download(req, topic, key, None, False, runtime)
+    Head, ["file", topic, key] -> download(req, topic, key, None, True, runtime)
     Post, ["api", "v1", "setup"] -> setup(req, runtime)
     Put, [topic, sequence_id, action] if action == "clear" || action == "read" ->
       publish_control(
@@ -569,7 +574,13 @@ fn publish_local_attachment(
     True, Some(store), Ok(draft) -> {
       let runtime.Clock(now) = runtime.clock
       let expires = now() + runtime.attachment_retention_seconds
-      case store.put(attachment_store.Upload(req.body, expires:)) {
+      case
+        attachment_store.put_in_chunks(
+          store,
+          attachment_store.Upload(req.body, expires:),
+          1_048_576,
+        )
+      {
         Error(attachment_store.TooLarge(_, _)) ->
           ntfy_error(413, 41_301, "attachment too large", ntfy_docs)
         Error(attachment_store.QuotaExceeded(_)) ->
@@ -580,7 +591,7 @@ fn publish_local_attachment(
           let attachment =
             message.Attachment(
               name: filename,
-              url: attachment_url(runtime, parsed_topic, stored.key),
+              url: attachment_url(runtime, parsed_topic, stored.key, filename),
               mime_type: request.get_header(req, "content-type")
                 |> option.from_result,
               size: Some(stored.size),
@@ -598,12 +609,19 @@ fn attachment_url(
   runtime: Runtime,
   attached_topic: topic.Topic,
   key: String,
+  filename: String,
 ) -> String {
   let base = case string.ends_with(runtime.attachment_base_url, "/") {
     True -> string.drop_end(runtime.attachment_base_url, 1)
     False -> runtime.attachment_base_url
   }
-  base <> "/file/" <> topic.to_string(attached_topic) <> "/" <> key
+  base
+  <> "/file/"
+  <> topic.to_string(attached_topic)
+  <> "/"
+  <> key
+  <> "/"
+  <> uri.percent_encode(filename)
 }
 
 fn valid_filename(filename: String) -> Bool {
@@ -618,6 +636,7 @@ fn download(
   req: Request(BitArray),
   topic_name: String,
   key: String,
+  filename: Option(String),
   head_only: Bool,
   runtime: Runtime,
 ) -> Response(BitArray) {
@@ -626,42 +645,129 @@ fn download(
     _, None -> ntfy_error(404, 40_401, "attachment not found", ntfy_docs)
     Ok(parsed_topic), Some(store) ->
       with_authorization(req, [parsed_topic], acl.Read, runtime, fn() {
-        case store.head(key) {
-          Error(attachment_store.NotFound) ->
-            ntfy_error(404, 40_401, "attachment not found", ntfy_docs)
-          Error(_) ->
-            ntfy_error(503, 50_301, "attachment storage unavailable", ntfy_docs)
-          Ok(metadata) ->
-            case parse_range(request.get_header(req, "range"), metadata.size) {
-              Error(_) -> range_not_satisfiable(metadata.size)
-              Ok(range) ->
-                case head_only {
-                  True -> attachment_head_response(metadata.size, range)
-                  False ->
-                    case store.get(key, range) {
-                      Ok(download) ->
-                        attachment_download_response(download, range)
-                      Error(attachment_store.InvalidRange) ->
-                        range_not_satisfiable(metadata.size)
-                      Error(attachment_store.NotFound) ->
-                        ntfy_error(
-                          404,
-                          40_401,
-                          "attachment not found",
-                          ntfy_docs,
+        case attachment_store.valid_content_key(key) {
+          False -> ntfy_error(404, 40_401, "attachment not found", ntfy_docs)
+          True ->
+            case runtime.storage.has_attachment(parsed_topic, key) {
+              Ok(False) ->
+                ntfy_error(404, 40_401, "attachment not found", ntfy_docs)
+              Error(_) ->
+                ntfy_error(
+                  503,
+                  50_301,
+                  "attachment storage unavailable",
+                  ntfy_docs,
+                )
+              Ok(True) ->
+                case store.head(key) {
+                  Error(attachment_store.NotFound) ->
+                    ntfy_error(404, 40_401, "attachment not found", ntfy_docs)
+                  Error(_) ->
+                    ntfy_error(
+                      503,
+                      50_301,
+                      "attachment storage unavailable",
+                      ntfy_docs,
+                    )
+                  Ok(metadata) -> {
+                    let etag = "\"" <> key <> "\""
+                    let filename = attachment_download_name(filename)
+                    case
+                      matches_etag(
+                        request.get_header(req, "if-none-match"),
+                        etag,
+                      )
+                    {
+                      True ->
+                        response.new(304)
+                        |> response.set_header("etag", etag)
+                        |> response.set_header(
+                          "cache-control",
+                          "private, max-age=3600",
                         )
-                      Error(_) ->
-                        ntfy_error(
-                          503,
-                          50_301,
-                          "attachment storage unavailable",
-                          ntfy_docs,
-                        )
+                        |> response.set_body(<<>>)
+                      False ->
+                        case
+                          parse_range(
+                            request.get_header(req, "range"),
+                            metadata.size,
+                          )
+                        {
+                          Error(_) -> range_not_satisfiable(metadata.size)
+                          Ok(range) ->
+                            case head_only {
+                              True ->
+                                attachment_head_response(
+                                  metadata.size,
+                                  range,
+                                  etag,
+                                  filename,
+                                )
+                              False ->
+                                case store.get(key, range) {
+                                  Ok(download) ->
+                                    attachment_download_response(
+                                      download,
+                                      range,
+                                      etag,
+                                      filename,
+                                    )
+                                  Error(attachment_store.InvalidRange) ->
+                                    range_not_satisfiable(metadata.size)
+                                  Error(attachment_store.NotFound) ->
+                                    ntfy_error(
+                                      404,
+                                      40_401,
+                                      "attachment not found",
+                                      ntfy_docs,
+                                    )
+                                  Error(_) ->
+                                    ntfy_error(
+                                      503,
+                                      50_301,
+                                      "attachment storage unavailable",
+                                      ntfy_docs,
+                                    )
+                                }
+                            }
+                        }
                     }
+                  }
                 }
             }
         }
       })
+  }
+}
+
+fn matches_etag(header: Result(String, Nil), etag: String) -> Bool {
+  case header {
+    Error(_) -> False
+    Ok(value) ->
+      value
+      |> string.split(",")
+      |> list.map(string.trim)
+      |> list.any(fn(candidate) {
+        candidate == "*"
+        || candidate == etag
+        || {
+          string.starts_with(candidate, "W/")
+          && string.drop_start(candidate, 2) == etag
+        }
+      })
+  }
+}
+
+fn attachment_download_name(filename: Option(String)) -> String {
+  case filename {
+    None -> "attachment"
+    Some(encoded) -> {
+      let filename = uri.percent_decode(encoded) |> result.unwrap(encoded)
+      case valid_filename(filename) {
+        True -> filename
+        False -> "attachment"
+      }
+    }
   }
 }
 
@@ -707,6 +813,8 @@ fn parse_range(
 fn attachment_head_response(
   total: Int,
   range: Option(attachment_store.ByteRange),
+  etag: String,
+  filename: String,
 ) -> Response(BitArray) {
   let #(status, length) = case range {
     None -> #(200, total)
@@ -719,6 +827,7 @@ fn attachment_head_response(
     |> response.set_header("content-length", int.to_string(length))
     |> response.set_header("cache-control", "private, max-age=3600")
     |> response.set_header("x-content-type-options", "nosniff")
+    |> attachment_identity_headers(etag, filename)
     |> response.set_body(<<>>)
   add_content_range(reply, range, total)
 }
@@ -726,6 +835,8 @@ fn attachment_head_response(
 fn attachment_download_response(
   download: attachment_store.Download,
   range: Option(attachment_store.ByteRange),
+  etag: String,
+  filename: String,
 ) -> Response(BitArray) {
   let status = case range {
     None -> 200
@@ -740,8 +851,23 @@ fn attachment_download_response(
   )
   |> response.set_header("cache-control", "private, max-age=3600")
   |> response.set_header("x-content-type-options", "nosniff")
+  |> attachment_identity_headers(etag, filename)
   |> response.set_body(download.data)
   |> add_content_range(range, download.total_size)
+}
+
+fn attachment_identity_headers(
+  reply: Response(body),
+  etag: String,
+  filename: String,
+) -> Response(body) {
+  reply
+  |> response.set_header("etag", etag)
+  |> response.set_header(
+    "content-disposition",
+    "attachment; filename=\"attachment\"; filename*=UTF-8''"
+      <> uri.percent_encode(filename),
+  )
 }
 
 fn add_content_range(

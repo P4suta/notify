@@ -188,8 +188,11 @@ certification; the exact evidence is recorded in
   scheduled events, keepalive, and bounded credit-based fan-out.
 - Identity: setup gate, Argon2id passwords, one-time bearer-token display,
   Basic/Bearer authentication, wildcard ACLs, CSRF-protected admin sessions.
-- Attachments: filesystem, shared filesystem, PostgreSQL blob, and S3-compatible
-  stores; content-addressed keys, ranges, quotas, expiry, and orphan cleanup.
+- Attachments: filesystem/shared-filesystem, PostgreSQL chunk, and S3-compatible
+  stores with `begin/write/finish/abort`, incremental SHA-256,
+  content-addressed promotion, byte ranges, quotas, expiry, and one-hour staging
+  cleanup. The current HTTP server still materialises request and response
+  bodies; transport-level streaming and sendfile remain open.
 - Operations: liveness, readiness, Prometheus metrics, request IDs, human/JSON
   logs, effective configuration, OpenAPI, delivery inspection/retry/purge, and
   attachment inspection.

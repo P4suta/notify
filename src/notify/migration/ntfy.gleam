@@ -6,6 +6,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import gleam/uri
 import notify/attachment_store
 import notify/core/acl
 import notify/core/message
@@ -983,7 +984,12 @@ fn apply_attachment_loop(
               attachment: Some(
                 message.Attachment(
                   ..metadata,
-                  url: attachment_url(base_url, value.topic, stored.key),
+                  url: attachment_url(
+                    base_url,
+                    value.topic,
+                    stored.key,
+                    metadata.name,
+                  ),
                   size: Some(stored.size),
                   expires: Some(stored.expires),
                 ),
@@ -1017,12 +1023,19 @@ fn attachment_url(
   base_url: String,
   attached_topic: topic.Topic,
   key: String,
+  filename: String,
 ) -> String {
   let base = case string.ends_with(base_url, "/") {
     True -> string.drop_end(base_url, 1)
     False -> base_url
   }
-  base <> "/file/" <> topic.to_string(attached_topic) <> "/" <> key
+  base
+  <> "/file/"
+  <> topic.to_string(attached_topic)
+  <> "/"
+  <> key
+  <> "/"
+  <> uri.percent_encode(filename)
 }
 
 fn rollback_attachments(

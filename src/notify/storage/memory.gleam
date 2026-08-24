@@ -4,11 +4,13 @@ import gleam/option
 import gleam/otp/actor
 import gleam/result
 import notify/core/message.{type Message}
+import notify/core/topic.{type Topic}
 import notify/storage.{type Query, type Storage}
 
 type Command {
   Save(Message, Subject(Result(Message, storage.Error)))
   RunQuery(Query, Subject(Result(List(Message), storage.Error)))
+  HasAttachment(Topic, String, Subject(Result(Bool, storage.Error)))
   ReleaseDue(Int, Int, Subject(Result(List(Message), storage.Error)))
   CleanupExpired(Int, Subject(Result(Int, storage.Error)))
   Stats(Subject(Result(storage.Stats, storage.Error)))
@@ -36,6 +38,11 @@ pub fn start() -> Result(Storage, actor.StartError) {
       query: fn(query) {
         process.call(subject, 5000, fn(reply) { RunQuery(query, reply) })
       },
+      has_attachment: fn(topic, key) {
+        process.call(subject, 5000, fn(reply) {
+          HasAttachment(topic, key, reply)
+        })
+      },
       release_due: fn(now, limit) {
         process.call(subject, 5000, fn(reply) { ReleaseDue(now, limit, reply) })
       },
@@ -59,6 +66,18 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
     }
     RunQuery(query, reply) -> {
       process.send(reply, Ok(storage.apply_query(state.messages, query)))
+      actor.continue(state)
+    }
+    HasAttachment(topic, key, reply) -> {
+      process.send(
+        reply,
+        Ok(
+          list.any(state.messages, fn(message) {
+            message.topic == topic
+            && storage.message_references_attachment(message, key)
+          }),
+        ),
+      )
       actor.continue(state)
     }
     ReleaseDue(now, limit, reply) -> {

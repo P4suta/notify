@@ -1,13 +1,19 @@
 -module(notify_ffi).
 
+-include_lib("kernel/include/file.hrl").
+
 -compile({no_auto_import,[atom_to_binary/1]}).
 
 -export([argv/0, getenv/1, read_file/1, ensure_parent/1, unix_seconds/0,
          monotonic_milliseconds/0, random_id/0,
          random_token_entropy/0, sha256_hex/1, sha256_hex_bytes/1,
+         sha256_init/0, sha256_update/2, sha256_final_hex/1,
          file_sha256/1, path_exists/1, read_binary_file/1, write_binary_file/2,
          attachment_ensure_directory/1, attachment_put/5, attachment_head/2,
-         attachment_read/2, attachment_delete/2, attachment_list/1,
+         attachment_upload_begin/2, attachment_upload_write/3,
+         attachment_upload_finish/6, attachment_upload_abort/2,
+         attachment_read_range/4,
+         attachment_delete/2, attachment_list/1,
          attachment_cleanup_expired/2,
          attachment_health/1, make_temporary_directory/0, public_asset/1,
          read_password/1, http_request/4, generate_vapid_keys/0, exit_failure/0,
@@ -15,6 +21,9 @@
          webpush_vapid_header/5, webpush_verify_vapid_header/2,
          webpush_send/9, valid_vapid_keys/2, relay_send/3,
          s3_put/5, s3_head/2, s3_get/3, s3_delete/2, s3_list/1, s3_cleanup/2,
+         s3_multipart_begin/3, s3_multipart_write/5,
+         s3_multipart_complete/4, s3_multipart_abort/3,
+         s3_promote_staging/5,
          s3_health/1, valid_ip_address/1, same_ip_address/2,
          sqlite_backup/2, sqlite_verify/1, sqlite_restore/2,
          sqlite_process_lock/1, sqlite_process_unlock/1,
@@ -820,6 +829,13 @@ sha256_hex(Value) ->
 sha256_hex_bytes(Value) ->
     binary:encode_hex(crypto:hash(sha256, Value), lowercase).
 
+sha256_init() -> crypto:hash_init(sha256).
+
+sha256_update(Context, Chunk) -> crypto:hash_update(Context, Chunk).
+
+sha256_final_hex(Context) ->
+    binary:encode_hex(crypto:hash_final(Context), lowercase).
+
 file_sha256(Path) ->
     case file:open(binary_to_list(Path), [read, raw, binary]) of
         {ok, Device} ->
@@ -873,6 +889,110 @@ attachment_put(Directory, Key, Data, Expires, MaxTotal) ->
             end
     end.
 
+attachment_upload_begin(Directory, Id) ->
+    case attachment_upload_path(Directory, Id) of
+        {error, Reason} -> {error, Reason};
+        {ok, Path} ->
+            case file:write_file(Path, <<>>, [binary, exclusive, sync]) of
+                ok -> {ok, nil};
+                {error, eexist} -> {error, <<"exists">>};
+                {error, Reason} -> {error, atom_to_binary(Reason)}
+            end
+    end.
+
+attachment_upload_write(Directory, Id, Chunk) ->
+    case attachment_upload_path(Directory, Id) of
+        {error, Reason} -> {error, Reason};
+        {ok, Path} ->
+            case file:write_file(Path, Chunk, [binary, append, sync]) of
+                ok -> {ok, nil};
+                {error, enoent} -> {error, <<"not_found">>};
+                {error, Reason} -> {error, atom_to_binary(Reason)}
+            end
+    end.
+
+attachment_upload_finish(Directory, Id, Key, Expires, MaxTotal, ExpectedSize) ->
+    case attachment_upload_path(Directory, Id) of
+        {error, Reason} -> {error, Reason};
+        {ok, Staging} ->
+            Target = attachment_path(Directory, Key, <<".blob">>),
+            Meta = attachment_path(Directory, Key, <<".expires">>),
+            case attachment_file_size(Staging) of
+                {error, Reason} -> {error, Reason};
+                {ok, ActualSize} when ActualSize =/= ExpectedSize ->
+                    {error, <<"upload_size_mismatch">>};
+                {ok, ActualSize} ->
+                    attachment_promote_staging(
+                        Directory, Staging, Target, Meta, ActualSize,
+                        Expires, MaxTotal)
+            end
+    end.
+
+attachment_promote_staging(Directory, Staging, Target, Meta, Size,
+                           Expires, MaxTotal) ->
+    case filelib:is_regular(Target) of
+        true ->
+            _ = file:delete(Staging),
+            case update_attachment_expiry(Meta, Expires) of
+                {ok, nil} -> attachment_head_from_paths(Target, Meta);
+                Error -> Error
+            end;
+        false ->
+            case attachment_total_size(Directory) + Size > MaxTotal of
+                true -> {error, <<"quota">>};
+                false ->
+                    case file:rename(Staging, Target) of
+                        ok ->
+                            case update_attachment_expiry(Meta, Expires) of
+                                {ok, nil} -> {ok, {Size, Expires}};
+                                {error, Reason} -> {error, Reason}
+                            end;
+                        {error, Reason} -> {error, atom_to_binary(Reason)}
+                    end
+            end
+    end.
+
+attachment_upload_abort(Directory, Id) ->
+    case attachment_upload_path(Directory, Id) of
+        {error, Reason} -> {error, Reason};
+        {ok, Path} ->
+            case file:delete(Path) of
+                ok -> {ok, nil};
+                {error, enoent} -> {error, <<"not_found">>};
+                {error, Reason} -> {error, atom_to_binary(Reason)}
+            end
+    end.
+
+attachment_upload_path(Directory, Id) when is_binary(Id), byte_size(Id) =:= 12 ->
+    case re:run(Id, <<"^[A-Za-z0-9]{12}$">>, [{capture, none}]) of
+        match -> {ok, filename:join(Directory, <<".upload-", Id/binary, ".tmp">>)};
+        nomatch -> {error, <<"not_found">>}
+    end;
+attachment_upload_path(_Directory, _Id) -> {error, <<"not_found">>}.
+
+attachment_file_size(Path) ->
+    case file:open(Path, [read, binary, raw]) of
+        {ok, Io} ->
+            Result = file:position(Io, eof),
+            _ = file:close(Io),
+            case Result of
+                {ok, Size} -> {ok, Size};
+                {error, Reason} -> {error, atom_to_binary(Reason)}
+            end;
+        {error, enoent} -> {error, <<"not_found">>};
+        {error, Reason} -> {error, atom_to_binary(Reason)}
+    end.
+
+attachment_head_from_paths(Target, Meta) ->
+    case {attachment_file_size(Target), file:read_file(Meta)} of
+        {{ok, Size}, {ok, EncodedExpiry}} ->
+            try {ok, {Size, binary_to_integer(EncodedExpiry)}}
+            catch _:_ -> {error, <<"invalid_metadata">>} end;
+        {{error, Reason}, _} -> {error, Reason};
+        {_, {error, enoent}} -> {error, <<"not_found">>};
+        {_, {error, Reason}} -> {error, atom_to_binary(Reason)}
+    end.
+
 atomic_attachment_write(Target, Meta, Data, Expires) ->
     Suffix = integer_to_binary(erlang:unique_integer([positive, monotonic])),
     Temp = <<Target/binary, ".", Suffix/binary, ".tmp">>,
@@ -894,8 +1014,10 @@ update_attachment_expiry(Meta, Expires) ->
         _ -> 0
     end,
     Latest = erlang:max(Previous, Expires),
-    Temp = <<Meta/binary, ".tmp">>,
-    case file:write_file(Temp, integer_to_binary(Latest), [binary, sync]) of
+    Suffix = integer_to_binary(erlang:unique_integer([positive, monotonic])),
+    Temp = <<Meta/binary, ".", Suffix/binary, ".tmp">>,
+    case file:write_file(
+            Temp, integer_to_binary(Latest), [binary, exclusive, sync]) of
         ok ->
             case file:rename(Temp, Meta) of
                 ok -> {ok, nil};
@@ -925,12 +1047,25 @@ attachment_head(Directory, Key) ->
         {error, Reason} -> {error, atom_to_binary(Reason)}
     end.
 
-attachment_read(Directory, Key) ->
-    case file:read_file(attachment_path(Directory, Key, <<".blob">>)) of
-        {ok, Data} -> {ok, Data};
+attachment_read_range(Directory, Key, Start, End)
+  when is_integer(Start), is_integer(End), Start >= 0, End >= Start ->
+    Path = attachment_path(Directory, Key, <<".blob">>),
+    case file:open(Path, [read, binary, raw]) of
+        {ok, Io} ->
+            Result = file:pread(Io, Start, End - Start + 1),
+            _ = file:close(Io),
+            case Result of
+                {ok, Data} when byte_size(Data) =:= End - Start + 1 ->
+                    {ok, Data};
+                {ok, _} -> {error, <<"invalid_range">>};
+                eof -> {error, <<"invalid_range">>};
+                {error, Reason} -> {error, atom_to_binary(Reason)}
+            end;
         {error, enoent} -> {error, <<"not_found">>};
         {error, Reason} -> {error, atom_to_binary(Reason)}
-    end.
+    end;
+attachment_read_range(_Directory, _Key, _Start, _End) ->
+    {error, <<"invalid_range">>}.
 
 attachment_list(Directory) ->
     case file:list_dir(Directory) of
@@ -1019,9 +1154,24 @@ cleanup_attachment_name(Directory, Name, Now, Count, ExistingError) ->
                     end
             end;
         <<".tmp">> ->
-            _ = file:delete(filename:join(Directory, NameBinary)),
-            {Count, ExistingError};
+            Path = filename:join(Directory, NameBinary),
+            case attachment_temp_is_stale(Path, Now) of
+                true ->
+                    case file:delete(Path) of
+                        ok -> {Count + 1, ExistingError};
+                        {error, enoent} -> {Count, ExistingError};
+                        {error, Reason} -> {Count, atom_to_binary(Reason)}
+                    end;
+                false -> {Count, ExistingError}
+            end;
         _ -> {Count, ExistingError}
+    end.
+
+attachment_temp_is_stale(Path, Now) ->
+    case file:read_file_info(Path, [{time, posix}]) of
+        {ok, #file_info{mtime = Modified}} when is_integer(Modified) ->
+            Modified =< Now - 3600;
+        _ -> false
     end.
 
 attachment_health(Directory) ->
@@ -1050,6 +1200,117 @@ attachment_total_size(Directory) ->
     filelib:fold_files(binary_to_list(Directory), ".*\\.blob$", false,
         fun(File, Total) -> filelib:file_size(File) + Total end, 0).
 
+s3_multipart_begin(Config, StagingKey, Expires) ->
+    Headers = [{<<"x-amz-meta-expires">>, integer_to_binary(Expires)}],
+    case s3_request(Config, <<"POST">>, StagingKey, <<"uploads=">>, Headers, <<>>) of
+        {ok, Status, _, Body} when Status >= 200, Status < 300 ->
+            case re:run(Body, <<"<UploadId>([^<]+)</UploadId>">>,
+                        [{capture, [1], binary}]) of
+                {match, [UploadId]} -> {ok, s3_xml_unescape(UploadId)};
+                _ -> {error, <<"invalid_s3_multipart_response">>}
+            end;
+        {ok, Status, _, _} -> s3_status_error(Status);
+        {error, Reason} -> {error, Reason}
+    end.
+
+s3_multipart_write(Config, StagingKey, UploadId, PartNumber, Data) ->
+    EncodedUploadId = s3_query_encode(UploadId),
+    Query = iolist_to_binary([
+        <<"partNumber=">>, integer_to_binary(PartNumber),
+        <<"&uploadId=">>, EncodedUploadId
+    ]),
+    case s3_request(Config, <<"PUT">>, StagingKey, Query, [], Data) of
+        {ok, Status, Headers, _} when Status >= 200, Status < 300 ->
+            case s3_response_header("etag", Headers) of
+                {ok, Etag} -> {ok, unicode:characters_to_binary(Etag)};
+                error -> {error, <<"missing_s3_multipart_etag">>}
+            end;
+        {ok, Status, _, _} -> s3_status_error(Status);
+        {error, Reason} -> {error, Reason}
+    end.
+
+s3_multipart_complete(Config, StagingKey, UploadId, Parts) ->
+    EncodedUploadId = s3_query_encode(UploadId),
+    Body = iolist_to_binary([
+        <<"<CompleteMultipartUpload>">>,
+        [[<<"<Part><PartNumber>">>, integer_to_binary(Number),
+          <<"</PartNumber><ETag>">>, s3_xml_escape(Etag),
+          <<"</ETag></Part>">>] || {Number, Etag} <- Parts],
+        <<"</CompleteMultipartUpload>">>
+    ]),
+    Query = <<"uploadId=", EncodedUploadId/binary>>,
+    case s3_request(Config, <<"POST">>, StagingKey, Query, [], Body) of
+        {ok, Status, _, ResponseBody} when Status >= 200, Status < 300 ->
+            case binary:match(ResponseBody, <<"<Error>">>) of
+                nomatch -> {ok, nil};
+                _ -> {error, <<"s3_multipart_completion_error">>}
+            end;
+        {ok, Status, _, _} -> s3_status_error(Status);
+        {error, Reason} -> {error, Reason}
+    end.
+
+s3_multipart_abort(Config, StagingKey, UploadId) ->
+    Query = <<"uploadId=", (s3_query_encode(UploadId))/binary>>,
+    case s3_request(Config, <<"DELETE">>, StagingKey, Query, [], <<>>) of
+        {ok, Status, _, _} when Status >= 200, Status < 300 -> {ok, nil};
+        {ok, 404, _, _} -> {ok, nil};
+        {ok, Status, _, _} -> s3_status_error(Status);
+        {error, Reason} -> {error, Reason}
+    end.
+
+s3_promote_staging(Config, StagingKey, Key, Expires, MaxTotal) ->
+    case s3_head(Config, Key) of
+        {ok, {_Size, ExistingExpiry}} ->
+            Latest = erlang:max(Expires, ExistingExpiry),
+            case s3_copy_object(Config, Key, Key, Latest) of
+                {ok, nil} -> s3_delete(Config, StagingKey);
+                Error -> Error
+            end;
+        {error, <<"not_found">>} ->
+            case {s3_head(Config, StagingKey), s3_list_objects(Config)} of
+                {{ok, {StagingSize, _}}, {ok, Objects}} ->
+                    Total = lists:sum([
+                        Size || {ObjectKey, Size} <- Objects,
+                                not s3_is_staging(ObjectKey)
+                    ]),
+                    case Total + StagingSize > MaxTotal of
+                        true -> {error, <<"quota">>};
+                        false ->
+                            case s3_copy_object(
+                                    Config, StagingKey, Key, Expires) of
+                                {ok, nil} -> s3_delete(Config, StagingKey);
+                                Error -> Error
+                            end
+                    end;
+                {{error, Reason}, _} -> {error, Reason};
+                {_, {error, Reason}} -> {error, Reason}
+            end;
+        {error, Reason} -> {error, Reason}
+    end.
+
+s3_copy_object({config, _Endpoint, Bucket, _Region, _AccessKey,
+                _SecretKey, _PathStyle} = Config,
+               SourceKey, TargetKey, Expires) ->
+    RawSource = <<"/", Bucket/binary, "/", SourceKey/binary>>,
+    CopySource = unicode:characters_to_binary(
+        uri_string:quote(binary_to_list(RawSource))),
+    Headers = [
+        {<<"x-amz-copy-source">>, CopySource},
+        {<<"x-amz-metadata-directive">>, <<"REPLACE">>},
+        {<<"x-amz-meta-expires">>, integer_to_binary(Expires)}
+    ],
+    case s3_request(Config, <<"PUT">>, TargetKey, <<>>, Headers, <<>>) of
+        {ok, Status, _, _} when Status >= 200, Status < 300 -> {ok, nil};
+        {ok, Status, _, _} -> s3_status_error(Status);
+        {error, Reason} -> {error, Reason}
+    end.
+
+s3_query_encode(Value) ->
+    unicode:characters_to_binary(uri_string:quote(binary_to_list(Value))).
+
+s3_is_staging(<<".staging/", _/binary>>) -> true;
+s3_is_staging(_) -> false.
+
 s3_put(Config, Key, Data, Expires, MaxTotal) ->
     case s3_head(Config, Key) of
         {ok, {_Size, ExistingExpiry}} ->
@@ -1057,7 +1318,10 @@ s3_put(Config, Key, Data, Expires, MaxTotal) ->
         {error, <<"not_found">>} ->
             case s3_list_objects(Config) of
                 {ok, Objects} ->
-                    Total = lists:sum([Size || {_ObjectKey, Size} <- Objects]),
+                    Total = lists:sum([
+                        Size || {ObjectKey, Size} <- Objects,
+                                not s3_is_staging(ObjectKey)
+                    ]),
                     case Total + byte_size(Data) > MaxTotal of
                         true -> {error, <<"quota">>};
                         false -> s3_put_object(Config, Key, Data, Expires)
@@ -1095,7 +1359,8 @@ s3_get(Config, Key, none) ->
     case s3_request(Config, <<"GET">>, Key, <<>>, [], <<>>) of
         {ok, Status, _, Body} when Status >= 200, Status < 300 ->
             Size = byte_size(Body),
-            {ok, {Body, Size, 0, erlang:max(0, Size - 1)}};
+            End = case Size of 0 -> -1; _ -> Size - 1 end,
+            {ok, {Body, Size, 0, End}};
         {ok, 404, _, _} -> {error, <<"not_found">>};
         {ok, Status, _, _} -> s3_status_error(Status);
         {error, Reason} -> {error, Reason}
@@ -1154,7 +1419,10 @@ s3_delete(Config, Key) ->
 s3_list(Config) ->
     case s3_list_objects(Config) of
         {error, Reason} -> {error, Reason};
-        {ok, Objects} -> s3_list_metadata(Config, Objects, [])
+        {ok, Objects} -> s3_list_metadata(
+            Config,
+            [{Key, Size} || {Key, Size} <- Objects, not s3_is_staging(Key)],
+            [])
     end.
 
 s3_list_metadata(_Config, [], Acc) -> {ok, lists:reverse(Acc)};
@@ -1167,11 +1435,105 @@ s3_list_metadata(Config, [{Key, _ListedSize} | Rest], Acc) ->
     end.
 
 s3_cleanup(Config, Now) ->
-    case s3_list_objects(Config) of
+    case s3_cleanup_multipart_uploads(Config, Now) of
         {error, Reason} -> {error, Reason};
-        {ok, Objects} ->
-            s3_cleanup_objects(Config, Objects, Now, 0)
+        {ok, MultipartCount} ->
+            case s3_list_objects(Config) of
+                {error, Reason} -> {error, Reason};
+                {ok, Objects} ->
+                    s3_cleanup_objects(
+                        Config, Objects, Now, MultipartCount)
+            end
     end.
+
+s3_cleanup_multipart_uploads(Config, Now) ->
+    s3_cleanup_multipart_page(Config, Now, none, none, 0, 0).
+
+s3_cleanup_multipart_page(_Config, _Now, _KeyMarker, _UploadMarker,
+                          _Count, Page) when Page >= 10000 ->
+    {error, <<"s3_multipart_list_page_limit_exceeded">>};
+s3_cleanup_multipart_page(Config, Now, KeyMarker, UploadMarker, Count, Page) ->
+    Query = s3_multipart_list_query(KeyMarker, UploadMarker),
+    case s3_request(Config, <<"GET">>, <<>>, Query, [], <<>>) of
+        {ok, Status, _, Body} when Status >= 200, Status < 300 ->
+            Pattern = <<"<Upload>.*?<Key>([^<]+)</Key>.*?<UploadId>([^<]+)</UploadId>.*?<Initiated>([^<]+)</Initiated>.*?</Upload>">>,
+            case re:run(
+                    Body, Pattern,
+                    [global, dotall, {capture, [1, 2, 3], binary}]) of
+                nomatch ->
+                    s3_cleanup_multipart_next(
+                        Config, Now, Body, Count, Page);
+                {match, Captures} ->
+                    case s3_cleanup_multipart_items(
+                            Config, Now, Captures, Count) of
+                        {error, Reason} -> {error, Reason};
+                        {ok, NextCount} ->
+                            s3_cleanup_multipart_next(
+                                Config, Now, Body, NextCount, Page)
+                    end;
+                {error, _} -> {error, <<"invalid_s3_multipart_list_response">>}
+            end;
+        {ok, Status, _, _} -> s3_status_error(Status);
+        {error, Reason} -> {error, Reason}
+    end.
+
+s3_cleanup_multipart_items(_Config, _Now, [], Count) -> {ok, Count};
+s3_cleanup_multipart_items(Config, Now, [[RawKey, RawUploadId, Initiated] | Rest],
+                           Count) ->
+    Key = s3_xml_unescape(RawKey),
+    UploadId = s3_xml_unescape(RawUploadId),
+    case {s3_is_staging(Key), s3_rfc3339_seconds(Initiated)} of
+        {true, {ok, StartedAt}} when StartedAt =< Now - 3600 ->
+            case s3_multipart_abort(Config, Key, UploadId) of
+                {ok, nil} ->
+                    s3_cleanup_multipart_items(
+                        Config, Now, Rest, Count + 1);
+                {error, Reason} -> {error, Reason}
+            end;
+        {_, {ok, _}} ->
+            s3_cleanup_multipart_items(Config, Now, Rest, Count);
+        {_, error} -> {error, <<"invalid_s3_multipart_initiated_at">>}
+    end.
+
+s3_cleanup_multipart_next(Config, Now, Body, Count, Page) ->
+    case binary:match(Body, <<"<IsTruncated>true</IsTruncated>">>) of
+        nomatch -> {ok, Count};
+        _ ->
+            case {
+                s3_xml_field(Body, <<"NextKeyMarker">>),
+                s3_xml_field(Body, <<"NextUploadIdMarker">>)
+            } of
+                {{ok, NextKey}, {ok, NextUpload}} ->
+                    s3_cleanup_multipart_page(
+                        Config,
+                        Now,
+                        {some, NextKey},
+                        {some, NextUpload},
+                        Count,
+                        Page + 1);
+                _ -> {error, <<"invalid_s3_multipart_list_response">>}
+            end
+    end.
+
+s3_multipart_list_query(none, none) -> <<"uploads=">>;
+s3_multipart_list_query({some, Key}, {some, UploadId}) ->
+    EncodedKey = s3_query_encode(Key),
+    EncodedUploadId = s3_query_encode(UploadId),
+    <<"key-marker=", EncodedKey/binary,
+      "&upload-id-marker=", EncodedUploadId/binary, "&uploads=">>.
+
+s3_xml_field(Body, Name) ->
+    Pattern = <<"<", Name/binary, ">([^<]+)</", Name/binary, ">">>,
+    case re:run(Body, Pattern, [{capture, [1], binary}]) of
+        {match, [Value]} -> {ok, s3_xml_unescape(Value)};
+        _ -> error
+    end.
+
+s3_rfc3339_seconds(Value) ->
+    try
+        {ok, calendar:rfc3339_to_system_time(
+            binary_to_list(Value), [{unit, second}])}
+    catch _:_ -> error end.
 
 s3_cleanup_objects(_Config, [], _Now, Count) -> {ok, Count};
 s3_cleanup_objects(Config, [{Key, _Size} | Rest], Now, Count) ->
@@ -1242,6 +1604,17 @@ s3_xml_unescape(Value) ->
         {<<"&gt;">>, <<">">>},
         {<<"&quot;">>, <<"\"">>},
         {<<"&apos;">>, <<"'">>}
+    ]).
+
+s3_xml_escape(Value) ->
+    lists:foldl(fun({Plain, Encoded}, Current) ->
+        binary:replace(Current, Plain, Encoded, [global])
+    end, Value, [
+        {<<"&">>, <<"&amp;">>},
+        {<<"<">>, <<"&lt;">>},
+        {<<">">>, <<"&gt;">>},
+        {<<"\"">>, <<"&quot;">>},
+        {<<"'">>, <<"&apos;">>}
     ]).
 
 s3_request({config, Endpoint, Bucket, Region, AccessKey, SecretKey, PathStyle},
@@ -1362,6 +1735,9 @@ s3_http_request(Method, Url, Headers, Body) ->
             Options, HttpOptions);
         <<"GET">> -> httpc:request(get, {UrlList, HeaderList}, Options, HttpOptions);
         <<"HEAD">> -> httpc:request(head, {UrlList, HeaderList}, Options, HttpOptions);
+        <<"POST">> -> httpc:request(post,
+            {UrlList, HeaderList, "application/xml", Body},
+            Options, HttpOptions);
         <<"DELETE">> -> httpc:request(delete, {UrlList, HeaderList}, Options, HttpOptions)
     end,
     case Result of

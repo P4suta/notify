@@ -39,6 +39,7 @@ type Command {
     Subject(Result(Message, storage.Error)),
   )
   RunQuery(Query, Subject(Result(List(Message), storage.Error)))
+  HasAttachment(topic.Topic, String, Subject(Result(Bool, storage.Error)))
   ReleaseDue(Int, Int, Subject(Result(List(Message), storage.Error)))
   CleanupExpired(Int, Subject(Result(Int, storage.Error)))
   Stats(Subject(Result(storage.Stats, storage.Error)))
@@ -199,6 +200,11 @@ fn start_actor(state: State) -> Result(Adapter, storage.Error) {
       query: fn(query) {
         process.call(subject, 30_000, fn(reply) { RunQuery(query, reply) })
       },
+      has_attachment: fn(topic, key) {
+        process.call(subject, 30_000, fn(reply) {
+          HasAttachment(topic, key, reply)
+        })
+      },
       release_due: fn(now, limit) {
         process.call(subject, 30_000, fn(reply) {
           ReleaseDue(now, limit, reply)
@@ -236,6 +242,8 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
     Commit(message, jobs, reply) ->
       respond(state, reply, commit(state, message, jobs))
     RunQuery(query, reply) -> respond(state, reply, run_query(state, query))
+    HasAttachment(topic, key, reply) ->
+      respond(state, reply, has_attachment(state.connection, topic, key))
     ReleaseDue(now, limit, reply) ->
       respond(state, reply, release_due(state, now, limit))
     CleanupExpired(now, reply) ->
@@ -597,6 +605,24 @@ fn stats(
 fn health(connection: postgleam.Connection) -> Result(Nil, storage.Error) {
   postgleam.query(connection, "SELECT 1", [])
   |> result.map(fn(_) { Nil })
+  |> result.map_error(map_error)
+}
+
+fn has_attachment(
+  connection: postgleam.Connection,
+  attached_topic: topic.Topic,
+  key: String,
+) -> Result(Bool, storage.Error) {
+  let path = "/file/" <> topic.to_string(attached_topic) <> "/" <> key
+  postgleam.query_one(
+    connection,
+    "SELECT EXISTS(SELECT 1 FROM notify_messages WHERE topic = $1 AND (strpos(COALESCE(payload->'attachment'->>'url', ''), $2 || '/') > 0 OR right(COALESCE(payload->'attachment'->>'url', ''), length($2)) = $2))",
+    [postgleam.text(topic.to_string(attached_topic)), postgleam.text(path)],
+    {
+      use found <- decode.element(0, decode.bool)
+      decode.success(found)
+    },
+  )
   |> result.map_error(map_error)
 }
 

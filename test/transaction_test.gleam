@@ -23,6 +23,7 @@ pub fn storage_failure_returns_503_and_does_not_fan_out_test() {
       migrate: fn() { Ok(Nil) },
       save: fn(_) { Error(storage.Unavailable("database offline")) },
       query: fn(_) { Ok([]) },
+      has_attachment: fn(_, _) { Ok(False) },
       release_due: fn(_, _) { Ok([]) },
       cleanup_expired: fn(_) { Ok(0) },
       stats: fn() { Ok(storage.Stats(0, 0, 0)) },
@@ -64,6 +65,7 @@ pub fn message_id_conflicts_are_retried_before_fanout_test() {
         }
       },
       query: fn(_) { Ok([]) },
+      has_attachment: fn(_, _) { Ok(False) },
       release_due: fn(_, _) { Ok([]) },
       cleanup_expired: fn(_) { Ok(0) },
       stats: fn() { Ok(storage.Stats(0, 0, 0)) },
@@ -94,6 +96,7 @@ pub fn message_id_conflict_retry_is_bounded_test() {
       migrate: fn() { Ok(Nil) },
       save: fn(_) { Error(storage.Conflict("duplicate message ID")) },
       query: fn(_) { Ok([]) },
+      has_attachment: fn(_, _) { Ok(False) },
       release_due: fn(_, _) { Ok([]) },
       cleanup_expired: fn(_) { Ok(0) },
       stats: fn() { Ok(storage.Stats(0, 0, 0)) },

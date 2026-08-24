@@ -300,10 +300,21 @@ pub fn local_ntfy_attachments_are_content_addressed_and_rolled_back_on_db_failur
   assert stored.key == attachment_store.content_key(contents)
   let assert Ok(second) = ntfy.run(migration)
   assert second.attachments == ntfy.Counts(1, 0, 1)
+  let assert Ok(imported_store) = sqlite.start(migration.destination_file)
+  let assert Ok(files) = topic.parse("files")
+  let assert Ok([imported]) =
+    imported_store.query(storage.Query(
+      topics: [files],
+      since: storage.All,
+      include_scheduled: True,
+      criteria: filter.none(),
+    ))
+  let assert Some(imported_attachment) = imported.attachment
+  assert string.ends_with(imported_attachment.url, "/sample.bin")
+  assert imported_store.has_attachment(files, stored.key) == Ok(True)
 
   let conflict_destination = directory <> "/conflict.db"
   let assert Ok(conflict_store) = sqlite.start(conflict_destination)
-  let assert Ok(files) = topic.parse("files")
   let conflicting =
     message.Message(
       id: "LocalAt001XY",
