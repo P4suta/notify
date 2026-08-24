@@ -8,6 +8,8 @@ import gleam/string
 import notify/access
 import notify/attachment_store
 import notify/attachment_store/postgres as attachment_postgres
+import notify/audit
+import notify/audit/postgres as audit_postgres
 import notify/core/acl
 import notify/core/filter
 import notify/core/message
@@ -97,6 +99,70 @@ fn fixture(id: String, scheduled: Bool, timestamp: Int) -> message.Message {
     cached: True,
     sequence_id: None,
   )
+}
+
+pub fn postgres_audit_is_shared_and_keyset_paginated_test() {
+  case test_database() {
+    Error(_) -> Nil
+    Ok(database) -> {
+      let TestDatabase(configuration:, ..) = database
+      let assert Ok(first_store) = audit_postgres.start(configuration)
+      let assert Ok(second_store) = audit_postgres.start(configuration)
+      let assert Ok(first_event) =
+        audit.new_event(
+          occurred_at: 1000,
+          actor: "admin",
+          action: audit.AclChange,
+          target: Some("jobs-*"),
+          outcome: audit.Attempted,
+          status: None,
+          client_ip: "203.0.113.5",
+          request_id: "postgres-audit-1",
+        )
+      let assert Ok(second_event) =
+        audit.new_event(
+          occurred_at: 1001,
+          actor: "admin",
+          action: audit.AclChange,
+          target: Some("jobs-*"),
+          outcome: audit.Succeeded,
+          status: Some(200),
+          client_ip: "203.0.113.5",
+          request_id: "postgres-audit-1",
+        )
+      let assert Ok(stored_first) = first_store.append(first_event)
+      let assert Ok(stored_second) = second_store.append(second_event)
+      assert stored_first.sequence < stored_second.sequence
+      let assert Ok(audit.Page([latest], Some(next))) =
+        first_store.page(None, 1)
+      assert latest.sequence == stored_second.sequence
+      let assert Ok(audit.Page([oldest], None)) =
+        second_store.page(Some(next), 1)
+      assert oldest.sequence == stored_first.sequence
+      drop_test_database(database)
+    }
+  }
+}
+
+pub fn postgres_audit_rejects_an_unsupported_schema_before_migration_test() {
+  case test_database() {
+    Error(_) -> Nil
+    Ok(database) -> {
+      let TestDatabase(configuration:, ..) = database
+      let assert Ok(connection) = postgleam.connect(configuration)
+      let assert Ok(_) =
+        postgleam.simple_query(
+          connection,
+          "CREATE TABLE notify_audit_log (sequence BIGSERIAL PRIMARY KEY, occurred_at BIGINT NOT NULL)",
+        )
+      postgleam.disconnect(connection)
+
+      let assert Error(audit.Corrupt(detail)) =
+        audit_postgres.start(configuration)
+      assert string.contains(detail, "database was not modified")
+      drop_test_database(database)
+    }
+  }
 }
 
 pub fn postgres_identity_token_activity_contract_test() {

@@ -7,6 +7,7 @@ import gleam/json
 import gleam/option.{Some}
 import gleam/string
 import notify/access
+import notify/audit/memory as audit_memory
 import notify/http/router
 import notify/identity/sqlite as identity_sqlite
 import notify/runtime
@@ -19,6 +20,7 @@ fn managed_runtime() -> #(runtime.Runtime, String) {
     identity_sqlite.start(":memory:", fn() { 1000 }, fn() { setup_entropy })
   let assert Ok(control) = access.managed(store)
   let assert Ok(messages) = memory.start()
+  let assert Ok(audits) = audit_memory.start()
   #(
     runtime.new(
       storage: messages,
@@ -26,7 +28,8 @@ fn managed_runtime() -> #(runtime.Runtime, String) {
       ids: runtime.secure_ids(),
       retention_seconds: 43_200,
     )
-      |> runtime.with_access(control),
+      |> runtime.with_access(control)
+      |> runtime.with_audit(audits),
     setup_token,
   )
 }
@@ -152,6 +155,24 @@ pub fn ntfy_account_login_token_revoke_and_password_contract_test() {
     |> router.handle(runtime)
     |> fn(response) { response.status }
     == 200
+
+  let audit_response =
+    api_request(
+      http.Get,
+      "/api/v1/audit",
+      "",
+      authorization("admin", "another secure password"),
+    )
+    |> router.handle(runtime)
+  assert audit_response.status == 200
+  let audit_body = response_text(audit_response)
+  assert string.contains(audit_body, "\"action\":\"token.create\"")
+  assert string.contains(audit_body, "\"action\":\"token.revoke\"")
+  assert string.contains(audit_body, "\"action\":\"user.password_change\"")
+  assert !string.contains(audit_body, login_token)
+  assert !string.contains(audit_body, api_token)
+  assert !string.contains(audit_body, "correct horse battery staple")
+  assert !string.contains(audit_body, "another secure password")
 }
 
 pub fn ntfy_admin_users_and_access_contract_test() {
@@ -225,4 +246,16 @@ pub fn ntfy_admin_users_and_access_contract_test() {
     |> router.handle(runtime)
   assert non_admin.status == 401
   assert string.contains(response_text(non_admin), "\"code\":40101")
+
+  let audit_response =
+    api_request(http.Get, "/api/v1/audit", "", admin)
+    |> router.handle(runtime)
+  assert audit_response.status == 200
+  let audit_body = response_text(audit_response)
+  assert string.contains(audit_body, "\"action\":\"user.create\"")
+  assert string.contains(audit_body, "\"action\":\"acl.change\"")
+  assert string.contains(audit_body, "\"action\":\"acl.revoke\"")
+  assert string.contains(audit_body, "\"action\":\"user.delete\"")
+  assert !string.contains(audit_body, "a different secure password")
+  assert !string.contains(audit_body, "a sufficiently long password")
 }

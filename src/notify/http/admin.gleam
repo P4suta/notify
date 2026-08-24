@@ -12,9 +12,12 @@ import gleam/result
 import gleam/string
 import notify/access
 import notify/attachment_store
+import notify/audit
 import notify/core/acl
 import notify/delivery
+import notify/http/audit_log
 import notify/http/auth
+import notify/http/cursor
 import notify/identity
 import notify/runtime.{type Runtime}
 import notify/security/token
@@ -52,124 +55,180 @@ pub fn route(
     Get, ["api", "v1", "session"] -> Some(current_session(req, runtime))
     Delete, ["api", "v1", "session"] -> Some(logout(req, runtime))
     Get, ["api", "v1", "users"] ->
-      Some(with_admin(req, runtime, False, fn(_) { list_users(req, runtime) }))
+      Some(with_admin(req, runtime, fn(_) { list_users(req, runtime) }))
     Post, ["api", "v1", "users"] ->
-      Some(with_admin(req, runtime, True, fn(_) { create_user(req, runtime) }))
+      Some(
+        with_admin_mutation(req, runtime, audit.UserCreate, fn(_) {
+          create_user(req, runtime)
+        }),
+      )
     Delete, ["api", "v1", "users", username] ->
       Some(
-        with_admin(req, runtime, True, fn(_) { delete_user(username, runtime) }),
+        with_admin_mutation(req, runtime, audit.UserDelete, fn(_) {
+          delete_user(username, runtime)
+        }),
       )
     Put, ["api", "v1", "users", username, "password"] ->
       Some(
-        with_admin(req, runtime, True, fn(_) {
+        with_admin_mutation(req, runtime, audit.PasswordChange, fn(_) {
           change_password(req, username, runtime)
         }),
       )
     Get, ["api", "v1", "tokens"] ->
-      Some(with_admin(req, runtime, False, fn(_) { list_tokens(req, runtime) }))
+      Some(with_admin(req, runtime, fn(_) { list_tokens(req, runtime) }))
     Post, ["api", "v1", "tokens"] ->
-      Some(with_admin(req, runtime, True, fn(_) { create_token(req, runtime) }))
-    Delete, ["api", "v1", "tokens", id] ->
-      Some(with_admin(req, runtime, True, fn(_) { revoke_token(id, runtime) }))
-    Get, ["api", "v1", "acl"] ->
-      Some(with_admin(req, runtime, False, fn(_) { list_acl(req, runtime) }))
-    Put, ["api", "v1", "acl"] | Post, ["api", "v1", "acl"] ->
-      Some(with_admin(req, runtime, True, fn(_) { put_acl(req, runtime) }))
-    Delete, ["api", "v1", "acl"] ->
-      Some(with_admin(req, runtime, True, fn(_) { delete_acl(req, runtime) }))
-    Get, ["api", "v1", "anonymous-access"] ->
       Some(
-        with_admin(req, runtime, False, fn(_) { get_anonymous_access(runtime) }),
+        with_admin_mutation(req, runtime, audit.TokenCreate, fn(_) {
+          create_token(req, runtime)
+        }),
       )
+    Delete, ["api", "v1", "tokens", id] ->
+      Some(
+        with_admin_mutation(req, runtime, audit.TokenRevoke, fn(_) {
+          revoke_token(id, runtime)
+        }),
+      )
+    Get, ["api", "v1", "acl"] ->
+      Some(with_admin(req, runtime, fn(_) { list_acl(req, runtime) }))
+    Put, ["api", "v1", "acl"] | Post, ["api", "v1", "acl"] ->
+      Some(
+        with_admin_mutation(req, runtime, audit.AclChange, fn(_) {
+          put_acl(req, runtime)
+        }),
+      )
+    Delete, ["api", "v1", "acl"] ->
+      Some(
+        with_admin_mutation(req, runtime, audit.AclRevoke, fn(_) {
+          delete_acl(req, runtime)
+        }),
+      )
+    Get, ["api", "v1", "anonymous-access"] ->
+      Some(with_admin(req, runtime, fn(_) { get_anonymous_access(runtime) }))
     Put, ["api", "v1", "anonymous-access"] ->
       Some(
-        with_admin(req, runtime, True, fn(_) {
+        with_admin_mutation(req, runtime, audit.AnonymousAccessChange, fn(_) {
           put_anonymous_access(req, runtime)
         }),
       )
     Get, ["api", "v1", "system", "health"] ->
-      Some(with_admin(req, runtime, False, fn(_) { system_health(runtime) }))
+      Some(with_admin(req, runtime, fn(_) { system_health(runtime) }))
     Get, ["api", "v1", "delivery-jobs"] ->
-      Some(
-        with_admin(req, runtime, False, fn(_) {
-          list_delivery_jobs(req, runtime)
-        }),
-      )
+      Some(with_admin(req, runtime, fn(_) { list_delivery_jobs(req, runtime) }))
     Post, ["api", "v1", "delivery-jobs", id, "retry"] ->
       Some(
-        with_admin(req, runtime, True, fn(_) { retry_delivery_job(id, runtime) }),
+        with_admin_mutation(req, runtime, audit.DeliveryRetry, fn(_) {
+          retry_delivery_job(id, runtime)
+        }),
       )
     Delete, ["api", "v1", "delivery-jobs", id] ->
       Some(
-        with_admin(req, runtime, True, fn(_) { purge_delivery_job(id, runtime) }),
+        with_admin_mutation(req, runtime, audit.DeliveryPurge, fn(_) {
+          purge_delivery_job(id, runtime)
+        }),
       )
     Get, ["api", "v1", "attachments"] ->
-      Some(
-        with_admin(req, runtime, False, fn(_) { list_attachments(req, runtime) }),
-      )
+      Some(with_admin(req, runtime, fn(_) { list_attachments(req, runtime) }))
     Delete, ["api", "v1", "attachments", key] ->
       Some(
-        with_admin(req, runtime, True, fn(_) { delete_attachment(key, runtime) }),
+        with_admin_mutation(req, runtime, audit.AttachmentDelete, fn(_) {
+          delete_attachment(key, runtime)
+        }),
       )
+    Get, ["api", "v1", "audit"] ->
+      Some(with_admin(req, runtime, fn(_) { list_audit(req, runtime) }))
     _, _ -> None
   }
 }
 
 fn login(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
   use login <- parse_json_body(req, login_decoder())
-  let runtime.Clock(now) = runtime.clock
   case
-    access.setup_required(runtime.access),
-    access.authenticate(
-      runtime.access,
-      access.Basic(login.username, login.password),
-      now(),
+    audit_log.append(
+      req,
+      runtime,
+      "anonymous",
+      audit.SessionLogin,
+      None,
+      audit.Attempted,
+      None,
     )
   {
-    Ok(True), _ ->
-      problem(503, "Setup required", "Complete the one-time server setup first")
-    _, Error(_) ->
-      problem(401, "Authentication failed", "Invalid username or password")
-    Error(_), _ ->
-      problem(
-        503,
-        "Authentication unavailable",
-        "Identity storage is unavailable",
-      )
-    Ok(False), Ok(principal) -> {
-      let runtime.IdGenerator(next_id) = runtime.ids
-      case
-        access.create_token_for_username(
+    Error(_) -> audit_unavailable()
+    Ok(_) -> {
+      let runtime.Clock(now) = runtime.clock
+      let reply = case
+        access.setup_required(runtime.access),
+        access.authenticate(
           runtime.access,
-          fn() { "ses_" <> next_id() },
-          login.username,
-          "__web_session__",
-          Some(now() + 43_200),
+          access.Basic(login.username, login.password),
           now(),
-          token.secure_entropy,
         )
       {
-        Error(_) ->
-          problem(503, "Session unavailable", "Could not persist the session")
-        Ok(#(_, raw)) -> {
-          let #(username, role) = principal_name_role(principal)
-          json_response(
-            201,
-            json.object([
-              #("username", json.string(username)),
-              #("role", json.string(role_string(role))),
-              #("csrf_token", json.string(csrf_token(raw))),
-              #("expires", json.int(now() + 43_200)),
-            ]),
+        Ok(True), _ ->
+          problem(
+            503,
+            "Setup required",
+            "Complete the one-time server setup first",
           )
-          |> response.set_header(
-            "set-cookie",
-            "notify_session="
-              <> raw
-              <> "; Path=/; Max-Age=43200; Secure; HttpOnly; SameSite=Strict",
+        _, Error(_) ->
+          problem(401, "Authentication failed", "Invalid username or password")
+        Error(_), _ ->
+          problem(
+            503,
+            "Authentication unavailable",
+            "Identity storage is unavailable",
           )
+        Ok(False), Ok(principal) -> {
+          let runtime.IdGenerator(next_id) = runtime.ids
+          case
+            access.create_token_for_username(
+              runtime.access,
+              fn() { "ses_" <> next_id() },
+              login.username,
+              "__web_session__",
+              Some(now() + 43_200),
+              now(),
+              token.secure_entropy,
+            )
+          {
+            Error(_) ->
+              problem(
+                503,
+                "Session unavailable",
+                "Could not persist the session",
+              )
+            Ok(#(_, raw)) -> {
+              let #(username, role) = principal_name_role(principal)
+              json_response(
+                201,
+                json.object([
+                  #("username", json.string(username)),
+                  #("role", json.string(role_string(role))),
+                  #("csrf_token", json.string(csrf_token(raw))),
+                  #("expires", json.int(now() + 43_200)),
+                ]),
+              )
+              |> response.set_header(
+                "set-cookie",
+                "notify_session="
+                  <> raw
+                  <> "; Path=/; Max-Age=43200; Secure; HttpOnly; SameSite=Strict",
+              )
+            }
+          }
         }
       }
+      audited_result(
+        reply,
+        req,
+        runtime,
+        case reply.status == 201 {
+          True -> login.username
+          False -> "anonymous"
+        },
+        audit.SessionLogin,
+        None,
+      )
     }
   }
 }
@@ -209,38 +268,75 @@ fn current_session(
 
 fn logout(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
   case auth.session_token(req), auth.valid_csrf(req) {
-    None, _ ->
-      problem(401, "Session required", "No web session cookie was sent")
-    Some(_), False ->
-      problem(403, "CSRF check failed", "Send the session CSRF token")
-    Some(raw), True ->
-      case access.revoke_raw_token(runtime.access, raw) {
-        Error(_) ->
-          problem(503, "Logout unavailable", "Could not revoke the session")
-        Ok(_) ->
-          response.new(204)
-          |> response.set_header(
-            "set-cookie",
-            "notify_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
-          )
-          |> response.set_body(<<>>)
+    None, _ -> {
+      let reply =
+        problem(401, "Session required", "No web session cookie was sent")
+      audited_result(
+        reply,
+        req,
+        runtime,
+        "anonymous",
+        audit.SessionLogout,
+        None,
+      )
+    }
+    Some(_), False -> {
+      let reply =
+        problem(403, "CSRF check failed", "Send the session CSRF token")
+      audited_result(
+        reply,
+        req,
+        runtime,
+        "anonymous",
+        audit.SessionLogout,
+        None,
+      )
+    }
+    Some(raw), True -> {
+      let runtime.Clock(now) = runtime.clock
+      let actor = case auth.authenticate(req, runtime.access, now()) {
+        Ok(acl.Authenticated(username, _)) -> username
+        _ -> "anonymous"
       }
+      case
+        audit_log.append(
+          req,
+          runtime,
+          actor,
+          audit.SessionLogout,
+          None,
+          audit.Attempted,
+          None,
+        )
+      {
+        Error(_) -> audit_unavailable()
+        Ok(_) -> {
+          let reply = case access.revoke_raw_token(runtime.access, raw) {
+            Error(_) ->
+              problem(503, "Logout unavailable", "Could not revoke the session")
+            Ok(_) ->
+              response.new(204)
+              |> response.set_header(
+                "set-cookie",
+                "notify_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
+              )
+              |> response.set_body(<<>>)
+          }
+          audited_result(reply, req, runtime, actor, audit.SessionLogout, None)
+        }
+      }
+    }
   }
 }
 
 fn with_admin(
   req: Request(BitArray),
   runtime: Runtime,
-  mutation: Bool,
   next: fn(String) -> Response(BitArray),
 ) -> Response(BitArray) {
   let runtime.Clock(now) = runtime.clock
   case auth.authenticate(req, runtime.access, now()) {
-    Ok(acl.Authenticated(username, acl.Admin)) ->
-      case mutation && auth.uses_session(req) && !auth.valid_csrf(req) {
-        True -> problem(403, "CSRF check failed", "Send the session CSRF token")
-        False -> next(username)
-      }
+    Ok(acl.Authenticated(username, acl.Admin)) -> next(username)
     Ok(_) | Error(auth.Unauthenticated) | Error(auth.MalformedCredentials) ->
       problem(
         401,
@@ -256,6 +352,101 @@ fn with_admin(
         "Identity storage is unavailable",
       )
   }
+}
+
+fn with_admin_mutation(
+  req: Request(BitArray),
+  runtime: Runtime,
+  action: audit.Action,
+  next: fn(String) -> Response(BitArray),
+) -> Response(BitArray) {
+  let runtime.Clock(now) = runtime.clock
+  case auth.authenticate(req, runtime.access, now()) {
+    Ok(acl.Authenticated(username, acl.Admin)) ->
+      case auth.uses_session(req) && !auth.valid_csrf(req) {
+        True -> {
+          let reply =
+            problem(403, "CSRF check failed", "Send the session CSRF token")
+          audited_result(reply, req, runtime, username, action, Some(req.path))
+        }
+        False ->
+          case
+            audit_log.append(
+              req,
+              runtime,
+              username,
+              action,
+              Some(req.path),
+              audit.Attempted,
+              None,
+            )
+          {
+            Error(_) -> audit_unavailable()
+            Ok(_) ->
+              next(username)
+              |> audited_result(req, runtime, username, action, Some(req.path))
+          }
+      }
+    Ok(acl.Authenticated(username, _)) ->
+      problem(
+        401,
+        "Administrator authentication required",
+        "Sign in as an administrator",
+      )
+      |> audited_result(req, runtime, username, action, Some(req.path))
+    Ok(acl.Anonymous)
+    | Error(auth.Unauthenticated)
+    | Error(auth.MalformedCredentials) ->
+      problem(
+        401,
+        "Administrator authentication required",
+        "Sign in as an administrator",
+      )
+      |> audited_result(req, runtime, "anonymous", action, Some(req.path))
+    Error(auth.SetupRequired) ->
+      problem(503, "Setup required", "Complete server setup first")
+      |> audited_result(req, runtime, "anonymous", action, Some(req.path))
+    Error(_) ->
+      problem(
+        503,
+        "Authorization unavailable",
+        "Identity storage is unavailable",
+      )
+      |> audited_result(req, runtime, "anonymous", action, Some(req.path))
+  }
+}
+
+fn audited_result(
+  reply: Response(BitArray),
+  req: Request(BitArray),
+  runtime: Runtime,
+  actor: String,
+  action: audit.Action,
+  target: Option(String),
+) -> Response(BitArray) {
+  case
+    audit_log.append(
+      req,
+      runtime,
+      actor,
+      action,
+      target,
+      audit_log.outcome_for_status(reply.status),
+      Some(reply.status),
+    )
+  {
+    Ok(_) -> reply
+    Error(_) ->
+      response.set_header(reply, "x-notify-audit-status", "incomplete")
+  }
+}
+
+fn audit_unavailable() -> Response(BitArray) {
+  problem(
+    503,
+    "Audit unavailable",
+    "The security audit attempt could not be persisted",
+  )
 }
 
 fn list_users(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
@@ -516,7 +707,12 @@ fn system_health(runtime: Runtime) -> Response(BitArray) {
     None -> True
     Some(configured) -> configured.store.health() |> result.is_ok
   }
-  let healthy = storage_ok && attachment_ok && delivery_ok && webpush_ok
+  let audit_ok = case runtime.audit {
+    None -> False
+    Some(store) -> store.health() |> result.is_ok
+  }
+  let healthy =
+    storage_ok && attachment_ok && delivery_ok && webpush_ok && audit_ok
   json_response(
     case healthy {
       True -> 200
@@ -553,6 +749,13 @@ fn system_health(runtime: Runtime) -> Response(BitArray) {
         }),
       ),
       #(
+        "audit",
+        json.string(case audit_ok {
+          True -> "healthy"
+          False -> "unavailable"
+        }),
+      ),
+      #(
         "mobile_relay",
         json.string(case runtime.relay {
           None -> "disabled"
@@ -562,6 +765,80 @@ fn system_health(runtime: Runtime) -> Response(BitArray) {
       #("compatibility", json.string("ntfy v2.27.0")),
     ]),
   )
+}
+
+fn list_audit(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
+  case runtime.audit {
+    None ->
+      problem(503, "Audit unavailable", "The security audit store is disabled")
+    Some(store) ->
+      case strict_page_limit(req), audit_cursor(req) {
+        Error(_), _ | _, Error(_) ->
+          problem(
+            400,
+            "Invalid audit page",
+            "Use a limit from 1 to 100 and an unmodified audit cursor",
+          )
+        Ok(limit), Ok(after) ->
+          case store.page(after, limit) {
+            Error(audit.InvalidPage) ->
+              problem(
+                400,
+                "Invalid audit page",
+                "Use a limit from 1 to 100 and an unmodified audit cursor",
+              )
+            Error(_) ->
+              problem(
+                503,
+                "Audit unavailable",
+                "Could not read the security audit log",
+              )
+            Ok(page) -> {
+              let next = case page.next {
+                None -> None
+                Some(audit.Cursor(sequence)) ->
+                  Some(cursor.encode("audit", sequence))
+              }
+              page_response(page.items, next, audit_event_json)
+            }
+          }
+      }
+  }
+}
+
+fn audit_event_json(event: audit.Event) -> json.Json {
+  json.object([
+    #("sequence", json.int(event.sequence)),
+    #("occurred_at", json.int(event.occurred_at)),
+    #("actor", json.string(event.actor)),
+    #("action", json.string(audit.action_name(event.action))),
+    #("target", json.nullable(event.target, json.string)),
+    #("outcome", json.string(audit.outcome_name(event.outcome))),
+    #("status", json.nullable(event.status, json.int)),
+    #("client_ip", json.string(event.client_ip)),
+    #("request_id", json.string(event.request_id)),
+  ])
+}
+
+fn strict_page_limit(req: Request(body)) -> Result(Int, Nil) {
+  case query(req, "limit") {
+    None -> Ok(50)
+    Some(raw) ->
+      case int.parse(raw) {
+        Ok(limit) if limit >= 1 && limit <= 100 -> Ok(limit)
+        _ -> Error(Nil)
+      }
+  }
+}
+
+fn audit_cursor(req: Request(body)) -> Result(Option(audit.Cursor), Nil) {
+  case query(req, "cursor") {
+    None -> Ok(None)
+    Some(encoded) ->
+      cursor.decode(encoded, "audit")
+      |> result.map(fn(sequence) { Some(audit.Cursor(sequence)) })
+      |> result.map_error(fn(_) { Nil })
+  }
 }
 
 fn list_delivery_jobs(

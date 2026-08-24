@@ -9,7 +9,9 @@ import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 import notify/access
+import notify/audit
 import notify/core/acl
+import notify/http/audit_log
 import notify/http/auth
 import notify/identity
 import notify/runtime.{type Runtime}
@@ -55,37 +57,37 @@ pub fn route(
     Get, ["v1", "account"] -> Some(account_get(request, runtime))
     Delete, ["v1", "account"] ->
       Some(
-        with_user(request, runtime, True, fn(username) {
+        with_user(request, runtime, Some(audit.UserDelete), fn(username) {
           account_delete(request, username, runtime)
         }),
       )
     Post, ["v1", "account", "login"] ->
       Some(
-        with_user(request, runtime, False, fn(username) {
+        with_user(request, runtime, Some(audit.TokenCreate), fn(username) {
           account_login(username, runtime)
         }),
       )
     Post, ["v1", "account", "password"] ->
       Some(
-        with_user(request, runtime, True, fn(username) {
+        with_user(request, runtime, Some(audit.PasswordChange), fn(username) {
           account_password(request, username, runtime)
         }),
       )
     Post, ["v1", "account", "token"] ->
       Some(
-        with_user(request, runtime, True, fn(username) {
+        with_user(request, runtime, Some(audit.TokenCreate), fn(username) {
           account_token_create(request, username, runtime)
         }),
       )
     Delete, ["v1", "account", "token"] ->
       Some(
-        with_user(request, runtime, True, fn(username) {
+        with_user(request, runtime, Some(audit.TokenRevoke), fn(username) {
           account_token_delete(request, username, runtime)
         }),
       )
     Patch, ["v1", "account", "token"] ->
       Some(
-        with_user(request, runtime, True, fn(_) {
+        with_user(request, runtime, None, fn(_) {
           ntfy_error(
             400,
             40_023,
@@ -95,34 +97,34 @@ pub fn route(
         }),
       )
     Get, ["v1", "users"] ->
-      Some(with_admin(request, runtime, False, fn() { users_get(runtime) }))
+      Some(with_admin(request, runtime, None, fn() { users_get(runtime) }))
     Post, ["v1", "users"] ->
       Some(
-        with_admin(request, runtime, True, fn() {
+        with_admin(request, runtime, Some(audit.UserCreate), fn() {
           users_create(request, runtime)
         }),
       )
     Put, ["v1", "users"] ->
       Some(
-        with_admin(request, runtime, True, fn() {
+        with_admin(request, runtime, Some(audit.UserUpdate), fn() {
           users_update(request, runtime)
         }),
       )
     Delete, ["v1", "users"] ->
       Some(
-        with_admin(request, runtime, True, fn() {
+        with_admin(request, runtime, Some(audit.UserDelete), fn() {
           users_delete(request, runtime)
         }),
       )
     Post, ["v1", "users", "access"] | Put, ["v1", "users", "access"] ->
       Some(
-        with_admin(request, runtime, True, fn() {
+        with_admin(request, runtime, Some(audit.AclChange), fn() {
           users_access_put(request, runtime)
         }),
       )
     Delete, ["v1", "users", "access"] ->
       Some(
-        with_admin(request, runtime, True, fn() {
+        with_admin(request, runtime, Some(audit.AclRevoke), fn() {
           users_access_delete(request, runtime)
         }),
       )
@@ -563,41 +565,162 @@ fn users_access_delete(
 fn with_user(
   request: Request(BitArray),
   runtime: Runtime,
-  mutation: Bool,
+  action: Option(audit.Action),
   continue: fn(String) -> Response(BitArray),
 ) -> Response(BitArray) {
   let runtime.Clock(now) = runtime.clock
   case auth.authenticate(request, runtime.access, now()) {
     Ok(acl.Authenticated(username, _)) ->
-      case mutation && auth.uses_session(request) && !auth.valid_csrf(request) {
-        True -> forbidden()
-        False -> continue(username)
+      case action {
+        None -> continue(username)
+        Some(action) ->
+          case auth.uses_session(request) && !auth.valid_csrf(request) {
+            True ->
+              forbidden()
+              |> audited_result(request, runtime, username, action)
+            False ->
+              run_audited(request, runtime, username, action, fn() {
+                continue(username)
+              })
+          }
       }
     Ok(acl.Anonymous)
     | Error(auth.Unauthenticated)
-    | Error(auth.MalformedCredentials) -> unauthorized()
-    Error(auth.SetupRequired) -> unavailable("server setup is required")
-    Error(_) -> unavailable("authorization unavailable")
+    | Error(auth.MalformedCredentials) ->
+      audit_optional_result(
+        unauthorized(),
+        request,
+        runtime,
+        "anonymous",
+        action,
+      )
+    Error(auth.SetupRequired) ->
+      audit_optional_result(
+        unavailable("server setup is required"),
+        request,
+        runtime,
+        "anonymous",
+        action,
+      )
+    Error(_) ->
+      audit_optional_result(
+        unavailable("authorization unavailable"),
+        request,
+        runtime,
+        "anonymous",
+        action,
+      )
   }
 }
 
 fn with_admin(
   request: Request(BitArray),
   runtime: Runtime,
-  mutation: Bool,
+  action: Option(audit.Action),
   continue: fn() -> Response(BitArray),
 ) -> Response(BitArray) {
   let runtime.Clock(now) = runtime.clock
   case auth.authenticate(request, runtime.access, now()) {
-    Ok(acl.Authenticated(_, acl.Admin)) ->
-      case mutation && auth.uses_session(request) && !auth.valid_csrf(request) {
-        True -> forbidden()
-        False -> continue()
+    Ok(acl.Authenticated(username, acl.Admin)) ->
+      case action {
+        None -> continue()
+        Some(action) ->
+          case auth.uses_session(request) && !auth.valid_csrf(request) {
+            True ->
+              forbidden()
+              |> audited_result(request, runtime, username, action)
+            False -> run_audited(request, runtime, username, action, continue)
+          }
       }
-    Ok(_) | Error(auth.Unauthenticated) | Error(auth.MalformedCredentials) ->
-      unauthorized()
-    Error(auth.SetupRequired) -> unavailable("server setup is required")
-    Error(_) -> unavailable("authorization unavailable")
+    Ok(acl.Authenticated(username, _)) ->
+      audit_optional_result(unauthorized(), request, runtime, username, action)
+    Ok(acl.Anonymous)
+    | Error(auth.Unauthenticated)
+    | Error(auth.MalformedCredentials) ->
+      audit_optional_result(
+        unauthorized(),
+        request,
+        runtime,
+        "anonymous",
+        action,
+      )
+    Error(auth.SetupRequired) ->
+      audit_optional_result(
+        unavailable("server setup is required"),
+        request,
+        runtime,
+        "anonymous",
+        action,
+      )
+    Error(_) ->
+      audit_optional_result(
+        unavailable("authorization unavailable"),
+        request,
+        runtime,
+        "anonymous",
+        action,
+      )
+  }
+}
+
+fn run_audited(
+  request: Request(BitArray),
+  runtime: Runtime,
+  actor: String,
+  action: audit.Action,
+  continue: fn() -> Response(BitArray),
+) -> Response(BitArray) {
+  case
+    audit_log.append(
+      request,
+      runtime,
+      actor,
+      action,
+      Some(request.path),
+      audit.Attempted,
+      None,
+    )
+  {
+    Error(_) -> unavailable("security audit unavailable")
+    Ok(_) -> continue() |> audited_result(request, runtime, actor, action)
+  }
+}
+
+fn audited_result(
+  response: Response(BitArray),
+  request: Request(BitArray),
+  runtime: Runtime,
+  actor: String,
+  action: audit.Action,
+) -> Response(BitArray) {
+  case
+    audit_log.append(
+      request,
+      runtime,
+      actor,
+      action,
+      Some(request.path),
+      audit_log.outcome_for_status(response.status),
+      Some(response.status),
+    )
+  {
+    Ok(_) -> response
+    Error(_) ->
+      response
+      |> response.set_header("x-notify-audit-status", "incomplete")
+  }
+}
+
+fn audit_optional_result(
+  response: Response(BitArray),
+  request: Request(BitArray),
+  runtime: Runtime,
+  actor: String,
+  action: Option(audit.Action),
+) -> Response(BitArray) {
+  case action {
+    None -> response
+    Some(action) -> audited_result(response, request, runtime, actor, action)
   }
 }
 

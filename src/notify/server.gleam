@@ -17,6 +17,9 @@ import notify/attachment_store
 import notify/attachment_store/filesystem as attachment_filesystem
 import notify/attachment_store/postgres as attachment_postgres
 import notify/attachment_store/s3 as attachment_s3
+import notify/audit
+import notify/audit/postgres as audit_postgres
+import notify/audit/sqlite as audit_sqlite
 import notify/broker
 import notify/cluster/postgres_bus
 import notify/config.{type Config}
@@ -58,6 +61,7 @@ pub type Error {
   DeliveryStartError(delivery.Error)
   WebPushStartError(webpush.Error)
   RateLimitStartError(rate_limit.Error)
+  AuditStartError(audit.Error)
   SQLiteLockError(sqlite_lock.Error)
 }
 
@@ -120,6 +124,7 @@ fn start_after_lock(
   use webpush_runtime <- result.try(start_webpush(config))
   use access_started <- result.try(start_access(config))
   use limiter <- result.try(start_rate_limiter(config))
+  use audit_store <- result.try(start_audit(config))
   let #(access_control, setup_token) = access_started
   let runtime =
     runtime.new(
@@ -142,6 +147,7 @@ fn start_after_lock(
     |> runtime.with_deliveries(delivery_store)
     |> runtime.with_atomic_commit(atomic_commit)
     |> runtime.with_rate_limiter(limiter)
+    |> runtime.with_audit(audit_store)
   let runtime = case webpush_runtime {
     None -> runtime
     Some(configured) -> runtime.with_webpush(runtime, configured)
@@ -527,6 +533,14 @@ fn start_rate_limiter(config: Config) -> Result(rate_limit.Limiter, Error) {
   |> result.map_error(RateLimitStartError)
 }
 
+fn start_audit(config: Config) -> Result(audit.Store, Error) {
+  case config.database_backend {
+    config.SQLite -> audit_sqlite.start(config.database_path)
+    config.PostgreSQL -> audit_postgres.start(postgres_config(config))
+  }
+  |> result.map_error(AuditStartError)
+}
+
 fn start_access(
   config: Config,
 ) -> Result(#(access.Access, Option(String)), Error) {
@@ -756,6 +770,13 @@ pub fn error_message(error: Error) -> String {
       "Web Push storage unavailable: " <> detail
     RateLimitStartError(rate_limit.Unavailable(detail)) ->
       "rate limiter unavailable: " <> detail
+    AuditStartError(audit.InvalidEvent(field)) ->
+      "audit configuration produced an invalid " <> field <> " field"
+    AuditStartError(audit.InvalidPage) -> "audit page configuration is invalid"
+    AuditStartError(audit.Unavailable(detail)) ->
+      "audit storage unavailable: " <> detail
+    AuditStartError(audit.Corrupt(detail)) ->
+      "audit storage corrupt: " <> detail
     SQLiteLockError(sqlite_lock.AlreadyRunning(path)) ->
       "SQLite database "
       <> path

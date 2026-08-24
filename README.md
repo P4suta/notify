@@ -115,6 +115,13 @@ the corresponding `NOTIFY_RATE_LIMIT_*` variables, or with the documented CLI
 flags. In active-active mode PostgreSQL updates each bucket transactionally
 across nodes; limiter storage failure fails closed with HTTP 503.
 
+HTTP security and administration changes use an append-only audit log in the
+same SQLite or PostgreSQL backend. A mutation is not run unless its `attempted`
+event is durable; a separate result event records `succeeded`, `failed`, or
+`denied`. Audit pages use opaque base64url keyset cursors and never contain
+request bodies, query strings, credentials, session cookies, raw tokens, or
+message content.
+
 Useful operational commands include:
 
 ```sh
@@ -204,15 +211,16 @@ certification; the exact evidence is recorded in
 - Identity: setup gate, fixed-policy Argon2id passwords with successful-login
   legacy rehash, one-time bearer-token display, monotonic token last-access
   tracking, bounded ID/hash collision retry, Basic/Bearer authentication,
-  wildcard ACLs, and CSRF-protected admin sessions.
+  wildcard ACLs, CSRF-protected admin sessions, and append-only redacted audit
+  records for HTTP setup, sessions, and administration mutations.
 - Attachments: filesystem/shared-filesystem, PostgreSQL chunk, and S3-compatible
   stores with `begin/write/finish/abort`, incremental SHA-256,
   content-addressed promotion, byte ranges, quotas, expiry, and one-hour staging
   cleanup. The current HTTP server still materialises request and response
   bodies; transport-level streaming and sendfile remain open.
 - Operations: liveness, readiness, Prometheus metrics, request IDs, human/JSON
-  logs, effective configuration, OpenAPI, delivery inspection/retry/purge, and
-  attachment inspection.
+  logs, effective configuration, OpenAPI, audit inspection, delivery
+  inspection/retry/purge, and attachment inspection.
 - PWA: Gleam/Lustre MVU interface, English/Japanese copy, live timeline,
   publishing, attachments, Web Push, user/token/ACL mutations, delivery failure
   and attachment inventory, keyboard controls, responsive dark/light

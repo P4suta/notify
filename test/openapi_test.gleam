@@ -43,6 +43,12 @@ pub fn openapi_document_is_valid_json_and_describes_security_boundaries_test() {
   assert string.contains(body, "/api/v1/delivery-jobs")
   assert string.contains(body, "/api/v1/delivery-jobs/{id}/retry")
   assert string.contains(body, "/api/v1/attachments/{key}")
+  assert string.contains(body, "/api/v1/audit")
+  assert string.contains(body, "AuditEvent")
+  assert string.contains(
+    body,
+    "Opaque, resource-scoped base64url keyset cursor returned by the preceding audit page",
+  )
   assert string.contains(body, "/file/{topic}/{key}/{filename}")
   assert string.contains(body, "AttachmentRange")
   assert string.contains(body, "RateLimited")

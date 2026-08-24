@@ -4,6 +4,7 @@ import gleam/http/request
 import gleam/option
 import gleam/string
 import notify/access
+import notify/audit/memory as audit_memory
 import notify/http/auth as http_auth
 import notify/http/router
 import notify/identity/sqlite as identity_sqlite
@@ -18,6 +19,7 @@ fn managed_runtime() -> #(runtime.Runtime, String) {
     identity_sqlite.start(":memory:", fn() { 1000 }, fn() { setup_entropy })
   let assert Ok(control) = access.managed(store)
   let assert Ok(messages) = memory.start()
+  let assert Ok(audits) = audit_memory.start()
   let runtime =
     runtime.new(
       storage: messages,
@@ -26,6 +28,7 @@ fn managed_runtime() -> #(runtime.Runtime, String) {
       retention_seconds: 43_200,
     )
     |> runtime.with_access(control)
+    |> runtime.with_audit(audits)
   #(runtime, setup_token)
 }
 

@@ -12,6 +12,7 @@ import gleam/string
 import gleam/uri
 import notify/access
 import notify/attachment_store
+import notify/audit
 import notify/core/acl
 import notify/core/action as action_parser
 import notify/core/delay
@@ -20,6 +21,7 @@ import notify/core/message_json
 import notify/core/topic
 import notify/delivery
 import notify/http/admin
+import notify/http/audit_log
 import notify/http/auth as http_auth
 import notify/http/compat_account
 import notify/http/filter_params
@@ -178,59 +180,101 @@ fn setup(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
             "Expected token, username, password, and anonymous_access",
           )
         Ok(setup) -> {
-          let runtime.Clock(now) = runtime.clock
-          let runtime.IdGenerator(next_id) = runtime.ids
           case
-            access.complete_setup(
-              runtime.access,
-              setup.token,
-              "u_" <> next_id(),
-              setup.username,
-              setup.password,
-              setup.anonymous_access,
-              now(),
+            audit_log.append(
+              req,
+              runtime,
+              "anonymous",
+              audit.SetupComplete,
+              None,
+              audit.Attempted,
+              None,
             )
           {
-            Ok(user) ->
-              json_response(
-                201,
-                json.object([
-                  #("id", json.string(user.id)),
-                  #("username", json.string(user.username)),
-                  #("role", json.string("admin")),
-                ])
-                  |> json.to_string,
-              )
-            Error(access.InvalidSetupToken) ->
-              problem(
-                403,
-                "Invalid setup token",
-                "The setup URL is invalid or expired",
-              )
-            Error(access.SetupAlreadyComplete) ->
-              problem(
-                409,
-                "Setup already complete",
-                "The one-time setup was already used",
-              )
-            Error(access.InvalidUsername) ->
-              problem(
-                400,
-                "Invalid username",
-                "Use 1-64 safe username characters",
-              )
-            Error(access.PasswordError(_)) ->
-              problem(
-                400,
-                "Invalid password",
-                "Password must be 12-1024 characters",
-              )
             Error(_) ->
               problem(
                 503,
-                "Setup unavailable",
-                "Identity storage is unavailable",
+                "Audit unavailable",
+                "The setup audit attempt could not be persisted",
               )
+            Ok(_) -> {
+              let runtime.Clock(now) = runtime.clock
+              let runtime.IdGenerator(next_id) = runtime.ids
+              let reply = case
+                access.complete_setup(
+                  runtime.access,
+                  setup.token,
+                  "u_" <> next_id(),
+                  setup.username,
+                  setup.password,
+                  setup.anonymous_access,
+                  now(),
+                )
+              {
+                Ok(user) ->
+                  json_response(
+                    201,
+                    json.object([
+                      #("id", json.string(user.id)),
+                      #("username", json.string(user.username)),
+                      #("role", json.string("admin")),
+                    ])
+                      |> json.to_string,
+                  )
+                Error(access.InvalidSetupToken) ->
+                  problem(
+                    403,
+                    "Invalid setup token",
+                    "The setup URL is invalid or expired",
+                  )
+                Error(access.SetupAlreadyComplete) ->
+                  problem(
+                    409,
+                    "Setup already complete",
+                    "The one-time setup was already used",
+                  )
+                Error(access.InvalidUsername) ->
+                  problem(
+                    400,
+                    "Invalid username",
+                    "Use 1-64 safe username characters",
+                  )
+                Error(access.PasswordError(_)) ->
+                  problem(
+                    400,
+                    "Invalid password",
+                    "Password must be 12-1024 characters",
+                  )
+                Error(_) ->
+                  problem(
+                    503,
+                    "Setup unavailable",
+                    "Identity storage is unavailable",
+                  )
+              }
+              case
+                audit_log.append(
+                  req,
+                  runtime,
+                  case reply.status == 201 {
+                    True -> setup.username
+                    False -> "anonymous"
+                  },
+                  audit.SetupComplete,
+                  None,
+                  audit_log.outcome_for_status(reply.status),
+                  Some(reply.status),
+                )
+              {
+                Ok(_) -> reply
+                Error(_) ->
+                  response.set_header(
+                    reply,
+                    "x-notify-audit-status",
+                    "incomplete",
+                  )
+              }
+            }
           }
         }
       }
@@ -1353,7 +1397,11 @@ fn runtime_ready(runtime: Runtime) -> Bool {
     None -> True
     Some(configured) -> configured.store.health() |> result.is_ok
   }
-  storage_ok && attachments_ok && deliveries_ok && webpush_ok
+  let audit_ok = case runtime.audit {
+    None -> False
+    Some(store) -> store.health() |> result.is_ok
+  }
+  storage_ok && attachments_ok && deliveries_ok && webpush_ok && audit_ok
 }
 
 fn metrics(runtime: Runtime) -> Response(BitArray) {
@@ -1368,6 +1416,14 @@ fn metrics(runtime: Runtime) -> Response(BitArray) {
     None -> delivery.empty_stats()
     Some(store) -> store.stats() |> result.unwrap(delivery.empty_stats())
   }
+  let audit_up = case runtime.audit {
+    None -> 0
+    Some(store) ->
+      case store.health() |> result.is_ok {
+        True -> 1
+        False -> 0
+      }
+  }
   let body =
     "# HELP notify_up Whether all readiness dependencies are healthy.\n"
     <> "# TYPE notify_up gauge\nnotify_up "
@@ -1381,6 +1437,9 @@ fn metrics(runtime: Runtime) -> Response(BitArray) {
     <> "\n# HELP notify_event_log_entries Durable event-log entries.\n"
     <> "# TYPE notify_event_log_entries gauge\nnotify_event_log_entries "
     <> int.to_string(statistics.events)
+    <> "\n# HELP notify_audit_up Whether the append-only audit store is healthy.\n"
+    <> "# TYPE notify_audit_up gauge\nnotify_audit_up "
+    <> int.to_string(audit_up)
     <> "\n# HELP notify_delivery_jobs Durable delivery jobs by provider and state.\n"
     <> "# TYPE notify_delivery_jobs gauge\n"
     <> "notify_delivery_jobs{kind=\"webpush\",state=\"pending\"} "

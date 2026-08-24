@@ -3,6 +3,7 @@ import gleam/http
 import gleam/http/request
 import gleam/http/response
 import gleam/string
+import notify/audit/memory as audit_memory
 import notify/delivery
 import notify/delivery/memory as delivery_memory
 import notify/http/router
@@ -20,6 +21,7 @@ fn call(path: String, runtime: runtime.Runtime) {
 
 pub fn liveness_readiness_and_prometheus_endpoints_are_distinct_test() {
   let assert Ok(messages) = memory.start()
+  let assert Ok(audits) = audit_memory.start()
   let runtime =
     runtime.new(
       storage: messages,
@@ -27,6 +29,7 @@ pub fn liveness_readiness_and_prometheus_endpoints_are_distinct_test() {
       ids: runtime.IdGenerator(fn() { "OpsMetric1XY" }),
       retention_seconds: 43_200,
     )
+    |> runtime.with_audit(audits)
 
   let live = call("/healthz", runtime)
   assert live.status == 200
@@ -47,6 +50,7 @@ pub fn liveness_readiness_and_prometheus_endpoints_are_distinct_test() {
   assert string.contains(body, "notify_messages 0")
   assert string.contains(body, "notify_scheduled_messages 0")
   assert string.contains(body, "notify_event_log_entries 0")
+  assert string.contains(body, "notify_audit_up 1")
 }
 
 pub fn prometheus_reports_delivery_jobs_by_kind_and_state_test() {

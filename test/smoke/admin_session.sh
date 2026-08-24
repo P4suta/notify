@@ -94,4 +94,27 @@ status=$(curl --silent --show-error --output "$response" --write-out '%{http_cod
   "$base_url/api/v1/users/$test_username")
 test "$status" = 204
 
+curl --fail --silent --show-error \
+  --cookie "$cookie_jar" \
+  "$base_url/api/v1/audit?limit=100" >"$response"
+jq -e '
+  [.items[].action] as $actions
+  | ($actions | index("setup.complete")) != null
+  and ($actions | index("session.login")) != null
+  and ($actions | index("user.create")) != null
+  and ($actions | index("token.create")) != null
+  and ($actions | index("token.revoke")) != null
+  and ($actions | index("acl.change")) != null
+  and ($actions | index("acl.revoke")) != null
+  and ($actions | index("user.delete")) != null
+' "$response" >/dev/null
+if ! jq -e \
+  --arg raw "$raw_token" \
+  --arg password 'temporary browser smoke password' \
+  '(tostring | contains($raw) | not) and (tostring | contains($password) | not)' \
+  "$response" >/dev/null; then
+  echo 'credential leaked through audit listing' >&2
+  exit 1
+fi
+
 echo 'admin session smoke passed'

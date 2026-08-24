@@ -48,6 +48,33 @@ fully refilled inactive entries. Active-active mode stores them in
 across nodes, and the indexed stale-row cleanup bounds retained subjects. All
 nodes must use the same capacities and refill period.
 
+## Audit durability and redaction
+
+SQLite persists audit events in `audit_log`; PostgreSQL uses
+`notify_audit_log` with a cluster-wide sequence. Both stores are append-only at
+the application boundary and return newest-first keyset pages. The management
+API accepts a default limit of 50 and a maximum of 100, and binds its opaque
+base64url cursor to the audit resource so a cursor from another endpoint or an
+altered cursor is rejected with HTTP 400.
+
+Before applying its idempotent migration, each adapter inspects an existing
+audit table for the required columns. An unsupported table is left unchanged
+and startup fails with an explicit export-and-reset recovery message.
+
+HTTP setup, login, logout, and every HTTP management mutation have a bounded
+action, actor, target, effective client IP, request ID, outcome, and optional
+HTTP status. Passwords, authorization and cookie values, setup and bearer tokens,
+request bodies, query strings, delivery payloads, endpoints, and message
+content are never fields in an audit event. Field length and control-character
+validation also prevents forged multiline records.
+
+Before a security or administration mutation runs, Notify appends an
+`attempted` event. If that append fails, the mutation fails closed with HTTP
+503. Notify then appends `succeeded`, `failed`, or `denied`. If only this result
+append fails, the durable attempt remains as an explicitly unresolved action
+and the response carries `X-Notify-Audit-Status: incomplete`. Audit health is a
+readiness dependency and is exposed as `notify_audit_up`.
+
 ## Attachment durability and limits
 
 The attachment-store boundary is chunk-oriented: `begin`, repeated `write`,
