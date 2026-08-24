@@ -17,6 +17,7 @@ import notify/core/delay
 import notify/core/message.{type Draft, type Message}
 import notify/core/message_json
 import notify/core/topic
+import notify/delivery
 import notify/http/admin
 import notify/http/auth as http_auth
 import notify/http/compat_account
@@ -1237,6 +1238,10 @@ fn metrics(runtime: Runtime) -> Response(BitArray) {
   let statistics =
     runtime.storage.stats()
     |> result.unwrap(storage.Stats(messages: 0, scheduled: 0, events: 0))
+  let delivery_statistics = case runtime.deliveries {
+    None -> delivery.empty_stats()
+    Some(store) -> store.stats() |> result.unwrap(delivery.empty_stats())
+  }
   let body =
     "# HELP notify_up Whether all readiness dependencies are healthy.\n"
     <> "# TYPE notify_up gauge\nnotify_up "
@@ -1250,6 +1255,20 @@ fn metrics(runtime: Runtime) -> Response(BitArray) {
     <> "\n# HELP notify_event_log_entries Durable event-log entries.\n"
     <> "# TYPE notify_event_log_entries gauge\nnotify_event_log_entries "
     <> int.to_string(statistics.events)
+    <> "\n# HELP notify_delivery_jobs Durable delivery jobs by provider and state.\n"
+    <> "# TYPE notify_delivery_jobs gauge\n"
+    <> "notify_delivery_jobs{kind=\"webpush\",state=\"pending\"} "
+    <> int.to_string(delivery_statistics.webpush_pending)
+    <> "\nnotify_delivery_jobs{kind=\"webpush\",state=\"leased\"} "
+    <> int.to_string(delivery_statistics.webpush_leased)
+    <> "\nnotify_delivery_jobs{kind=\"webpush\",state=\"dead_letter\"} "
+    <> int.to_string(delivery_statistics.webpush_dead_letter)
+    <> "\nnotify_delivery_jobs{kind=\"mobile_relay\",state=\"pending\"} "
+    <> int.to_string(delivery_statistics.mobile_relay_pending)
+    <> "\nnotify_delivery_jobs{kind=\"mobile_relay\",state=\"leased\"} "
+    <> int.to_string(delivery_statistics.mobile_relay_leased)
+    <> "\nnotify_delivery_jobs{kind=\"mobile_relay\",state=\"dead_letter\"} "
+    <> int.to_string(delivery_statistics.mobile_relay_dead_letter)
     <> "\n"
   text_response(body, 200, "text/plain; version=0.0.4; charset=utf-8")
 }

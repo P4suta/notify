@@ -164,7 +164,19 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
       let assert Ok([claimed]) =
         outbox.claim(delivery.MobileRelay, "node-a", 100, 30, 1)
       assert claimed.lease_until == Some(130)
-      assert outbox.complete(claimed.id, "node-a") == Ok(Nil)
+      let assert Ok(dead) =
+        outbox.fail(claimed.id, "node-a", 101, "HTTP 503", 1, 10)
+      assert dead.state == delivery.DeadLetter
+      let assert Ok(delivery_stats) = outbox.stats()
+      assert delivery_stats.mobile_relay_dead_letter == 1
+      let assert Ok(requeued) = outbox.requeue(claimed.id, 200)
+      assert requeued.state == delivery.Pending
+      assert requeued.attempts == 0
+      let assert Ok([claimed_again]) =
+        outbox.claim(delivery.MobileRelay, "node-b", 200, 30, 1)
+      let assert Ok(_) =
+        outbox.fail(claimed_again.id, "node-b", 201, "HTTP 503", 1, 10)
+      assert outbox.purge(claimed.id) == Ok(Nil)
       assert outbox.list(delivery.MobileRelay) == Ok([])
 
       let assert Ok(webpush_store) =

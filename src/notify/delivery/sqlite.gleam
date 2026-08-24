@@ -27,7 +27,10 @@ type Command {
     Int,
     Subject(Result(Job, delivery.Error)),
   )
+  Requeue(String, Int, Subject(Result(Job, delivery.Error)))
+  Purge(String, Subject(Result(Nil, delivery.Error)))
   List(delivery.Kind, Subject(Result(List(Job), delivery.Error)))
+  Stats(Subject(Result(delivery.Stats, delivery.Error)))
   Health(Subject(Result(Nil, delivery.Error)))
 }
 
@@ -95,9 +98,16 @@ fn start_actor(connection: Connection) -> Result(Store, delivery.Error) {
           Fail(id, owner, now, detail, max_attempts, base_delay, reply)
         })
       },
+      requeue: fn(id, now) {
+        process.call(subject, 10_000, fn(reply) { Requeue(id, now, reply) })
+      },
+      purge: fn(id) {
+        process.call(subject, 10_000, fn(reply) { Purge(id, reply) })
+      },
       list: fn(kind) {
         process.call(subject, 10_000, fn(reply) { List(kind, reply) })
       },
+      stats: fn() { process.call(subject, 10_000, Stats) },
       health: fn() { process.call(subject, 10_000, Health) },
     ),
   )
@@ -121,7 +131,10 @@ fn handle(
         reply,
         fail(connection, id, owner, now, detail, max_attempts, base_delay),
       )
+    Requeue(id, now, reply) -> process.send(reply, requeue(connection, id, now))
+    Purge(id, reply) -> process.send(reply, purge(connection, id))
     List(kind, reply) -> process.send(reply, list_jobs(connection, kind))
+    Stats(reply) -> process.send(reply, stats(connection))
     Health(reply) -> process.send(reply, health(connection))
   }
   actor.continue(connection)
@@ -240,7 +253,7 @@ fn fail(
           True -> #(delivery.DeadLetter, job.available_at)
           False -> #(
             delivery.Pending,
-            now + delivery.retry_delay(base_delay, attempts),
+            now + delivery.retry_delay_with_jitter(base_delay, attempts, job.id),
           )
         }
         let updated =
@@ -274,6 +287,58 @@ fn fail(
   })
 }
 
+fn requeue(
+  connection: Connection,
+  id: String,
+  now: Int,
+) -> Result(Job, delivery.Error) {
+  transaction(connection, fn() {
+    use job <- result.try(find_job(connection, id))
+    case job.state {
+      delivery.DeadLetter -> {
+        let requeued =
+          delivery.Job(
+            ..job,
+            state: delivery.Pending,
+            attempts: 0,
+            available_at: now,
+            lease_owner: None,
+            lease_until: None,
+          )
+        use _ <- result.try(
+          sqlight.query(
+            "UPDATE delivery_outbox SET state = 'pending', attempts = 0, available_at = ?, lease_owner = NULL, lease_until = NULL WHERE id = ? AND state = 'dead_letter'",
+            on: connection,
+            with: [sqlight.int(now), sqlight.text(id)],
+            expecting: decode.dynamic,
+          )
+          |> result.map_error(map_error),
+        )
+        Ok(requeued)
+      }
+      _ -> Error(delivery.Conflict)
+    }
+  })
+}
+
+fn purge(connection: Connection, id: String) -> Result(Nil, delivery.Error) {
+  transaction(connection, fn() {
+    use job <- result.try(find_job(connection, id))
+    case job.state {
+      delivery.DeadLetter ->
+        sqlight.query(
+          "DELETE FROM delivery_outbox WHERE id = ? AND state = 'dead_letter'",
+          on: connection,
+          with: [sqlight.text(id)],
+          expecting: decode.dynamic,
+        )
+        |> result.map(fn(_) { Nil })
+        |> result.map_error(map_error)
+      _ -> Error(delivery.Conflict)
+    }
+  })
+}
+
 fn find_job(connection: Connection, id: String) -> Result(Job, delivery.Error) {
   use jobs <- result.try(
     sqlight.query(
@@ -298,6 +363,42 @@ fn list_jobs(
     expecting: job_decoder(),
   )
   |> result.map_error(map_error)
+}
+
+fn stats(connection: Connection) -> Result(delivery.Stats, delivery.Error) {
+  use values <- result.try(
+    sqlight.query(
+      "SELECT COUNT(CASE WHEN kind = 'webpush' AND state = 'pending' THEN 1 END), COUNT(CASE WHEN kind = 'webpush' AND state = 'leased' THEN 1 END), COUNT(CASE WHEN kind = 'webpush' AND state = 'dead_letter' THEN 1 END), COUNT(CASE WHEN kind = 'mobile_relay' AND state = 'pending' THEN 1 END), COUNT(CASE WHEN kind = 'mobile_relay' AND state = 'leased' THEN 1 END), COUNT(CASE WHEN kind = 'mobile_relay' AND state = 'dead_letter' THEN 1 END) FROM delivery_outbox",
+      on: connection,
+      with: [],
+      expecting: stats_decoder(),
+    )
+    |> result.map_error(map_error),
+  )
+  case values {
+    [statistics] -> Ok(statistics)
+    _ ->
+      Error(delivery.Unavailable(
+        "delivery statistics query returned an invalid row count",
+      ))
+  }
+}
+
+fn stats_decoder() -> decode.Decoder(delivery.Stats) {
+  use webpush_pending <- decode.field(0, decode.int)
+  use webpush_leased <- decode.field(1, decode.int)
+  use webpush_dead_letter <- decode.field(2, decode.int)
+  use mobile_relay_pending <- decode.field(3, decode.int)
+  use mobile_relay_leased <- decode.field(4, decode.int)
+  use mobile_relay_dead_letter <- decode.field(5, decode.int)
+  decode.success(delivery.Stats(
+    webpush_pending:,
+    webpush_leased:,
+    webpush_dead_letter:,
+    mobile_relay_pending:,
+    mobile_relay_leased:,
+    mobile_relay_dead_letter:,
+  ))
 }
 
 fn job_decoder() -> decode.Decoder(Job) {

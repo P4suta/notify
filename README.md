@@ -191,7 +191,8 @@ certification; the exact evidence is recorded in
 - Attachments: filesystem, shared filesystem, PostgreSQL blob, and S3-compatible
   stores; content-addressed keys, ranges, quotas, expiry, and orphan cleanup.
 - Operations: liveness, readiness, Prometheus metrics, request IDs, human/JSON
-  logs, effective configuration, OpenAPI, delivery and attachment inspection.
+  logs, effective configuration, OpenAPI, delivery inspection/retry/purge, and
+  attachment inspection.
 - PWA: Gleam/Lustre MVU interface, English/Japanese copy, live timeline,
   publishing, attachments, Web Push, user/token/ACL mutations, delivery failure
   and attachment inventory, keyboard controls, responsive dark/light

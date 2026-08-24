@@ -95,6 +95,14 @@ pub fn route(
           list_delivery_jobs(req, runtime)
         }),
       )
+    Post, ["api", "v1", "delivery-jobs", id, "retry"] ->
+      Some(
+        with_admin(req, runtime, True, fn(_) { retry_delivery_job(id, runtime) }),
+      )
+    Delete, ["api", "v1", "delivery-jobs", id] ->
+      Some(
+        with_admin(req, runtime, True, fn(_) { purge_delivery_job(id, runtime) }),
+      )
     Get, ["api", "v1", "attachments"] ->
       Some(
         with_admin(req, runtime, False, fn(_) { list_attachments(req, runtime) }),
@@ -600,6 +608,58 @@ fn delivery_job_json(job: delivery.Job) -> json.Json {
     #("lease_until", json.nullable(job.lease_until, json.int)),
     #("last_error", json.nullable(job.last_error, json.string)),
   ])
+}
+
+fn retry_delivery_job(id: String, runtime: Runtime) -> Response(BitArray) {
+  case runtime.deliveries {
+    None ->
+      problem(404, "Delivery job not found", "The delivery outbox is disabled")
+    Some(store) -> {
+      let runtime.Clock(now) = runtime.clock
+      case store.requeue(id, now()) {
+        Ok(job) -> json_response(200, delivery_job_json(job))
+        Error(delivery.NotFound) ->
+          problem(404, "Delivery job not found", "No job has that ID")
+        Error(delivery.Conflict) ->
+          problem(
+            409,
+            "Delivery job is active",
+            "Only dead-letter jobs can be retried manually",
+          )
+        Error(_) ->
+          problem(
+            503,
+            "Delivery retry unavailable",
+            "Could not requeue the delivery job",
+          )
+      }
+    }
+  }
+}
+
+fn purge_delivery_job(id: String, runtime: Runtime) -> Response(BitArray) {
+  case runtime.deliveries {
+    None ->
+      problem(404, "Delivery job not found", "The delivery outbox is disabled")
+    Some(store) ->
+      case store.purge(id) {
+        Ok(_) -> no_content()
+        Error(delivery.NotFound) ->
+          problem(404, "Delivery job not found", "No job has that ID")
+        Error(delivery.Conflict) ->
+          problem(
+            409,
+            "Delivery job is active",
+            "Only dead-letter jobs can be purged manually",
+          )
+        Error(_) ->
+          problem(
+            503,
+            "Delivery purge unavailable",
+            "Could not purge the delivery job",
+          )
+      }
+  }
 }
 
 fn delivery_kind_string(kind: delivery.Kind) -> String {

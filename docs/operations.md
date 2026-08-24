@@ -67,3 +67,18 @@ The current real-PostgreSQL contract exercises paging, cursor resume,
 acknowledgement, scheduled release, and compaction. Listener disconnect,
 multi-node crash, lease expiry, duplicate wake-up, and prolonged outage tests
 remain required before production certification.
+
+## Durable delivery recovery
+
+Web Push and explicitly configured mobile relay jobs use the durable outbox.
+Workers claim jobs with a 60-second lease; another node may reclaim an expired
+lease. Failed attempts use bounded exponential delay with stable equal jitter,
+and the tenth failed attempt becomes `dead_letter`.
+
+Administrators can inspect redacted jobs at `GET /api/v1/delivery-jobs`, retry
+a dead letter at `POST /api/v1/delivery-jobs/{id}/retry`, or permanently purge
+one with `DELETE /api/v1/delivery-jobs/{id}`. Retry resets the attempt count and
+makes the job immediately available. Retry and purge reject pending or leased
+jobs so an operator cannot race an active worker. Prometheus exposes
+`notify_delivery_jobs` by provider kind and state; neither the API nor metrics
+exposes endpoints or payloads.

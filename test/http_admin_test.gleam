@@ -245,6 +245,45 @@ pub fn admin_can_inspect_delivery_failures_without_payload_content_test() {
   assert !string.contains(body, "secret-endpoint")
 }
 
+pub fn admin_can_retry_and_purge_dead_letter_delivery_jobs_test() {
+  let #(runtime, setup_token) = managed_runtime()
+  complete_setup(runtime, setup_token)
+  let assert Some(outbox) = runtime.deliveries
+  let assert Ok(_) =
+    outbox.enqueue(delivery.NewJob(
+      id: "job-manage",
+      kind: delivery.MobileRelay,
+      endpoint: "https://relay.example/private",
+      payload: <<"private body":utf8>>,
+      message_id: "Message001",
+      topic_hash: "safe-hash",
+      available_at: 1000,
+    ))
+  let assert Ok([claimed]) =
+    outbox.claim(delivery.MobileRelay, "worker", 1001, 30, 1)
+  let assert Ok(_) = outbox.fail(claimed.id, "worker", 1001, "HTTP 503", 1, 10)
+
+  let retried =
+    admin_request(http.Post, "/api/v1/delivery-jobs/job-manage/retry", "")
+    |> router.handle(runtime)
+  assert retried.status == 200
+  let assert Ok(retried_body) = bit_array.to_string(retried.body)
+  assert string.contains(retried_body, "\"state\":\"pending\"")
+  assert string.contains(retried_body, "\"attempts\":0")
+  assert !string.contains(retried_body, "private body")
+  assert !string.contains(retried_body, "relay.example")
+
+  let assert Ok([claimed_again]) =
+    outbox.claim(delivery.MobileRelay, "worker", 1001, 30, 1)
+  let assert Ok(_) =
+    outbox.fail(claimed_again.id, "worker", 1001, "HTTP 503", 1, 10)
+  let purged =
+    admin_request(http.Delete, "/api/v1/delivery-jobs/job-manage", "")
+    |> router.handle(runtime)
+  assert purged.status == 204
+  assert outbox.list(delivery.MobileRelay) == Ok([])
+}
+
 pub fn deleting_a_user_removes_their_webpush_subscriptions_test() {
   let #(initial, setup_token) = managed_runtime()
   let assert Ok(subscriptions) = webpush_memory.start(max_endpoints_per_ip: 10)
