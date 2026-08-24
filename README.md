@@ -277,6 +277,7 @@ explicitly configured PostgreSQL, S3, Web Push endpoints, and mobile relay.
 ```sh
 gleam format --check src test packages/notify_core/src packages/notify_core/test
 test/lint.sh
+test/security_lint.sh
 gleam test
 (cd packages/notify_core && gleam test)
 (cd packages/notify_core && gleam run -m gleam_mutants -- run --strict)
@@ -285,6 +286,20 @@ gleam test
 gleam export erlang-shipment
 docker build --check .
 ```
+
+`test/security_lint.sh` runs actionlint, hadolint, ShellCheck, zizmor, and
+Gitleaks in network-disabled, read-only containers pinned by image digest.
+yamllint is installed separately from `requirements/security-lint.txt` with
+required hashes. Generated dependency/build trees are excluded from the
+working-tree Gitleaks scan; source, configuration, fixtures, and workflows
+remain in scope. Dependabot applies a seven-day cooldown to routine version
+updates; Dependabot security updates are not delayed by that setting.
+
+The `Supply-chain lint / Static supply-chain policy` job is a required-check
+candidate. Add it to the repository ruleset only after its exact check name has
+completed successfully on GitHub Actions. This gate does not claim CodeQL
+coverage for Gleam or Erlang, and vulnerability, image, SBOM, and license gates
+remain separate production-readiness work.
 
 The core suite includes deterministic, shrinking property tests for topic,
 priority, delay, JSON codec, and ACL invariants. Accepted Birdie snapshots pin

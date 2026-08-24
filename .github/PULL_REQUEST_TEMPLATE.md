@@ -7,6 +7,7 @@ Describe the user-visible behavior and the reason for the change.
 - [ ] A failing test demonstrated the change before implementation.
 - [ ] `gleam format --check src test packages/notify_core/src packages/notify_core/test`
 - [ ] `test/lint.sh`
+- [ ] `test/security_lint.sh`
 - [ ] `gleam test`
 - [ ] `(cd packages/notify_core && gleam test)`
 - [ ] `(cd web && gleam test)`
