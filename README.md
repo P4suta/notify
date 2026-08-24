@@ -207,6 +207,13 @@ have real-PostgreSQL contract coverage; multi-node outage and long-duration
 soak coverage remain open. SQLite uses WAL plus a per-database live-process
 lock and is strictly single-node.
 
+Within each node, the live broker indexes subscription IDs by topic and keeps
+credit state by subscription ID. A publish visits only registrations for its
+topic instead of scanning every connected subscriber. Duplicate topics in one
+subscription are collapsed, and unsubscribe or overflow removes every related
+index entry. This fixes the broker's fan-out cost model; it does not by itself
+demonstrate the cluster soak targets above.
+
 ## Implemented surface
 
 The following items exist in the current tree. Inclusion here does not mean the
@@ -217,7 +224,8 @@ certification; the exact evidence is recorded in
 - Publish: plaintext, JSON, query/header aliases, delay, actions, updates,
   delete/clear controls, and local/remote attachments.
 - Subscribe: JSON, SSE, raw, and WebSocket; multi-topic filters, `since`, poll,
-  scheduled events, keepalive, and bounded credit-based fan-out.
+  scheduled events, keepalive, topic-indexed fan-out, and a bounded credit
+  window that disconnects only an overflowing subscriber.
 - Identity: setup gate, fixed-policy Argon2id passwords with successful-login
   legacy rehash, one-time bearer-token display, monotonic token last-access
   tracking, bounded ID/hash collision retry, Basic/Bearer authentication,

@@ -1,3 +1,4 @@
+import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
 import gleam/list
 import gleam/otp/actor
@@ -32,7 +33,12 @@ pub type Broker {
     ack: fn(Int) -> Nil,
     unsubscribe: fn(Int) -> Nil,
     broadcast: fn(Notification) -> Nil,
+    stats: fn() -> Stats,
   )
+}
+
+pub type Stats {
+  Stats(subscriber_count: Int, topic_count: Int, last_broadcast_candidates: Int)
 }
 
 type Subscriber {
@@ -50,7 +56,12 @@ type Subscriber {
 }
 
 type State {
-  State(next_id: Int, subscribers: List(Subscriber))
+  State(
+    next_id: Int,
+    subscribers: Dict(Int, Subscriber),
+    topics: Dict(String, List(Int)),
+    last_broadcast_candidates: Int,
+  )
 }
 
 type Command {
@@ -73,11 +84,17 @@ type Command {
   Ack(Int)
   Unsubscribe(Int)
   Broadcast(Notification)
+  Inspect(Subject(Stats))
 }
 
 pub fn start() -> Result(Broker, actor.StartError) {
   use started <- result.try(
-    actor.new(State(next_id: 1, subscribers: []))
+    actor.new(State(
+      next_id: 1,
+      subscribers: dict.new(),
+      topics: dict.new(),
+      last_broadcast_candidates: 0,
+    ))
     |> actor.on_message(handle)
     |> actor.start,
   )
@@ -123,6 +140,7 @@ pub fn start() -> Result(Broker, actor.StartError) {
       ack: fn(id) { process.send(subject, Ack(id)) },
       unsubscribe: fn(id) { process.send(subject, Unsubscribe(id)) },
       broadcast: fn(message) { process.send(subject, Broadcast(message)) },
+      stats: fn() { process.call(subject, 5000, Inspect) },
     ),
   )
 }
@@ -133,7 +151,7 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
       let subscriber =
         Subscriber(
           id: state.next_id,
-          topics:,
+          topics: unique_topics(topics),
           subject:,
           credit: capacity,
           max_credit: capacity,
@@ -143,18 +161,16 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
           overflowed: False,
         )
       process.send(reply, state.next_id)
-      actor.continue(
-        State(next_id: state.next_id + 1, subscribers: [
-          subscriber,
-          ..state.subscribers
-        ]),
-      )
+      actor.continue(add_subscriber(
+        State(..state, next_id: state.next_id + 1),
+        subscriber,
+      ))
     }
     SubscribePaused(topics, criteria, subject, capacity, reply) -> {
       let subscriber =
         Subscriber(
           id: state.next_id,
-          topics:,
+          topics: unique_topics(topics),
           subject:,
           credit: capacity,
           max_credit: capacity,
@@ -164,207 +180,276 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
           overflowed: False,
         )
       process.send(reply, state.next_id)
-      actor.continue(
-        State(next_id: state.next_id + 1, subscribers: [
-          subscriber,
-          ..state.subscribers
-        ]),
-      )
+      actor.continue(add_subscriber(
+        State(..state, next_id: state.next_id + 1),
+        subscriber,
+      ))
     }
     Activate(id, replay_ids, replay_count, reply) -> {
-      let updated =
-        activate_subscriber(state.subscribers, id, replay_ids, replay_count, [])
+      let updated = activate_subscriber(state, id, replay_ids, replay_count)
       process.send(reply, Nil)
-      actor.continue(State(..state, subscribers: updated))
+      actor.continue(updated)
     }
     ActivatePrepared(id, stream, opening, replay, reply) -> {
       let updated =
-        activate_prepared_subscriber(
-          state.subscribers,
-          id,
-          stream,
-          opening,
-          replay,
-          [],
-        )
+        activate_prepared_subscriber(state, id, stream, opening, replay)
       process.send(reply, Nil)
-      actor.continue(State(..state, subscribers: updated))
+      actor.continue(updated)
     }
-    Ack(id) ->
-      actor.continue(
-        State(
-          ..state,
-          subscribers: list.map(state.subscribers, fn(subscriber) {
-            case subscriber.id == id {
-              False -> subscriber
-              True ->
-                Subscriber(
-                  ..subscriber,
-                  credit: min(subscriber.credit + 1, subscriber.max_credit),
-                )
-            }
-          }),
+    Ack(id) -> actor.continue(ack_subscriber(state, id))
+    Unsubscribe(id) -> actor.continue(remove_subscriber(state, id))
+    Broadcast(message) -> {
+      let candidates =
+        dict.get(state.topics, topic.to_string(message.topic))
+        |> result.unwrap([])
+      actor.continue(deliver_candidates(
+        candidates,
+        message,
+        State(..state, last_broadcast_candidates: list.length(candidates)),
+      ))
+    }
+    Inspect(reply) -> {
+      process.send(
+        reply,
+        Stats(
+          subscriber_count: dict.size(state.subscribers),
+          topic_count: dict.size(state.topics),
+          last_broadcast_candidates: state.last_broadcast_candidates,
         ),
       )
-    Unsubscribe(id) ->
-      actor.continue(
-        State(
-          ..state,
-          subscribers: list.filter(state.subscribers, fn(subscriber) {
-            subscriber.id != id
-          }),
-        ),
-      )
-    Broadcast(message) ->
-      actor.continue(
-        State(..state, subscribers: deliver(state.subscribers, message, [])),
+      actor.continue(state)
+    }
+  }
+}
+
+fn unique_topics(topics: List(Topic)) -> List(Topic) {
+  unique_topics_loop(topics, [])
+}
+
+fn unique_topics_loop(topics: List(Topic), unique: List(Topic)) -> List(Topic) {
+  case topics {
+    [] -> list.reverse(unique)
+    [topic, ..rest] ->
+      case list.contains(unique, topic) {
+        True -> unique_topics_loop(rest, unique)
+        False -> unique_topics_loop(rest, [topic, ..unique])
+      }
+  }
+}
+
+fn add_subscriber(state: State, subscriber: Subscriber) -> State {
+  State(
+    ..state,
+    subscribers: dict.insert(state.subscribers, subscriber.id, subscriber),
+    topics: register_topics(state.topics, subscriber.topics, subscriber.id),
+  )
+}
+
+fn register_topics(
+  registry: Dict(String, List(Int)),
+  topics: List(Topic),
+  id: Int,
+) -> Dict(String, List(Int)) {
+  case topics {
+    [] -> registry
+    [current_topic, ..rest] -> {
+      let key = topic.to_string(current_topic)
+      let subscribers = dict.get(registry, key) |> result.unwrap([])
+      register_topics(dict.insert(registry, key, [id, ..subscribers]), rest, id)
+    }
+  }
+}
+
+fn remove_subscriber(state: State, id: Int) -> State {
+  case dict.get(state.subscribers, id) {
+    Error(_) -> state
+    Ok(subscriber) ->
+      State(
+        ..state,
+        subscribers: dict.delete(state.subscribers, id),
+        topics: unregister_topics(state.topics, subscriber.topics, id),
       )
   }
 }
 
-fn deliver(
-  subscribers: List(Subscriber),
+fn unregister_topics(
+  registry: Dict(String, List(Int)),
+  topics: List(Topic),
+  id: Int,
+) -> Dict(String, List(Int)) {
+  case topics {
+    [] -> registry
+    [current_topic, ..rest] -> {
+      let key = topic.to_string(current_topic)
+      let remaining =
+        dict.get(registry, key)
+        |> result.unwrap([])
+        |> list.filter(fn(candidate) { candidate != id })
+      let updated = case remaining {
+        [] -> dict.delete(registry, key)
+        _ -> dict.insert(registry, key, remaining)
+      }
+      unregister_topics(updated, rest, id)
+    }
+  }
+}
+
+fn ack_subscriber(state: State, id: Int) -> State {
+  case dict.get(state.subscribers, id) {
+    Error(_) -> state
+    Ok(subscriber) ->
+      put_subscriber(
+        state,
+        Subscriber(
+          ..subscriber,
+          credit: min(subscriber.credit + 1, subscriber.max_credit),
+        ),
+      )
+  }
+}
+
+fn put_subscriber(state: State, subscriber: Subscriber) -> State {
+  State(
+    ..state,
+    subscribers: dict.insert(state.subscribers, subscriber.id, subscriber),
+  )
+}
+
+fn deliver_candidates(
+  candidates: List(Int),
   message: Notification,
-  retained: List(Subscriber),
-) -> List(Subscriber) {
-  case subscribers {
-    [] -> list.reverse(retained)
-    [subscriber, ..rest] ->
-      case
-        list.contains(subscriber.topics, message.topic)
-        && filter.matches(message, subscriber.criteria),
-        subscriber.active
-      {
-        False, _ -> deliver(rest, message, [subscriber, ..retained])
-        True, False -> {
-          let buffered = list.append(subscriber.pending, [message])
-          let overflowed =
-            subscriber.overflowed
-            || list.length(buffered) > subscriber.max_credit
-          deliver(rest, message, [
-            Subscriber(
-              ..subscriber,
-              pending: list.take(buffered, subscriber.max_credit),
-              overflowed:,
-            ),
-            ..retained
-          ])
-        }
-        True, True if subscriber.credit > 0 -> {
-          process.send(subscriber.subject, Message(message))
-          deliver(rest, message, [
-            Subscriber(..subscriber, credit: subscriber.credit - 1),
-            ..retained
-          ])
-        }
-        True, True -> {
-          process.send(subscriber.subject, Overflow)
-          deliver(rest, message, retained)
-        }
+  state: State,
+) -> State {
+  case candidates {
+    [] -> state
+    [id, ..rest] ->
+      case dict.get(state.subscribers, id) {
+        Error(_) -> deliver_candidates(rest, message, state)
+        Ok(subscriber) ->
+          case filter.matches(message, subscriber.criteria), subscriber.active {
+            False, _ -> deliver_candidates(rest, message, state)
+            True, False -> {
+              let buffered = list.append(subscriber.pending, [message])
+              let overflowed =
+                subscriber.overflowed
+                || list.length(buffered) > subscriber.max_credit
+              deliver_candidates(
+                rest,
+                message,
+                put_subscriber(
+                  state,
+                  Subscriber(
+                    ..subscriber,
+                    pending: list.take(buffered, subscriber.max_credit),
+                    overflowed:,
+                  ),
+                ),
+              )
+            }
+            True, True if subscriber.credit > 0 -> {
+              process.send(subscriber.subject, Message(message))
+              deliver_candidates(
+                rest,
+                message,
+                put_subscriber(
+                  state,
+                  Subscriber(..subscriber, credit: subscriber.credit - 1),
+                ),
+              )
+            }
+            True, True -> {
+              process.send(subscriber.subject, Overflow)
+              deliver_candidates(rest, message, remove_subscriber(state, id))
+            }
+          }
       }
   }
 }
 
 fn activate_subscriber(
-  subscribers: List(Subscriber),
+  state: State,
   id: Int,
   replay_ids: List(String),
   replay_count: Int,
-  retained: List(Subscriber),
-) -> List(Subscriber) {
-  case subscribers {
-    [] -> list.reverse(retained)
-    [subscriber, ..rest] ->
-      case subscriber.id == id {
-        False ->
-          activate_subscriber(rest, id, replay_ids, replay_count, [
-            subscriber,
-            ..retained
-          ])
+) -> State {
+  case dict.get(state.subscribers, id) {
+    Error(_) -> state
+    Ok(subscriber) -> {
+      let pending =
+        list.filter(subscriber.pending, fn(message) {
+          !list.contains(replay_ids, message.id)
+        })
+      let credit = max(0, subscriber.max_credit - replay_count)
+      case subscriber.overflowed || list.length(pending) > credit {
         True -> {
-          let pending =
-            list.filter(subscriber.pending, fn(message) {
-              !list.contains(replay_ids, message.id)
-            })
-          let credit = max(0, subscriber.max_credit - replay_count)
-          case subscriber.overflowed || list.length(pending) > credit {
-            True -> {
-              process.send(subscriber.subject, Overflow)
-              list.append(list.reverse(retained), rest)
-            }
-            False -> {
-              list.each(pending, fn(message) {
-                process.send(subscriber.subject, Message(message))
-              })
-              let activated =
-                Subscriber(
-                  ..subscriber,
-                  active: True,
-                  pending: [],
-                  credit: credit - list.length(pending),
-                )
-              list.append(list.reverse([activated, ..retained]), rest)
-            }
-          }
+          process.send(subscriber.subject, Overflow)
+          remove_subscriber(state, id)
+        }
+        False -> {
+          list.each(pending, fn(message) {
+            process.send(subscriber.subject, Message(message))
+          })
+          put_subscriber(
+            state,
+            Subscriber(
+              ..subscriber,
+              active: True,
+              pending: [],
+              credit: credit - list.length(pending),
+            ),
+          )
         }
       }
+    }
   }
 }
 
 fn activate_prepared_subscriber(
-  subscribers: List(Subscriber),
+  state: State,
   id: Int,
   stream: Subject(Delivery),
   opening: Delivery,
   replay: List(Notification),
-  retained: List(Subscriber),
-) -> List(Subscriber) {
-  case subscribers {
-    [] -> list.reverse(retained)
-    [subscriber, ..rest] ->
-      case subscriber.id == id {
-        False ->
-          activate_prepared_subscriber(rest, id, stream, opening, replay, [
-            subscriber,
-            ..retained
-          ])
+) -> State {
+  case dict.get(state.subscribers, id) {
+    Error(_) -> state
+    Ok(subscriber) -> {
+      process.send(stream, opening)
+      replay
+      |> list.take(subscriber.max_credit)
+      |> list.each(fn(message) { process.send(stream, Replay(message)) })
+      let replay_ids = list.map(replay, fn(message) { message.id })
+      let pending =
+        list.filter(subscriber.pending, fn(message) {
+          !list.contains(replay_ids, message.id)
+        })
+      let credit = max(0, subscriber.max_credit - list.length(replay))
+      case
+        list.length(replay) > subscriber.max_credit
+        || subscriber.overflowed
+        || list.length(pending) > credit
+      {
         True -> {
-          process.send(stream, opening)
-          replay
-          |> list.take(subscriber.max_credit)
-          |> list.each(fn(message) { process.send(stream, Replay(message)) })
-          let replay_ids = list.map(replay, fn(message) { message.id })
-          let pending =
-            list.filter(subscriber.pending, fn(message) {
-              !list.contains(replay_ids, message.id)
-            })
-          let credit = max(0, subscriber.max_credit - list.length(replay))
-          case
-            list.length(replay) > subscriber.max_credit
-            || subscriber.overflowed
-            || list.length(pending) > credit
-          {
-            True -> {
-              process.send(stream, Overflow)
-              list.append(list.reverse(retained), rest)
-            }
-            False -> {
-              list.each(pending, fn(message) {
-                process.send(stream, Message(message))
-              })
-              let activated =
-                Subscriber(
-                  ..subscriber,
-                  subject: stream,
-                  active: True,
-                  pending: [],
-                  credit: credit - list.length(pending),
-                )
-              list.append(list.reverse([activated, ..retained]), rest)
-            }
-          }
+          process.send(stream, Overflow)
+          remove_subscriber(state, id)
+        }
+        False -> {
+          list.each(pending, fn(message) {
+            process.send(stream, Message(message))
+          })
+          put_subscriber(
+            state,
+            Subscriber(
+              ..subscriber,
+              subject: stream,
+              active: True,
+              pending: [],
+              credit: credit - list.length(pending),
+            ),
+          )
         }
       }
+    }
   }
 }
 

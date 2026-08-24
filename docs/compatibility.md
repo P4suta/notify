@@ -26,7 +26,7 @@ Status terms used below:
 | Header/query aliases and CORS | Differential | Body/header/query precedence, representative ordered aliases, and the pinned OPTIONS response are exercised. The corpus still needs every documented alias. |
 | Error envelope | Contract | Invalid JSON, topic, priority, delay, and sequence errors use the ntfy JSON envelope. Full v2.27 error enumeration remains open. |
 | JSON poll and multi-topic filters | Contract | SQL-backed topic/since/scheduled/filter selection and 256-row internal keyset pages are covered on SQLite and real PostgreSQL. |
-| JSON, raw, SSE, WebSocket live streams | Implemented | Paused replay prevents a query/live gap; open, replay, buffered live, overflow, and credit order have actor tests. End-to-end format and reconnect coverage is incomplete. |
+| JSON, raw, SSE, WebSocket live streams | Implemented | Paused replay prevents a query/live gap; open, replay, buffered live, overflow, and credit order have actor tests. The node broker indexes unique topic registrations, limits each publish to that topic's candidate IDs, and prunes all indexes on unsubscribe or overflow; a 512-unrelated-topic regression test fixes that cost model. End-to-end format, reconnect, and target-scale soak coverage remain incomplete. |
 | Keepalive | Implemented | The interval is 45 seconds. Timing, disconnect, and long-lived proxy behavior still need end-to-end coverage. |
 | Scheduled publication | Contract | Release updates the message and appends an event atomically in memory, SQLite, and PostgreSQL; concurrent multi-node fault cases remain open. |
 | Update/delete/clear and sequence ID | Contract | Routes and wire shapes have local tests. Differential coverage is pending. |

@@ -25,6 +25,24 @@ enforced limits from acceptance targets that have not yet been demonstrated.
   inactive for seven days is stale; cleanup may then compact acknowledged event
   rows after their messages have expired.
 
+## Live fan-out bounds
+
+Each node stores subscriber state by numeric subscription ID and maintains a
+topic-to-subscription-ID index. Publishing a message therefore examines the
+subscribers registered for that message's topic, not all live subscribers on
+the node. The storage cost is proportional to active subscriptions plus their
+unique topic registrations. Duplicate topic names in one subscription are
+collapsed before registration.
+
+The per-connection credit window remains independent. An active subscriber
+that exhausts its credit receives `Overflow` and is removed from subscriber
+state and every topic index; explicit unsubscribe and replay/live activation
+overflow use the same cleanup path. A deterministic broker contract registers
+512 unrelated topics and verifies that an `alerts` publish has exactly one
+candidate. Multi-topic delivery, de-duplication, ordering, credit replenishment,
+and index pruning are also covered. This is a complexity regression guard, not
+a replacement for the 10,000-connection soak listed below.
+
 ## Rate-limit isolation
 
 Each non-operational request consumes one token from the general request
