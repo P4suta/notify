@@ -83,10 +83,13 @@ different username/kind filters fail with HTTP 400.
 
 Cursors are opaque canonical base64url values. Ordering keys are username for
 users, token ID within a username, username/topic-pattern for ACL rules, job ID
-within a delivery-kind filter, and content hash for attachments. The current
-identity, delivery, and attachment store ports still return complete metadata
-sets before the HTTP keyset slice is applied; pushing these pages into their
-storage adapters remains necessary for very large administration inventories.
+within a delivery-kind filter, and content hash for attachments. Identity
+pages execute indexed `LIMIT (requested + 1)` keyset queries in both SQLite
+and PostgreSQL, so users, tokens, and ACL rules are bounded at the storage
+boundary. Delivery and attachment store ports still return complete metadata
+sets before the HTTP keyset slice is applied; pushing those two pages into
+their storage adapters remains necessary for very large administration
+inventories.
 
 ## Audit durability and redaction
 

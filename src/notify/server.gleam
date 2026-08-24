@@ -744,6 +744,8 @@ pub fn error_message(error: Error) -> String {
     IdentityStartError(identity.InvalidSetupToken) -> "invalid setup token"
     IdentityStartError(identity.SetupAlreadyComplete) ->
       "server setup is already complete"
+    IdentityStartError(identity.InvalidPage) ->
+      "identity page configuration is invalid"
     AccessStartError(_) -> "Argon2id password subsystem failed to initialise"
     AttachmentStartError(attachment_store.TooLarge(_, _)) ->
       "invalid attachment size limit"

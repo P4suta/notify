@@ -462,12 +462,19 @@ fn audit_unavailable() -> Response(BitArray) {
 fn list_users(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
   case keyset_request(req, "users") {
     Error(_) -> invalid_page()
-    Ok(page) ->
-      case access.list_users(runtime.access) {
+    Ok(page) -> {
+      let KeysetRequest(after:, limit:, ..) = page
+      case access.page_users(runtime.access, after, limit) {
         Error(_) -> problem(503, "Users unavailable", "Could not list users")
         Ok(users) ->
-          keyset_response(page, users, fn(user) { user.username }, user_json)
+          stored_keyset_response(
+            page,
+            users,
+            fn(user) { user.username },
+            user_json,
+          )
       }
+    }
   }
 }
 
@@ -553,10 +560,11 @@ fn list_tokens(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
     Some(username) -> {
       case keyset_request(req, "tokens:" <> username) {
         Error(_) -> invalid_page()
-        Ok(page) ->
-          case access.list_tokens(runtime.access, username) {
+        Ok(page) -> {
+          let KeysetRequest(after:, limit:, ..) = page
+          case access.page_tokens(runtime.access, username, after, limit) {
             Ok(tokens) ->
-              keyset_response(
+              stored_keyset_response(
                 page,
                 tokens,
                 fn(token) { token.id },
@@ -567,6 +575,7 @@ fn list_tokens(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
             Error(_) ->
               problem(503, "Tokens unavailable", "Could not list tokens")
           }
+        }
       }
     }
   }
@@ -632,12 +641,20 @@ fn list_acl(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
   }
   case keyset_request(req, resource) {
     Error(_) -> invalid_page()
-    Ok(page) ->
-      case access.list_grants(runtime.access, username) {
-        Ok(rules) -> keyset_response(page, rules, rule_key, rule_json)
-        Error(_) ->
-          problem(503, "ACL unavailable", "Could not list access rules")
+    Ok(page) -> {
+      let KeysetRequest(after:, limit:, ..) = page
+      case grant_cursor(after) {
+        Error(_) -> invalid_page()
+        Ok(after) ->
+          case access.page_grants(runtime.access, username, after, limit) {
+            Ok(rules) ->
+              stored_keyset_response(page, rules, rule_key, rule_json)
+            Error(access.IdentityError(identity.InvalidPage)) -> invalid_page()
+            Error(_) ->
+              problem(503, "ACL unavailable", "Could not list access rules")
+          }
       }
+    }
   }
 }
 
@@ -1176,6 +1193,27 @@ fn rule_key(rule: acl.Rule) -> String {
   rule.username <> "\t" <> rule.topic_pattern
 }
 
+fn grant_cursor(
+  after: Option(String),
+) -> Result(Option(identity.GrantCursor), Nil) {
+  case after {
+    None -> Ok(None)
+    Some(value) ->
+      case string.split_once(value, "\t") {
+        Error(_) -> Error(Nil)
+        Ok(#(username, topic_pattern)) ->
+          case
+            username != ""
+            && topic_pattern != ""
+            && !string.contains(topic_pattern, "\t")
+          {
+            True -> Ok(Some(identity.GrantCursor(username:, topic_pattern:)))
+            False -> Error(Nil)
+          }
+      }
+  }
+}
+
 fn keyset_request(
   req: Request(body),
   resource: String,
@@ -1211,6 +1249,25 @@ fn keyset_response(
   }
   let items = list.take(selected, limit)
   let next_cursor = case list.length(selected) > limit {
+    False -> None
+    True ->
+      items
+      |> list.last
+      |> result.map(fn(item) { cursor.encode_key(resource, key(item)) })
+      |> option_from_result
+  }
+  page_response(items, next_cursor, encode)
+}
+
+fn stored_keyset_response(
+  paging: KeysetRequest,
+  stored: identity.Page(a),
+  key: fn(a) -> String,
+  encode: fn(a) -> json.Json,
+) -> Response(BitArray) {
+  let KeysetRequest(resource:, ..) = paging
+  let identity.Page(items:, has_more:) = stored
+  let next_cursor = case has_more {
     False -> None
     True ->
       items

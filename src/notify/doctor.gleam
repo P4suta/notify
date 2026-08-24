@@ -503,6 +503,7 @@ fn identity_error(error: identity.Error) -> String {
     identity.NotFound -> "identity record was not found"
     identity.InvalidSetupToken -> "setup token is invalid"
     identity.SetupAlreadyComplete -> "setup is already complete"
+    identity.InvalidPage -> "identity page is invalid"
   }
 }
 

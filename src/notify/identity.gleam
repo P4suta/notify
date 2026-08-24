@@ -56,12 +56,21 @@ pub type Token {
   )
 }
 
+pub type Page(a) {
+  Page(items: List(a), has_more: Bool)
+}
+
+pub type GrantCursor {
+  GrantCursor(username: String, topic_pattern: String)
+}
+
 pub type Error {
   Unavailable(String)
   Conflict(String)
   NotFound
   InvalidSetupToken
   SetupAlreadyComplete
+  InvalidPage
   Corrupt(String)
 }
 
@@ -81,15 +90,19 @@ pub type Store {
     rules_for: fn(String) -> Result(List(acl.Rule), Error),
     add_user: fn(NewUser) -> Result(User, Error),
     list_users: fn() -> Result(List(User), Error),
+    page_users: fn(Option(String), Int) -> Result(Page(User), Error),
     delete_user: fn(String) -> Result(Nil, Error),
     change_password: fn(String, String) -> Result(Nil, Error),
     add_token: fn(NewToken) -> Result(Token, Error),
     list_tokens: fn(String) -> Result(List(Token), Error),
+    page_tokens: fn(String, Option(String), Int) -> Result(Page(Token), Error),
     revoke_token: fn(String) -> Result(Nil, Error),
     revoke_token_hash: fn(String) -> Result(Nil, Error),
     put_grant: fn(acl.Rule) -> Result(acl.Rule, Error),
     delete_grant: fn(String, String) -> Result(Nil, Error),
     list_grants: fn(Option(String)) -> Result(List(acl.Rule), Error),
+    page_grants: fn(Option(String), Option(GrantCursor), Int) ->
+      Result(Page(acl.Rule), Error),
   )
 }
 

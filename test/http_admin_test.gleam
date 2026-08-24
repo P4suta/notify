@@ -13,6 +13,7 @@ import notify/attachment_store
 import notify/attachment_store/memory as attachment_memory
 import notify/delivery
 import notify/delivery/memory as delivery_memory
+import notify/http/cursor
 import notify/http/router
 import notify/identity/sqlite as identity_sqlite
 import notify/runtime
@@ -499,6 +500,14 @@ pub fn management_collections_use_filter_scoped_keyset_pages_test() {
     ])
     |> router.handle(runtime)
   assert cross_delivery_filter.status == 400
+  let malformed_acl_position =
+    admin_request(http.Get, "/api/v1/acl", "")
+    |> request.set_query([
+      #("username", "pat"),
+      #("cursor", cursor.encode_key("acl:user:pat", "missing-separator")),
+    ])
+    |> router.handle(runtime)
+  assert malformed_acl_position.status == 400
 }
 
 pub fn management_collection_default_is_fifty_and_maximum_is_one_hundred_test() {

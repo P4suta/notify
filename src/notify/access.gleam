@@ -311,6 +311,19 @@ pub fn list_users(access: Access) -> Result(List(identity.User), Error) {
   }
 }
 
+pub fn page_users(
+  access: Access,
+  after: Option(String),
+  limit: Int,
+) -> Result(identity.Page(identity.User), Error) {
+  case access {
+    OpenAccess ->
+      Error(IdentityError(identity.Unavailable("identity disabled")))
+    ManagedAccess(store, _) ->
+      store.page_users(after, limit) |> result.map_error(IdentityError)
+  }
+}
+
 pub fn delete_user(access: Access, username: String) -> Result(Nil, Error) {
   case access {
     OpenAccess ->
@@ -364,6 +377,22 @@ pub fn list_tokens(
       Error(IdentityError(identity.Unavailable("identity disabled")))
     ManagedAccess(store, _) ->
       store.list_tokens(user.id) |> result.map_error(IdentityError)
+  }
+}
+
+pub fn page_tokens(
+  access: Access,
+  username: String,
+  after: Option(String),
+  limit: Int,
+) -> Result(identity.Page(identity.Token), Error) {
+  use user <- result.try(user_by_name(access, username))
+  case access {
+    OpenAccess ->
+      Error(IdentityError(identity.Unavailable("identity disabled")))
+    ManagedAccess(store, _) ->
+      store.page_tokens(user.id, after, limit)
+      |> result.map_error(IdentityError)
   }
 }
 
@@ -428,6 +457,21 @@ pub fn list_grants(
       Error(IdentityError(identity.Unavailable("identity disabled")))
     ManagedAccess(store, _) ->
       store.list_grants(username) |> result.map_error(IdentityError)
+  }
+}
+
+pub fn page_grants(
+  access: Access,
+  username: Option(String),
+  after: Option(identity.GrantCursor),
+  limit: Int,
+) -> Result(identity.Page(acl.Rule), Error) {
+  case access {
+    OpenAccess ->
+      Error(IdentityError(identity.Unavailable("identity disabled")))
+    ManagedAccess(store, _) ->
+      store.page_grants(username, after, limit)
+      |> result.map_error(IdentityError)
   }
 }
 

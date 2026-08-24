@@ -909,6 +909,7 @@ fn identity_failure(error: identity.Error) -> Nil {
     identity.NotFound -> fail("identity record not found")
     identity.InvalidSetupToken -> fail("invalid setup token")
     identity.SetupAlreadyComplete -> fail("setup is already complete")
+    identity.InvalidPage -> fail("identity page is invalid")
   }
 }
 

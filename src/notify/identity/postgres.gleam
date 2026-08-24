@@ -1,4 +1,5 @@
 import gleam/erlang/process.{type Subject}
+import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
@@ -28,15 +29,32 @@ type Command {
   RulesFor(String, Subject(Result(List(acl.Rule), identity.Error)))
   AddUser(identity.NewUser, Subject(Result(User, identity.Error)))
   ListUsers(Subject(Result(List(User), identity.Error)))
+  PageUsers(
+    Option(String),
+    Int,
+    Subject(Result(identity.Page(User), identity.Error)),
+  )
   DeleteUser(String, Subject(Result(Nil, identity.Error)))
   ChangePassword(String, String, Subject(Result(Nil, identity.Error)))
   AddToken(identity.NewToken, Subject(Result(Token, identity.Error)))
   ListTokens(String, Subject(Result(List(Token), identity.Error)))
+  PageTokens(
+    String,
+    Option(String),
+    Int,
+    Subject(Result(identity.Page(Token), identity.Error)),
+  )
   RevokeToken(String, Subject(Result(Nil, identity.Error)))
   RevokeTokenHash(String, Subject(Result(Nil, identity.Error)))
   PutGrant(acl.Rule, Subject(Result(acl.Rule, identity.Error)))
   DeleteGrant(String, String, Subject(Result(Nil, identity.Error)))
   ListGrants(Option(String), Subject(Result(List(acl.Rule), identity.Error)))
+  PageGrants(
+    Option(String),
+    Option(identity.GrantCursor),
+    Int,
+    Subject(Result(identity.Page(acl.Rule), identity.Error)),
+  )
 }
 
 const setup_lifetime_seconds = 900
@@ -75,6 +93,8 @@ CREATE TABLE IF NOT EXISTS notify_access_tokens (
 );
 CREATE INDEX IF NOT EXISTS notify_access_tokens_user
   ON notify_access_tokens(user_id);
+CREATE INDEX IF NOT EXISTS notify_access_tokens_user_id
+  ON notify_access_tokens(user_id, id);
 
 CREATE TABLE IF NOT EXISTS notify_access_token_activity (
   token_id TEXT PRIMARY KEY REFERENCES notify_access_tokens(id) ON DELETE CASCADE,
@@ -183,6 +203,11 @@ fn start_actor(
         process.call(subject, 60_000, fn(reply) { AddUser(user, reply) })
       },
       list_users: fn() { process.call(subject, 30_000, ListUsers) },
+      page_users: fn(after, limit) {
+        process.call(subject, 30_000, fn(reply) {
+          PageUsers(after, limit, reply)
+        })
+      },
       delete_user: fn(username) {
         process.call(subject, 30_000, fn(reply) { DeleteUser(username, reply) })
       },
@@ -196,6 +221,11 @@ fn start_actor(
       },
       list_tokens: fn(user_id) {
         process.call(subject, 30_000, fn(reply) { ListTokens(user_id, reply) })
+      },
+      page_tokens: fn(user_id, after, limit) {
+        process.call(subject, 30_000, fn(reply) {
+          PageTokens(user_id, after, limit, reply)
+        })
       },
       revoke_token: fn(id) {
         process.call(subject, 30_000, fn(reply) { RevokeToken(id, reply) })
@@ -213,6 +243,11 @@ fn start_actor(
       },
       list_grants: fn(username) {
         process.call(subject, 30_000, fn(reply) { ListGrants(username, reply) })
+      },
+      page_grants: fn(username, after, limit) {
+        process.call(subject, 30_000, fn(reply) {
+          PageGrants(username, after, limit, reply)
+        })
       },
     ),
   )
@@ -242,6 +277,8 @@ fn handle(
     AddUser(user, reply) ->
       respond(connection, reply, add_user(connection, user))
     ListUsers(reply) -> respond(connection, reply, list_users(connection))
+    PageUsers(after, limit, reply) ->
+      respond(connection, reply, page_users(connection, after, limit))
     DeleteUser(username, reply) ->
       respond(connection, reply, delete_user(connection, username))
     ChangePassword(username, hash, reply) ->
@@ -250,6 +287,8 @@ fn handle(
       respond(connection, reply, add_token(connection, token))
     ListTokens(user_id, reply) ->
       respond(connection, reply, list_tokens(connection, user_id))
+    PageTokens(user_id, after, limit, reply) ->
+      respond(connection, reply, page_tokens(connection, user_id, after, limit))
     RevokeToken(id, reply) ->
       respond(connection, reply, revoke_token(connection, id))
     RevokeTokenHash(hash, reply) ->
@@ -260,6 +299,12 @@ fn handle(
       respond(connection, reply, delete_grant(connection, username, pattern))
     ListGrants(username, reply) ->
       respond(connection, reply, list_grants(connection, username))
+    PageGrants(username, after, limit, reply) ->
+      respond(
+        connection,
+        reply,
+        page_grants(connection, username, after, limit),
+      )
   }
 }
 
@@ -528,6 +573,33 @@ fn list_users(
   |> result.map_error(map_error)
 }
 
+fn page_users(
+  connection: postgleam.Connection,
+  after: Option(String),
+  limit: Int,
+) -> Result(identity.Page(User), identity.Error) {
+  use _ <- result.try(valid_page_limit(limit))
+  let rows = case after {
+    None ->
+      postgleam.query_with(
+        connection,
+        "SELECT id, username, role, password_hash, created_at FROM notify_users ORDER BY username ASC LIMIT $1",
+        [postgleam.int(limit + 1)],
+        user_decoder(),
+      )
+    Some(after) ->
+      postgleam.query_with(
+        connection,
+        "SELECT id, username, role, password_hash, created_at FROM notify_users WHERE username > $1 ORDER BY username ASC LIMIT $2",
+        [postgleam.text(after), postgleam.int(limit + 1)],
+        user_decoder(),
+      )
+  }
+  rows
+  |> result.map(fn(response) { bounded_page(response.rows, limit) })
+  |> result.map_error(map_error)
+}
+
 fn delete_user(
   connection: postgleam.Connection,
   username: String,
@@ -616,6 +688,38 @@ fn list_tokens(
   |> result.map_error(map_error)
 }
 
+fn page_tokens(
+  connection: postgleam.Connection,
+  user_id: String,
+  after: Option(String),
+  limit: Int,
+) -> Result(identity.Page(Token), identity.Error) {
+  use _ <- result.try(valid_page_limit(limit))
+  let rows = case after {
+    None ->
+      postgleam.query_with(
+        connection,
+        "SELECT t.id, t.user_id, t.token_prefix, t.label, t.created_at, t.expires, a.last_access FROM notify_access_tokens t LEFT JOIN notify_access_token_activity a ON a.token_id = t.id WHERE t.user_id = $1 ORDER BY t.id ASC LIMIT $2",
+        [postgleam.text(user_id), postgleam.int(limit + 1)],
+        token_decoder(),
+      )
+    Some(after) ->
+      postgleam.query_with(
+        connection,
+        "SELECT t.id, t.user_id, t.token_prefix, t.label, t.created_at, t.expires, a.last_access FROM notify_access_tokens t LEFT JOIN notify_access_token_activity a ON a.token_id = t.id WHERE t.user_id = $1 AND t.id > $2 ORDER BY t.id ASC LIMIT $3",
+        [
+          postgleam.text(user_id),
+          postgleam.text(after),
+          postgleam.int(limit + 1),
+        ],
+        token_decoder(),
+      )
+  }
+  rows
+  |> result.map(fn(response) { bounded_page(response.rows, limit) })
+  |> result.map_error(map_error)
+}
+
 fn revoke_token(
   connection: postgleam.Connection,
   id: String,
@@ -692,6 +796,68 @@ fn list_grants(
         [postgleam.text(username)],
       )
   }
+}
+
+fn page_grants(
+  connection: postgleam.Connection,
+  username: Option(String),
+  after: Option(identity.GrantCursor),
+  limit: Int,
+) -> Result(identity.Page(acl.Rule), identity.Error) {
+  use _ <- result.try(valid_page_limit(limit))
+  let rows = case username, after {
+    None, None ->
+      query_rules(
+        connection,
+        "SELECT username, topic_pattern, readable, writable FROM notify_acl_rules ORDER BY username, topic_pattern LIMIT $1",
+        [postgleam.int(limit + 1)],
+      )
+    None, Some(identity.GrantCursor(after_user, after_pattern)) ->
+      query_rules(
+        connection,
+        "SELECT username, topic_pattern, readable, writable FROM notify_acl_rules WHERE username > $1 OR (username = $1 AND topic_pattern > $2) ORDER BY username, topic_pattern LIMIT $3",
+        [
+          postgleam.text(after_user),
+          postgleam.text(after_pattern),
+          postgleam.int(limit + 1),
+        ],
+      )
+    Some(username), None ->
+      query_rules(
+        connection,
+        "SELECT username, topic_pattern, readable, writable FROM notify_acl_rules WHERE username = $1 ORDER BY topic_pattern LIMIT $2",
+        [postgleam.text(username), postgleam.int(limit + 1)],
+      )
+    Some(username), Some(identity.GrantCursor(after_user, after_pattern)) ->
+      case username == after_user {
+        False -> Error(identity.InvalidPage)
+        True ->
+          query_rules(
+            connection,
+            "SELECT username, topic_pattern, readable, writable FROM notify_acl_rules WHERE username = $1 AND topic_pattern > $2 ORDER BY topic_pattern LIMIT $3",
+            [
+              postgleam.text(username),
+              postgleam.text(after_pattern),
+              postgleam.int(limit + 1),
+            ],
+          )
+      }
+  }
+  rows |> result.map(fn(rows) { bounded_page(rows, limit) })
+}
+
+fn valid_page_limit(limit: Int) -> Result(Nil, identity.Error) {
+  case limit >= 1 && limit <= 100 {
+    True -> Ok(Nil)
+    False -> Error(identity.InvalidPage)
+  }
+}
+
+fn bounded_page(rows: List(a), limit: Int) -> identity.Page(a) {
+  identity.Page(
+    items: list.take(rows, limit),
+    has_more: list.length(rows) > limit,
+  )
 }
 
 fn query_rules(

@@ -180,6 +180,100 @@ pub fn user_acl_and_hashed_bearer_token_work_together_test() {
   assert access.authorize(access, principal, [secret], acl.Read) == Ok(False)
 }
 
+pub fn sqlite_identity_management_pages_are_bounded_keysets_test() {
+  let assert Ok(identity_sqlite.Started(store, Some(setup_token))) =
+    identity_sqlite.start(":memory:", fn() { 3000 }, fn() { setup_entropy })
+  let assert Ok(control) = access.managed(store)
+  let assert Ok(_) =
+    access.complete_setup(
+      control,
+      setup_token,
+      "u_admin",
+      "admin",
+      "correct horse battery staple",
+      acl.Deny,
+      3001,
+    )
+  let assert Ok(_) =
+    access.add_user(
+      control,
+      "u_pat",
+      "pat",
+      "a different secure password",
+      acl.User,
+      3002,
+    )
+  let assert Ok(_) =
+    access.add_user(
+      control,
+      "u_sam",
+      "sam",
+      "another different password",
+      acl.User,
+      3003,
+    )
+
+  let assert Ok(identity.Page([first_user], True)) =
+    access.page_users(control, None, 1)
+  assert first_user.username == "admin"
+  let assert Ok(identity.Page([second_user], True)) =
+    access.page_users(control, Some(first_user.username), 1)
+  assert second_user.username == "pat"
+
+  let assert Ok(_) =
+    access.create_token_for_username(
+      control,
+      fn() { "tok_z" },
+      "pat",
+      "last",
+      None,
+      3004,
+      fn() { "AAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
+    )
+  let assert Ok(_) =
+    access.create_token_for_username(
+      control,
+      fn() { "tok_a" },
+      "pat",
+      "first",
+      None,
+      3005,
+      fn() { "BBBBBBBBBBBBBBBBBBBBBBBBBBBBB" },
+    )
+  let assert Ok(identity.Page([first_token], True)) =
+    access.page_tokens(control, "pat", None, 1)
+  assert first_token.id == "tok_a"
+  let assert Ok(identity.Page([second_token], False)) =
+    access.page_tokens(control, "pat", Some(first_token.id), 1)
+  assert second_token.id == "tok_z"
+
+  let assert Ok(_) = access.grant(control, "pat", "jobs-b", acl.ReadOnly)
+  let assert Ok(_) = access.grant(control, "pat", "jobs-a", acl.ReadOnly)
+  let assert Ok(_) = access.grant(control, "sam", "alerts", acl.ReadOnly)
+  let assert Ok(identity.Page([first_rule], True)) =
+    access.page_grants(control, Some("pat"), None, 1)
+  assert first_rule.topic_pattern == "jobs-a"
+  let after =
+    identity.GrantCursor(first_rule.username, first_rule.topic_pattern)
+  let assert Ok(identity.Page([second_rule], False)) =
+    access.page_grants(control, Some("pat"), Some(after), 1)
+  assert second_rule.topic_pattern == "jobs-b"
+  let assert Ok(identity.Page([cross_user_rule], False)) =
+    access.page_grants(
+      control,
+      None,
+      Some(identity.GrantCursor("pat", "jobs-b")),
+      1,
+    )
+  assert cross_user_rule.username == "sam"
+  assert cross_user_rule.topic_pattern == "alerts"
+
+  assert access.page_users(control, None, 0)
+    == Error(access.IdentityError(identity.InvalidPage))
+  assert access.page_tokens(control, "pat", None, 101)
+    == Error(access.IdentityError(identity.InvalidPage))
+}
+
 pub fn token_id_and_hash_conflicts_are_retried_with_fresh_values_test() {
   let assert Ok(identity_sqlite.Started(store, Some(setup_token))) =
     identity_sqlite.start(":memory:", fn() { 4000 }, fn() { setup_entropy })

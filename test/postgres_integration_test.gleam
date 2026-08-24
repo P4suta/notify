@@ -16,6 +16,7 @@ import notify/core/message
 import notify/core/topic
 import notify/delivery
 import notify/delivery/postgres as delivery_postgres
+import notify/identity
 import notify/identity/postgres as identity_postgres
 import notify/rate_limit
 import notify/storage
@@ -102,6 +103,16 @@ fn fixture(id: String, scheduled: Bool, timestamp: Int) -> message.Message {
   )
 }
 
+fn fixture_on_topic(
+  id: String,
+  scheduled: Bool,
+  timestamp: Int,
+  topic_name: String,
+) -> message.Message {
+  let assert Ok(parsed_topic) = topic.parse(topic_name)
+  message.Message(..fixture(id, scheduled, timestamp), topic: parsed_topic)
+}
+
 pub fn postgres_audit_is_shared_and_keyset_paginated_test() {
   case test_database() {
     Error(_) -> Nil
@@ -173,6 +184,18 @@ pub fn postgres_identity_token_activity_contract_test() {
       let TestDatabase(configuration:, ..) = database
       let assert Ok(identity) = identity_postgres.open_store(configuration)
       let assert Ok(control) = access.managed(identity)
+      let assert Ok(index_connection) = postgleam.connect(configuration)
+      let assert Ok(1) =
+        postgleam.query_one(
+          index_connection,
+          "SELECT COUNT(*)::bigint FROM pg_indexes WHERE schemaname = current_schema() AND indexname = 'notify_access_tokens_user_id'",
+          [],
+          {
+            use count <- decode.element(0, decode.int)
+            decode.success(count)
+          },
+        )
+      postgleam.disconnect(index_connection)
       let assert Ok(user) =
         access.add_user(
           control,
@@ -182,6 +205,21 @@ pub fn postgres_identity_token_activity_contract_test() {
           acl.User,
           2000,
         )
+      let assert Ok(_) =
+        access.add_user(
+          control,
+          "u_pg_token_contract_z",
+          "pg_token_contract_z",
+          "correct horse battery staple",
+          acl.User,
+          2000,
+        )
+      let assert Ok(identity.Page([first_page_user], True)) =
+        access.page_users(control, None, 1)
+      assert first_page_user.username == "pg_token_contract"
+      let assert Ok(identity.Page([second_page_user], False)) =
+        access.page_users(control, Some(first_page_user.username), 1)
+      assert second_page_user.username == "pg_token_contract_z"
       let assert Ok(#(created_token, raw_token)) =
         access.create_token(
           control,
@@ -238,12 +276,63 @@ pub fn postgres_identity_token_activity_contract_test() {
       assert recovered_token.last_access == None
       assert used_token.last_access == Some(2003)
       assert unused_expired.last_access == None
+      let assert Ok(identity.Page([first_page_token], True)) =
+        access.page_tokens(control, "pg_token_contract", None, 1)
+      assert first_page_token.id == "tok_pg_expired_contract"
+      let assert Ok(identity.Page([second_page_token], True)) =
+        access.page_tokens(
+          control,
+          "pg_token_contract",
+          Some(first_page_token.id),
+          1,
+        )
+      assert second_page_token.id == "tok_pg_recovered_contract"
+      let assert Ok(_) =
+        access.grant(control, "pg_token_contract", "jobs-b", acl.ReadOnly)
+      let assert Ok(_) =
+        access.grant(control, "pg_token_contract", "jobs-a", acl.ReadOnly)
+      let assert Ok(identity.Page([first_rule], True)) =
+        access.page_grants(control, Some("pg_token_contract"), None, 1)
+      assert first_rule.topic_pattern == "jobs-a"
+      let assert Ok(identity.Page([second_rule], False)) =
+        access.page_grants(
+          control,
+          Some("pg_token_contract"),
+          Some(identity.GrantCursor(
+            username: first_rule.username,
+            topic_pattern: first_rule.topic_pattern,
+          )),
+          1,
+        )
+      assert second_rule.topic_pattern == "jobs-b"
+      let assert Ok(_) =
+        access.grant(control, "pg_token_contract_z", "jobs-a", acl.ReadOnly)
+      let assert Ok(identity.Page(first_rules, True)) =
+        access.page_grants(control, None, None, 2)
+      assert list.map(first_rules, fn(rule) {
+          #(rule.username, rule.topic_pattern)
+        })
+        == [
+          #("pg_token_contract", "jobs-a"),
+          #("pg_token_contract", "jobs-b"),
+        ]
+      let assert Ok(identity.Page([last_rule], False)) =
+        access.page_grants(
+          control,
+          None,
+          Some(identity.GrantCursor(
+            username: "pg_token_contract",
+            topic_pattern: "jobs-b",
+          )),
+          2,
+        )
+      assert last_rule.username == "pg_token_contract_z"
       drop_test_database(database)
     }
   }
 }
 
-pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
+pub fn postgres_storage_pool_recovers_and_serializes_commits_test() {
   case test_database() {
     Error(_) -> Nil
     Ok(database) -> {
@@ -262,18 +351,31 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
       process.spawn(fn() {
         process.send(
           locked_commit,
-          messages.save(fixture("PgLocked01XY", False, 90)),
+          messages.save(fixture_on_topic(
+            "PgLocked01XY",
+            False,
+            90,
+            "postgres-concurrency",
+          )),
         )
       })
       assert process.receive(locked_commit, 50) == Error(Nil)
       let assert Ok(_) = postgleam.simple_query(admin, "ROLLBACK")
       assert process.receive(locked_commit, 5000)
-        == Ok(Ok(fixture("PgLocked01XY", False, 90)))
+        == Ok(
+          Ok(fixture_on_topic("PgLocked01XY", False, 90, "postgres-concurrency")),
+        )
 
       let concurrent_commits = process.new_subject()
       int.range(from: 1, to: 17, with: Nil, run: fn(_, index) {
         process.spawn(fn() {
-          let value = fixture(concurrent_id(index), False, 90 + index)
+          let value =
+            fixture_on_topic(
+              concurrent_id(index),
+              False,
+              90 + index,
+              "postgres-concurrency",
+            )
           process.send(concurrent_commits, messages.save(value))
         })
         Nil
@@ -299,7 +401,12 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
       process.spawn(fn() {
         process.send(
           interrupted_commit,
-          messages.save(fixture("PgRecover1XY", False, 108)),
+          messages.save(fixture_on_topic(
+            "PgRecover1XY",
+            False,
+            108,
+            "postgres-concurrency",
+          )),
         )
       })
       assert process.receive(interrupted_commit, 50) == Error(Nil)
@@ -316,9 +423,23 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
       let assert Ok(Error(storage.Unavailable(_))) =
         process.receive(interrupted_commit, 5000)
       let assert Ok(_) = postgleam.simple_query(admin, "ROLLBACK")
-      let recovered = fixture("PgRecover1XY", False, 108)
+      let recovered =
+        fixture_on_topic("PgRecover1XY", False, 108, "postgres-concurrency")
       assert messages.save(recovered) == Ok(recovered)
       assert messages.health() == Ok(Nil)
+
+      drop_test_database(database)
+    }
+  }
+}
+
+pub fn postgres_storage_event_replay_and_paging_contract_test() {
+  case test_database() {
+    Error(_) -> Nil
+    Ok(database) -> {
+      let TestDatabase(configuration:, ..) = database
+      let assert Ok(adapter_a) = postgres.start(configuration, "node-a")
+      let postgres.Adapter(storage: messages, ..) = adapter_a
 
       let first = fixture("PgStore001XY", False, 100)
       let delayed = fixture("PgDelay001XY", True, 200)
@@ -398,6 +519,17 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
       let assert Ok(other_topic) = topic.parse("other")
       assert messages.has_attachment(other_topic, attachment_key) == Ok(False)
 
+      drop_test_database(database)
+    }
+  }
+}
+
+pub fn postgres_identity_setup_contract_test() {
+  case test_database() {
+    Error(_) -> Nil
+    Ok(database) -> {
+      let TestDatabase(configuration:, ..) = database
+
       let assert Ok(identity_postgres.Started(identity, Some(setup_token))) =
         identity_postgres.start(configuration, fn() { 1000 }, fn() {
           "abcdefghijklmnopqrstuvwxyz123"
@@ -414,6 +546,17 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
           acl.Deny,
           1001,
         )
+
+      drop_test_database(database)
+    }
+  }
+}
+
+pub fn postgres_attachment_streaming_and_quota_contract_test() {
+  case test_database() {
+    Error(_) -> Nil
+    Ok(database) -> {
+      let TestDatabase(configuration:, ..) = database
 
       let assert Ok(blobs) =
         attachment_postgres.start(
@@ -504,6 +647,17 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
       let assert Ok(_) = quota_a.write(orphan, <<"orphan":utf8>>)
       let assert Ok(_) = quota_a.cleanup(unix_seconds() + 3601)
       assert quota_a.finish(orphan) == Error(attachment_store.NotFound)
+
+      drop_test_database(database)
+    }
+  }
+}
+
+pub fn postgres_delivery_webpush_and_rate_limit_contract_test() {
+  case test_database() {
+    Error(_) -> Nil
+    Ok(database) -> {
+      let TestDatabase(configuration:, ..) = database
 
       let assert Ok(outbox) = delivery_postgres.start(configuration)
       let assert Ok(_) =
