@@ -106,6 +106,15 @@ are quoted and escape control characters; JSON logs use structural encoding.
 Set `NOTIFY_LOG_FORMAT=json` for structured logs. Session CSRF digests are
 checked with constant-time binary comparison.
 
+Rate limits use continuously refilled token buckets keyed by the effective
+client IP. The default 60-second refill period has independent capacities for
+all requests (120), subscription attempts (30), publish/topic-creation
+attempts (60), authentication failures (10), attachment transfer MiB (120),
+and attachment upload attempts (20). Configure them under `[rate_limit]`, with
+the corresponding `NOTIFY_RATE_LIMIT_*` variables, or with the documented CLI
+flags. In active-active mode PostgreSQL updates each bucket transactionally
+across nodes; limiter storage failure fails closed with HTTP 503.
+
 Useful operational commands include:
 
 ```sh

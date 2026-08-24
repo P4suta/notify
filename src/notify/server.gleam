@@ -26,6 +26,7 @@ import notify/delivery/relay as delivery_relay
 import notify/delivery/sqlite as delivery_sqlite
 import notify/delivery/worker as delivery_worker
 import notify/http/live
+import notify/http/rate_policy
 import notify/http/router
 import notify/identity
 import notify/identity/postgres as identity_postgres
@@ -175,17 +176,23 @@ fn start_after_lock(
         |> request.set_header("x-request-id", request_id)
         |> request.set_header("x-notify-client-ip", client_ip)
       let reply =
-        enforce_rate_limit(request, runtime, client_ip, fn() {
-          case live.route(request, runtime, bus, 128) {
-            Some(response) -> response
-            None ->
-              case mist.read_body(request, config.max_request_bytes) {
-                Ok(request) ->
-                  request |> router.handle(runtime) |> to_mist_response
-                Error(_) -> body_too_large
-              }
-          }
-        })
+        enforce_rate_limit(
+          request,
+          runtime,
+          client_ip,
+          config.max_request_bytes,
+          fn() {
+            case live.route(request, runtime, bus, 128) {
+              Some(response) -> response
+              None ->
+                case mist.read_body(request, config.max_request_bytes) {
+                  Ok(request) ->
+                    request |> router.handle(runtime) |> to_mist_response
+                  Error(_) -> body_too_large
+                }
+            }
+          },
+        )
       let runtime.Clock(now) = runtime.clock
       notify_log.request(
         log_format(config.log_format),
@@ -327,20 +334,62 @@ fn enforce_rate_limit(
   request: request.Request(mist.Connection),
   runtime: runtime.Runtime,
   client_key: String,
+  maximum_request_bytes: Int,
   continue: fn() -> Response(mist.ResponseData),
 ) -> Response(mist.ResponseData) {
-  case rate_limit_exempt(request), runtime.rate_limiter {
-    True, _ | _, None -> continue()
-    False, Some(limiter) -> {
+  case runtime.rate_limiter {
+    None -> continue()
+    Some(limiter) -> {
       let runtime.Clock(now) = runtime.clock
       let checked_at = now()
-      case limiter.check(client_key, checked_at) {
+      enforce_rate_charges(
+        rate_policy.preflight(request, maximum_request_bytes),
+        limiter,
+        client_key,
+        checked_at,
+        fn() {
+          let reply = continue()
+          enforce_rate_charges(
+            rate_policy.after_response(
+              request,
+              reply.status,
+              response_content_length(reply),
+            ),
+            limiter,
+            client_key,
+            checked_at,
+            fn() { reply },
+          )
+        },
+      )
+    }
+  }
+}
+
+fn enforce_rate_charges(
+  charges: List(rate_policy.Charge),
+  limiter: rate_limit.Limiter,
+  client_key: String,
+  checked_at: Int,
+  continue: fn() -> Response(mist.ResponseData),
+) -> Response(mist.ResponseData) {
+  case charges {
+    [] -> continue()
+    [rate_policy.Charge(bucket, cost), ..remaining_charges] ->
+      case limiter.check(bucket, client_key, checked_at, cost) {
         Ok(rate_limit.Allowed(remaining, reset_at)) ->
-          continue()
-          |> rate_limit_headers(
-            limiter.limit,
+          enforce_rate_charges(
+            remaining_charges,
+            limiter,
+            client_key,
+            checked_at,
+            continue,
+          )
+          |> rate_limit_headers_if_missing(
+            limiter.limit(bucket),
             remaining,
             int.max(0, reset_at - checked_at),
+            bucket,
           )
         Ok(rate_limit.Limited(retry_after, reset_at)) ->
           response.new(429)
@@ -355,9 +404,10 @@ fn enforce_rate_limit(
             )),
           )
           |> rate_limit_headers(
-            limiter.limit,
+            limiter.limit(bucket),
             0,
             int.max(1, reset_at - checked_at),
+            bucket,
           )
         Error(_) ->
           response.new(503)
@@ -366,13 +416,36 @@ fn enforce_rate_limit(
             "application/json; charset=utf-8",
           )
           |> response.set_header("retry-after", "1")
+          |> response.set_header(
+            "x-notify-ratelimit-bucket",
+            rate_limit.bucket_name(bucket),
+          )
           |> response.set_body(
             mist.Bytes(bytes_tree.from_string(
               "{\"code\":50301,\"http\":503,\"error\":\"temporarily unavailable: rate limiter\"}",
             )),
           )
       }
-    }
+  }
+}
+
+fn rate_limit_headers_if_missing(
+  reply: Response(mist.ResponseData),
+  limit: Int,
+  remaining: Int,
+  reset_after: Int,
+  bucket: rate_limit.Bucket,
+) -> Response(mist.ResponseData) {
+  case response.get_header(reply, "x-notify-ratelimit-bucket") {
+    Ok(_) -> reply
+    Error(_) -> rate_limit_headers(reply, limit, remaining, reset_after, bucket)
+  }
+}
+
+fn response_content_length(reply: Response(mist.ResponseData)) -> Option(Int) {
+  case response.get_header(reply, "content-length") {
+    Error(_) -> None
+    Ok(value) -> value |> int.parse |> option.from_result
   }
 }
 
@@ -381,30 +454,16 @@ fn rate_limit_headers(
   limit: Int,
   remaining: Int,
   reset_after: Int,
+  bucket: rate_limit.Bucket,
 ) -> Response(mist.ResponseData) {
   reply
   |> response.set_header("ratelimit-limit", int.to_string(limit))
   |> response.set_header("ratelimit-remaining", int.to_string(remaining))
   |> response.set_header("ratelimit-reset", int.to_string(reset_after))
-}
-
-fn rate_limit_exempt(request: request.Request(body)) -> Bool {
-  case request.path_segments(request) {
-    []
-    | ["healthz"]
-    | ["readyz"]
-    | ["metrics"]
-    | ["styles.css"]
-    | ["notify_web.js"]
-    | ["setup.js"]
-    | ["sw.js"]
-    | ["manifest.webmanifest"]
-    | ["api", "openapi.json"]
-    | ["v1", "health"]
-    | ["v1", "version"]
-    | ["v1", "config"] -> True
-    _ -> False
-  }
+  |> response.set_header(
+    "x-notify-ratelimit-bucket",
+    rate_limit.bucket_name(bucket),
+  )
 }
 
 fn public_base_url(config: Config) -> String {
@@ -443,16 +502,25 @@ fn effective_client_ip(
 }
 
 fn start_rate_limiter(config: Config) -> Result(rate_limit.Limiter, Error) {
+  let policies =
+    rate_limit.Policies(
+      requests: config.rate_limit_requests,
+      subscriptions: config.rate_limit_subscriptions,
+      topic_creations: config.rate_limit_topic_creations,
+      auth_failures: config.rate_limit_auth_failures,
+      attachment_mebibytes: config.rate_limit_attachment_mebibytes,
+      attachment_uploads: config.rate_limit_attachment_uploads,
+    )
   case config.cluster_enabled {
     True ->
-      rate_limit.postgres(
+      rate_limit.postgres_with_policies(
         postgres_config(config),
-        requests: config.rate_limit_requests,
+        policies,
         window_seconds: config.rate_limit_window_seconds,
       )
     False ->
-      rate_limit.memory(
-        requests: config.rate_limit_requests,
+      rate_limit.memory_with_policies(
+        policies,
         window_seconds: config.rate_limit_window_seconds,
       )
   }

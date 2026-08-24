@@ -6,6 +6,11 @@
     "description": "Notify management API and the implemented ntfy v2.27.0-compatible wire surface."
   },
   "servers": [{"url": "/"}],
+  "x-notify-rate-limits": {
+    "description": "Non-operational requests consume a general token bucket and may also consume an independent subscription, publish/topic-creation, authentication-failure, attachment-MiB, or attachment-upload bucket. PostgreSQL cluster mode updates buckets atomically across nodes.",
+    "attachmentBandwidthUnit": "MiB rounded up per request or response",
+    "response": {"$ref": "#/components/responses/RateLimited"}
+  },
   "tags": [
     {"name": "ntfy compatibility"},
     {"name": "session"},
@@ -129,6 +134,7 @@
     "responses": {
       "Attachment": {"description": "Complete attachment body or HEAD metadata", "headers": {"ETag": {"schema": {"type": "string"}}, "Accept-Ranges": {"schema": {"type": "string", "const": "bytes"}}, "Content-Disposition": {"schema": {"type": "string"}}}, "content": {"application/octet-stream": {"schema": {"type": "string", "contentEncoding": "binary"}}}},
       "AttachmentRange": {"description": "Requested attachment byte range", "headers": {"ETag": {"schema": {"type": "string"}}, "Content-Range": {"schema": {"type": "string"}}, "Accept-Ranges": {"schema": {"type": "string", "const": "bytes"}}, "Content-Disposition": {"schema": {"type": "string"}}}, "content": {"application/octet-stream": {"schema": {"type": "string", "contentEncoding": "binary"}}}},
+      "RateLimited": {"description": "A client token bucket has insufficient credit", "headers": {"Retry-After": {"required": true, "schema": {"type": "integer", "minimum": 1}}, "RateLimit-Limit": {"required": true, "schema": {"type": "integer", "minimum": 1}}, "RateLimit-Remaining": {"required": true, "schema": {"type": "integer", "minimum": 0}}, "RateLimit-Reset": {"required": true, "schema": {"type": "integer", "minimum": 1, "description": "Seconds until the bucket is full"}}, "X-Notify-RateLimit-Bucket": {"required": true, "schema": {"type": "string", "enum": ["request", "subscription", "topic_creation", "auth_failure", "attachment_bandwidth", "attachment_quota"]}}}, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/NtfyError"}}}},
       "NtfyError": {"description": "ntfy-compatible error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/NtfyError"}}}},
       "Problem": {"description": "RFC 9457 problem details", "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}}
     }

@@ -18,6 +18,36 @@ enforced limits from acceptance targets that have not yet been demonstrated.
   inactive for seven days is stale; cleanup may then compact acknowledged event
   rows after their messages have expired.
 
+## Rate-limit isolation
+
+Each non-operational request consumes one token from the general request
+bucket. Subscription attempts, publish/topic-creation attempts, authentication
+failures, attachment upload attempts, and attachment bandwidth consume separate
+buckets for the same effective client IP. A subscription therefore cannot
+exhaust the authentication-failure budget, while the general request budget
+still provides an overall ceiling. Trusted-proxy validation happens before the
+IP is used as a bucket key.
+
+The default refill period is 60 seconds. Capacities are 120 requests, 30
+subscriptions, 60 publish/topic-creation attempts, 10 authentication failures,
+120 MiB of attachment transfer, and 20 attachment upload attempts. Attachment
+bandwidth is rounded up to whole MiB. Uploads without a valid Content-Length
+reserve the configured maximum request size so chunked transfer cannot bypass
+the bandwidth bucket. Successful full and Range downloads are charged from the
+actual response Content-Length; HEAD and 304 responses do not consume bandwidth
+credit.
+
+`RateLimit-Limit`, `RateLimit-Remaining`, and `RateLimit-Reset` describe the
+bucket reported in `X-Notify-RateLimit-Bucket`; a denial also includes
+`Retry-After`. Capacity is restored continuously rather than at a fixed-window
+boundary. Limiter errors fail closed with HTTP 503 and do not run the route.
+
+Single-node mode keeps buckets in one serialized actor and periodically removes
+fully refilled inactive entries. Active-active mode stores them in
+`notify_token_buckets`; `SELECT ... FOR UPDATE` makes refill and debit atomic
+across nodes, and the indexed stale-row cleanup bounds retained subjects. All
+nodes must use the same capacities and refill period.
+
 ## Attachment durability and limits
 
 The attachment-store boundary is chunk-oriented: `begin`, repeated `write`,

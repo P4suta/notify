@@ -20,9 +20,18 @@ import notify/storage
 import notify/storage/postgres
 import notify/webpush as webpush_model
 import notify/webpush/postgres as webpush_postgres
+import postgleam
 import postgleam/config
 
-fn test_config() -> Result(config.Config, Nil) {
+type TestDatabase {
+  TestDatabase(
+    configuration: config.Config,
+    admin: postgleam.Connection,
+    schema: String,
+  )
+}
+
+fn test_database() -> Result(TestDatabase, Nil) {
   use host <- result.try(getenv("NOTIFY_TEST_POSTGRES_HOST"))
   let port = case getenv("NOTIFY_TEST_POSTGRES_PORT") {
     Ok(value) -> int.parse(value) |> result.unwrap(5432)
@@ -32,14 +41,39 @@ fn test_config() -> Result(config.Config, Nil) {
     Ok(value) -> value
     Error(_) -> "notify-test-password"
   }
-  Ok(
+  let base_configuration =
     config.default()
     |> config.host(host)
     |> config.port(port)
     |> config.database("notify")
     |> config.username("notify")
-    |> config.password(password),
+    |> config.password(password)
+  let schema = "notify_test_" <> string.lowercase(random_id())
+  use admin <- result.try(
+    postgleam.connect(base_configuration)
+    |> result.map_error(fn(_) { Nil }),
   )
+  case postgleam.simple_query(admin, "CREATE SCHEMA " <> schema) {
+    Error(_) -> {
+      postgleam.disconnect(admin)
+      Error(Nil)
+    }
+    Ok(_) ->
+      Ok(TestDatabase(
+        configuration: config.extra_parameters(base_configuration, [
+          #("search_path", schema),
+        ]),
+        admin:,
+        schema:,
+      ))
+  }
+}
+
+fn drop_test_database(database: TestDatabase) -> Nil {
+  let TestDatabase(admin:, schema:, ..) = database
+  let assert Ok(_) =
+    postgleam.simple_query(admin, "DROP SCHEMA " <> schema <> " CASCADE")
+  postgleam.disconnect(admin)
 }
 
 fn fixture(id: String, scheduled: Bool, timestamp: Int) -> message.Message {
@@ -66,9 +100,10 @@ fn fixture(id: String, scheduled: Bool, timestamp: Int) -> message.Message {
 }
 
 pub fn postgres_identity_token_activity_contract_test() {
-  case test_config() {
+  case test_database() {
     Error(_) -> Nil
-    Ok(configuration) -> {
+    Ok(database) -> {
+      let TestDatabase(configuration:, ..) = database
       let assert Ok(identity) = identity_postgres.open_store(configuration)
       let assert Ok(control) = access.managed(identity)
       let assert Ok(user) =
@@ -136,14 +171,16 @@ pub fn postgres_identity_token_activity_contract_test() {
       assert recovered_token.last_access == None
       assert used_token.last_access == Some(2003)
       assert unused_expired.last_access == None
+      drop_test_database(database)
     }
   }
 }
 
 pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
-  case test_config() {
+  case test_database() {
     Error(_) -> Nil
-    Ok(configuration) -> {
+    Ok(database) -> {
+      let TestDatabase(configuration:, ..) = database
       let assert Ok(adapter_a) = postgres.start(configuration, "node-a")
       let postgres.Adapter(storage: messages, ..) = adapter_a
       assert messages.health() == Ok(Nil)
@@ -384,16 +421,77 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
       assert pg_subscription.endpoint == endpoint
       assert webpush_store.remove_endpoint(endpoint) == Ok(Nil)
 
+      let rate_policies =
+        rate_limit.Policies(
+          requests: 2,
+          subscriptions: 1,
+          topic_creations: 7,
+          auth_failures: 1,
+          attachment_mebibytes: 4,
+          attachment_uploads: 1,
+        )
       let assert Ok(limiter_a) =
-        rate_limit.postgres(configuration, requests: 2, window_seconds: 60)
+        rate_limit.postgres_with_policies(
+          configuration,
+          rate_policies,
+          window_seconds: 60,
+        )
       let assert Ok(limiter_b) =
-        rate_limit.postgres(configuration, requests: 2, window_seconds: 60)
-      assert limiter_a.check("distributed-contract", 600)
-        == Ok(rate_limit.Allowed(remaining: 1, reset_at: 660))
-      assert limiter_b.check("distributed-contract", 600)
-        == Ok(rate_limit.Allowed(remaining: 0, reset_at: 660))
-      assert limiter_a.check("distributed-contract", 600)
-        == Ok(rate_limit.Limited(retry_after: 60, reset_at: 660))
+        rate_limit.postgres_with_policies(
+          configuration,
+          rate_policies,
+          window_seconds: 60,
+        )
+      let checked_at = unix_seconds()
+      let client_key = "distributed-contract-" <> int.to_string(checked_at)
+      assert limiter_a.check(rate_limit.Request, client_key, checked_at, 1)
+        == Ok(rate_limit.Allowed(remaining: 1, reset_at: checked_at + 30))
+      assert limiter_b.check(rate_limit.Request, client_key, checked_at, 1)
+        == Ok(rate_limit.Allowed(remaining: 0, reset_at: checked_at + 60))
+      assert limiter_a.check(rate_limit.Request, client_key, checked_at, 1)
+        == Ok(rate_limit.Limited(retry_after: 30, reset_at: checked_at + 60))
+      assert limiter_b.check(rate_limit.Subscription, client_key, checked_at, 1)
+        == Ok(rate_limit.Allowed(remaining: 0, reset_at: checked_at + 60))
+
+      let concurrent_key = client_key <> "-concurrent"
+      let replies = process.new_subject()
+      list.repeat(limiter_a, times: 16)
+      |> list.append(list.repeat(limiter_b, times: 16))
+      |> list.each(fn(limiter) {
+        process.spawn(fn() {
+          process.send(
+            replies,
+            limiter.check(
+              rate_limit.TopicCreation,
+              concurrent_key,
+              checked_at,
+              1,
+            ),
+          )
+        })
+      })
+      let decisions = receive_rate_decisions(replies, 32, [])
+      let allowed =
+        decisions
+        |> list.filter(fn(decision) {
+          case decision {
+            Ok(rate_limit.Allowed(..)) -> True
+            _ -> False
+          }
+        })
+        |> list.length
+      assert allowed == 7
+      drop_test_database(database)
+    }
+  }
+}
+
+fn receive_rate_decisions(subject, remaining: Int, accumulated) {
+  case remaining {
+    0 -> accumulated
+    _ -> {
+      let assert Ok(decision) = process.receive(subject, 30_000)
+      receive_rate_decisions(subject, remaining - 1, [decision, ..accumulated])
     }
   }
 }
@@ -423,3 +521,6 @@ fn getenv(name: String) -> Result(String, Nil)
 
 @external(erlang, "notify_ffi", "unix_seconds")
 fn unix_seconds() -> Int
+
+@external(erlang, "notify_ffi", "random_id")
+fn random_id() -> String
