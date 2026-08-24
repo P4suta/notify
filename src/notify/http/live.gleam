@@ -32,6 +32,13 @@ type Format {
   RawFormat
 }
 
+type LiveRoute {
+  JsonSubscription(String)
+  RawSubscription(String)
+  SseSubscription(String)
+  WebSocketSubscription(String)
+}
+
 type State {
   State(
     subscription: Int,
@@ -56,15 +63,32 @@ pub fn route(
   bus: Broker,
   buffer_capacity: Int,
 ) -> Option(Response(mist.ResponseData)) {
-  case request.method, request.path_segments(request), poll_requested(request) {
-    Get, [topics, "json"], False ->
+  case match_route(request) {
+    Some(JsonSubscription(topics)) ->
       Some(chunked(request, topics, JsonFormat, runtime, bus, buffer_capacity))
-    Get, [topics, "raw"], False ->
+    Some(RawSubscription(topics)) ->
       Some(chunked(request, topics, RawFormat, runtime, bus, buffer_capacity))
-    Get, [topics, "sse"], False ->
+    Some(SseSubscription(topics)) ->
       Some(sse(request, topics, runtime, bus, buffer_capacity))
-    Get, [topics, "ws"], False ->
+    Some(WebSocketSubscription(topics)) ->
       Some(websocket(request, topics, runtime, bus, buffer_capacity))
+    None -> None
+  }
+}
+
+pub fn matches(request: Request(body)) -> Bool {
+  case match_route(request) {
+    Some(_) -> True
+    None -> False
+  }
+}
+
+fn match_route(request: Request(body)) -> Option(LiveRoute) {
+  case request.method, request.path_segments(request), poll_requested(request) {
+    Get, [topics, "json"], False -> Some(JsonSubscription(topics))
+    Get, [topics, "raw"], False -> Some(RawSubscription(topics))
+    Get, [topics, "sse"], False -> Some(SseSubscription(topics))
+    Get, [topics, "ws"], False -> Some(WebSocketSubscription(topics))
     _, _, _ -> None
   }
 }

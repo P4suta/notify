@@ -288,6 +288,9 @@ The core suite includes deterministic, shrinking property tests for topic,
 priority, delay, JSON codec, and ACL invariants. Accepted Birdie snapshots pin
 the complete message wire shape, action normalisation, and validation errors;
 run the Birdie reviewer only when intentionally changing those contracts.
+The root suite also parses the served OpenAPI 3.1 document, requires unique
+stable IDs and response metadata for all 68 operations, and executes every
+documented method/path against the in-process body or live WebSocket router.
 
 The current Chromium Playwright flow covers first-run setup, login, live publish,
 attachments, ACL denial, one-time token display, Web Push registration,
