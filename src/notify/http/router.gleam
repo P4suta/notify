@@ -30,6 +30,7 @@ import notify/runtime.{type Runtime}
 import notify/service
 import notify/since
 import notify/storage
+import notify/template as message_template
 import notify/webpush
 
 const ntfy_docs = "https://ntfy.sh/docs/publish/"
@@ -507,17 +508,16 @@ fn publish_update(
         case body_or_error(req) {
           Error(response) -> response
           Ok(body) -> {
-            case
-              message.plaintext_draft(parsed_topic, body)
-              |> apply_publish_parameters(req)
-            {
-              Error(error) -> publish_parameter_error(error)
-              Ok(draft) ->
-                publish_draft(
-                  message.Draft(..draft, sequence_id: Some(sequence_id)),
-                  runtime,
-                )
-            }
+            message.plaintext_draft(parsed_topic, body)
+            |> apply_template_and_publish_parameters(
+              req,
+              body,
+              runtime.template_directory,
+            )
+            |> result.map(fn(draft) {
+              message.Draft(..draft, sequence_id: Some(sequence_id))
+            })
+            |> publish_parameter_result(runtime)
           }
         }
       })
@@ -587,7 +587,7 @@ fn publish_plaintext(
                   False -> body
                 }
                 message.plaintext_draft(parsed_topic, body)
-                |> publish_with_parameters(req, runtime)
+                |> publish_with_template_source(req, body, runtime)
               }
             }
         }
@@ -950,7 +950,13 @@ fn publish_json(
       case message_json.decode_publish(body) {
         Ok(draft) ->
           with_authorization(req, [draft.topic], acl.Write, runtime, fn() {
-            publish_draft(draft, runtime)
+            draft
+            |> apply_template_and_publish_parameters(
+              req,
+              draft.message,
+              runtime.template_directory,
+            )
+            |> publish_parameter_result(runtime)
           })
         Error(message_json.InvalidTopic(_)) -> invalid_topic()
         Error(message_json.InvalidPriority(_)) ->
@@ -1042,6 +1048,16 @@ type PublishParameterError {
   InvalidPublishPriority
   InvalidPublishActions
   DelayedMessageWithoutCache
+  TemplateSourceTooLarge
+  TemplateSourceNotJson
+  PublishTemplateTooLarge
+  InvalidPublishTemplate
+  DisallowedPublishTemplate
+  PublishTemplateExecutionFailed
+  PublishTemplateExecutionTimedOut
+  TemplatedMessageTooLarge
+  NamedPublishTemplateNotFound
+  NamedPublishTemplateInvalid
 }
 
 fn publish_with_parameters(
@@ -1049,7 +1065,35 @@ fn publish_with_parameters(
   req: Request(BitArray),
   runtime: Runtime,
 ) -> Response(BitArray) {
-  case apply_publish_parameters(draft, req) {
+  draft
+  |> apply_template_and_publish_parameters(
+    req,
+    draft.message,
+    runtime.template_directory,
+  )
+  |> publish_parameter_result(runtime)
+}
+
+fn publish_with_template_source(
+  draft: Draft,
+  req: Request(BitArray),
+  source: String,
+  runtime: Runtime,
+) -> Response(BitArray) {
+  draft
+  |> apply_template_and_publish_parameters(
+    req,
+    source,
+    runtime.template_directory,
+  )
+  |> publish_parameter_result(runtime)
+}
+
+fn publish_parameter_result(
+  applied: Result(Draft, PublishParameterError),
+  runtime: Runtime,
+) -> Response(BitArray) {
+  case applied {
     Ok(draft) -> publish_draft(draft, runtime)
     Error(error) -> publish_parameter_error(error)
   }
@@ -1078,7 +1122,44 @@ fn publish_parameter_error(error: PublishParameterError) -> Response(BitArray) {
         "cannot disable cache for delayed message",
         ntfy_docs,
       )
+    TemplateSourceTooLarge -> ntfy_error(413, 41_303, "JSON body too large", "")
+    TemplateSourceNotJson ->
+      template_error(
+        40_042,
+        "invalid request: message body must be JSON if templating is enabled",
+      )
+    PublishTemplateTooLarge ->
+      template_error(40_056, "invalid request: template too large")
+    InvalidPublishTemplate ->
+      template_error(40_043, "invalid request: could not parse template")
+    DisallowedPublishTemplate ->
+      template_error(
+        40_044,
+        "invalid request: template contains disallowed function calls, e.g. template, call, define, or block",
+      )
+    PublishTemplateExecutionFailed ->
+      template_error(40_045, "invalid request: template execution failed")
+    PublishTemplateExecutionTimedOut ->
+      template_error(40_055, "invalid request: template execution timed out")
+    TemplatedMessageTooLarge ->
+      template_error(
+        40_041,
+        "invalid request: message or title is too large after replacing template",
+      )
+    NamedPublishTemplateNotFound ->
+      template_error(40_047, "invalid request: template file not found")
+    NamedPublishTemplateInvalid ->
+      template_error(40_048, "invalid request: template file invalid")
   }
+}
+
+fn template_error(code: Int, message: String) -> Response(BitArray) {
+  ntfy_error(
+    400,
+    code,
+    message,
+    "https://ntfy.sh/docs/publish/#message-templating",
+  )
 }
 
 type PollFormat {
@@ -1213,6 +1294,244 @@ fn with_final_newline(value: String, messages: List(Message)) -> String {
   }
 }
 
+type PublishTemplateMode {
+  PublishTemplateDisabled
+  InlinePublishTemplate
+  NamedPublishTemplate(String)
+}
+
+fn apply_template_and_publish_parameters(
+  draft: Draft,
+  req: Request(BitArray),
+  source: String,
+  template_directory: String,
+) -> Result(Draft, PublishParameterError) {
+  case publish_template_mode(req) {
+    PublishTemplateDisabled -> apply_publish_parameters(draft, req)
+    NamedPublishTemplate(name) -> {
+      use with_parameters <- result.try(apply_named_template_parameters(
+        draft,
+        req,
+      ))
+      render_named_template(with_parameters, source, template_directory, name)
+      |> result.map(ensure_template_message)
+    }
+    InlinePublishTemplate -> {
+      let template_draft = message.Draft(..draft, message: "")
+      use rendered <- result.try(render_inline_template(
+        template_draft,
+        req,
+        source,
+      ))
+      apply_publish_parameter_values(
+        rendered,
+        req,
+        title: None,
+        body: None,
+        priority: None,
+      )
+      |> result.map(ensure_template_message)
+    }
+  }
+}
+
+fn apply_named_template_parameters(
+  draft: Draft,
+  req: Request(BitArray),
+) -> Result(Draft, PublishParameterError) {
+  let template_draft = message.Draft(..draft, message: "")
+  apply_publish_parameter_values(
+    template_draft,
+    req,
+    title: option.or(draft.title, param(req, ["x-title", "title", "t"])),
+    body: param(req, ["x-message", "message", "m"]),
+    // v2.27 leaves this string unparsed in file mode. Only a priority field in
+    // the selected template may replace the draft's already decoded value.
+    priority: None,
+  )
+}
+
+fn ensure_template_message(draft: Draft) -> Draft {
+  case string.is_empty(draft.message) {
+    True -> message.Draft(..draft, message: "triggered")
+    False -> draft
+  }
+}
+
+fn publish_template_mode(req: Request(body)) -> PublishTemplateMode {
+  case param(req, ["x-template", "template", "tpl"]) {
+    None -> PublishTemplateDisabled
+    Some(value) ->
+      case
+        list.contains(
+          ["yes", "1", "true", "no", "0", "false"],
+          string.lowercase(value),
+        )
+      {
+        True -> InlinePublishTemplate
+        False -> NamedPublishTemplate(value)
+      }
+  }
+}
+
+fn render_named_template(
+  draft: Draft,
+  source: String,
+  directory: String,
+  name: String,
+) -> Result(Draft, PublishParameterError) {
+  case message_template.load_file(directory, name) {
+    Ok(definition) -> render_template_definition(draft, source, definition)
+    Error(message_template.FileInvalid) -> Error(NamedPublishTemplateInvalid)
+    Error(message_template.FileNotFound) ->
+      case message_template.render_builtin(source, name) {
+        Ok(definition) -> apply_rendered_definition(draft, definition)
+        Error(message_template.InvalidTemplate) ->
+          Error(NamedPublishTemplateNotFound)
+        Error(error) -> Error(template_render_error(error))
+      }
+  }
+}
+
+fn render_template_definition(
+  draft: Draft,
+  source: String,
+  definition: message_template.Definition,
+) -> Result(Draft, PublishParameterError) {
+  let message_template.Definition(title:, message: body, priority:) = definition
+  use rendered_message <- result.try(case body {
+    None -> Ok(None)
+    Some(value) ->
+      message_template.render(source, value)
+      |> result.map(Some)
+      |> result.map_error(template_render_error)
+  })
+  use rendered_title <- result.try(render_optional_template(source, title))
+  use rendered_priority <- result.try(render_optional_template(source, priority))
+  apply_rendered_definition(
+    draft,
+    message_template.Definition(
+      title: rendered_title,
+      message: rendered_message,
+      priority: rendered_priority,
+    ),
+  )
+}
+
+fn apply_rendered_definition(
+  draft: Draft,
+  definition: message_template.Definition,
+) -> Result(Draft, PublishParameterError) {
+  let message_template.Definition(title:, message: body, priority:) = definition
+  let rendered_message = option.unwrap(body, draft.message)
+  let rendered_title = option.or(title, draft.title)
+  use rendered_priority <- result.try(case priority {
+    Some(value) ->
+      message.parse_priority(value)
+      |> result.map_error(fn(_) { InvalidPublishPriority })
+    None -> Ok(draft.priority)
+  })
+  case
+    template_field_too_large(rendered_message),
+    option.map(rendered_title, template_field_too_large)
+    |> option.unwrap(False)
+  {
+    True, _ | _, True -> Error(TemplatedMessageTooLarge)
+    False, False ->
+      Ok(
+        message.Draft(
+          ..draft,
+          message: rendered_message,
+          title: rendered_title,
+          priority: rendered_priority,
+        ),
+      )
+  }
+}
+
+fn render_inline_template(
+  draft: Draft,
+  req: Request(body),
+  source: String,
+) -> Result(Draft, PublishParameterError) {
+  let message_source =
+    param(req, ["x-message", "message", "m"])
+    |> option.unwrap(draft.message)
+  let title_source =
+    option.or(draft.title, param(req, ["x-title", "title", "t"]))
+  let priority_source = param(req, ["x-priority", "priority", "prio", "p"])
+
+  use rendered_message <- result.try(
+    message_template.render(source, message_source)
+    |> result.map_error(template_render_error),
+  )
+  use rendered_title <- result.try(render_optional_template(
+    source,
+    title_source,
+  ))
+  use rendered_priority <- result.try(render_optional_template(
+    source,
+    priority_source,
+  ))
+  use priority <- result.try(case rendered_priority {
+    Some(value) ->
+      message.parse_priority(value)
+      |> result.map_error(fn(_) { InvalidPublishPriority })
+    None -> Ok(draft.priority)
+  })
+
+  case
+    template_field_too_large(rendered_message),
+    option.map(rendered_title, template_field_too_large)
+    |> option.unwrap(False)
+  {
+    True, _ | _, True -> Error(TemplatedMessageTooLarge)
+    False, False ->
+      Ok(
+        message.Draft(
+          ..draft,
+          message: rendered_message,
+          title: rendered_title,
+          priority:,
+        ),
+      )
+  }
+}
+
+fn render_optional_template(
+  source: String,
+  template: Option(String),
+) -> Result(Option(String), PublishParameterError) {
+  case template {
+    None -> Ok(None)
+    Some(template) ->
+      message_template.render(source, template)
+      |> result.map(Some)
+      |> result.map_error(template_render_error)
+  }
+}
+
+fn template_render_error(
+  error: message_template.Error,
+) -> PublishParameterError {
+  case error {
+    message_template.SourceTooLarge -> TemplateSourceTooLarge
+    message_template.SourceNotJson -> TemplateSourceNotJson
+    message_template.TemplateTooLarge -> PublishTemplateTooLarge
+    message_template.InvalidTemplate -> InvalidPublishTemplate
+    message_template.DisallowedFeature -> DisallowedPublishTemplate
+    message_template.ExecutionFailed -> PublishTemplateExecutionFailed
+    message_template.ExecutionTimedOut -> PublishTemplateExecutionTimedOut
+  }
+}
+
+fn template_field_too_large(value: String) -> Bool {
+  value
+  |> bit_array.from_string
+  |> bit_array.byte_size
+  > message.max_message_bytes
+}
+
 fn apply_publish_parameters(
   draft: Draft,
   req: Request(BitArray),
@@ -1223,6 +1542,16 @@ fn apply_publish_parameters(
     False -> None
   }
   let priority = param(req, ["x-priority", "priority", "prio", "p"])
+  apply_publish_parameter_values(draft, req, title:, body:, priority:)
+}
+
+fn apply_publish_parameter_values(
+  draft: Draft,
+  req: Request(BitArray),
+  title title: Option(String),
+  body body: Option(String),
+  priority priority: Option(String),
+) -> Result(Draft, PublishParameterError) {
   let tags = param(req, ["x-tags", "tags", "tag", "ta"])
   let markdown = param(req, ["x-markdown", "markdown", "md"])
   let cache = param(req, ["x-cache", "cache"])

@@ -56,4 +56,6 @@ pub fn openapi_document_is_valid_json_and_describes_security_boundaries_test() {
   assert string.contains(body, "X-Notify-RateLimit-Bucket")
   assert string.contains(body, "^[A-Za-z0-9]{12}$")
   assert string.contains(body, "/api/v1/anonymous-access")
+  assert string.contains(body, "X-Template")
+  assert string.contains(body, "bounded inline templates")
 }

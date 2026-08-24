@@ -14,6 +14,13 @@ enforced limits from acceptance targets that have not yet been demonstrated.
 - Publish bodies are limited to 4,096 UTF-8 bytes. Scheduled delivery accepts
   10 seconds through 3 days. Live connections use a 45-second keepalive and a
   default credit window of 128 events.
+- Message templates accept at most 128 KiB of JSON source and 32 KiB per
+  message/title/priority template. Each isolated render has a 100 ms wall-clock
+  deadline, a 1 MiB intermediate-output ceiling, bounded recursion/iteration,
+  and a 4,096-byte final message/title limit. Custom files are read only as
+  `<templates.directory>/[-_A-Za-z0-9]+.yml`; files must be regular and at most
+  96 KiB, while path separators, symlinks, and unsupported YAML keys are
+  rejected.
 - PostgreSQL node cursors are heartbeated when reading the event log. A cursor
   inactive for seven days is stale; cleanup may then compact acknowledged event
   rows after their messages have expired.

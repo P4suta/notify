@@ -60,6 +60,7 @@ pub type Runtime {
     relay: Option(RelayRuntime),
     rate_limiter: Option(Limiter),
     audit: Option(AuditStore),
+    template_directory: String,
     committer: Committer,
   )
 }
@@ -87,6 +88,7 @@ pub fn new(
     relay: None,
     rate_limiter: None,
     audit: None,
+    template_directory: "",
     committer: Committer(fn(message, _) {
       storage.save(message) |> result.map_error(CommitPersistence)
     }),
@@ -177,6 +179,10 @@ pub fn with_rate_limiter(runtime: Runtime, limiter: Limiter) -> Runtime {
 
 pub fn with_audit(runtime: Runtime, store: AuditStore) -> Runtime {
   Runtime(..runtime, audit: Some(store))
+}
+
+pub fn with_template_directory(runtime: Runtime, directory: String) -> Runtime {
+  Runtime(..runtime, template_directory: directory)
 }
 
 pub fn with_public_base_url(runtime: Runtime, base_url: String) -> Runtime {

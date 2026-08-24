@@ -263,3 +263,20 @@ pub fn logging_format_is_typed_and_configurable_test() {
   assert resolved.log_format == config.JsonLogs
   assert string.contains(config.to_toml(resolved), "format = \"json\"")
 }
+
+pub fn custom_template_directory_is_typed_and_printed_test() {
+  let assert Ok(partial) =
+    config.parse_toml("[templates]\ndirectory = \"/srv/notify/templates\"\n")
+  let resolved =
+    config.resolve(
+      config.defaults(),
+      partial,
+      config.empty_partial(),
+      config.empty_partial(),
+    )
+  assert resolved.template_directory == "/srv/notify/templates"
+  assert string.contains(
+    config.to_toml(resolved),
+    "[templates]\ndirectory = \"/srv/notify/templates\"",
+  )
+}

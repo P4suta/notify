@@ -122,6 +122,16 @@ event is durable; a separate result event records `succeeded`, `failed`, or
 request bodies, query strings, credentials, session cookies, raw tokens, or
 message content.
 
+Webhook message templates use the fixed ntfy v2.27 aliases (`X-Template`,
+`Template`, `Tpl`, or `template`/`tpl` query parameters). Inline templates and
+the independently implemented `github`, `grafana`, and `alertmanager` names are
+available; custom `.yml` files come from `[templates].directory`,
+`NOTIFY_TEMPLATE_DIRECTORY`, or `--template-dir`. Rendering is isolated and
+bounded by input, template, output, recursion, expansion, and wall-clock
+limits. The compatibility matrix records the remaining advanced function gaps.
+See [bounded message templates](docs/templates.md) for the language, allowlist,
+configuration, and exact error/limit contract.
+
 Useful operational commands include:
 
 ```sh

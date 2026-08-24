@@ -148,6 +148,7 @@ fn start_after_lock(
     |> runtime.with_atomic_commit(atomic_commit)
     |> runtime.with_rate_limiter(limiter)
     |> runtime.with_audit(audit_store)
+    |> runtime.with_template_directory(config.template_directory)
   let runtime = case webpush_runtime {
     None -> runtime
     Some(configured) -> runtime.with_webpush(runtime, configured)

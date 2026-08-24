@@ -101,6 +101,7 @@ fn print_help() -> Nil {
     "  --database PATH          SQLite path (default: data/notify.db)",
     "  --retention-seconds N    Message cache retention (default: 43200)",
     "  --max-request-bytes N    Reject larger request bodies",
+    "  --template-dir PATH       Custom .yml message templates",
     "  --rate-limit-requests N  Requests allowed per client window",
     "  --rate-limit-subscriptions N  Subscription attempts per client window",
     "  --rate-limit-topic-creations N Publish/topic creation attempts per window",

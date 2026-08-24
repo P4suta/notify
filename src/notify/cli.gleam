@@ -707,6 +707,7 @@ fn is_config_value_flag(flag: String) -> Bool {
       "--attachment-file-size",
       "--attachment-total-size",
       "--attachment-retention-seconds",
+      "--template-dir",
       "--s3-endpoint",
       "--s3-bucket",
       "--s3-region",

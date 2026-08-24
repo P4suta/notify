@@ -59,6 +59,7 @@ pub type Config {
     attachment_file_size_bytes: Int,
     attachment_total_size_bytes: Int,
     attachment_retention_seconds: Int,
+    template_directory: String,
     s3_endpoint: String,
     s3_bucket: String,
     s3_region: String,
@@ -107,6 +108,7 @@ pub type Partial {
     attachment_file_size_bytes: Option(Int),
     attachment_total_size_bytes: Option(Int),
     attachment_retention_seconds: Option(Int),
+    template_directory: Option(String),
     s3_endpoint: Option(String),
     s3_bucket: Option(String),
     s3_region: Option(String),
@@ -179,6 +181,7 @@ pub fn defaults() -> Config {
     attachment_file_size_bytes: 15_728_640,
     attachment_total_size_bytes: 104_857_600,
     attachment_retention_seconds: 10_800,
+    template_directory: "data/templates",
     s3_endpoint: "",
     s3_bucket: "",
     s3_region: "us-east-1",
@@ -227,6 +230,7 @@ pub fn empty_partial() -> Partial {
     attachment_file_size_bytes: None,
     attachment_total_size_bytes: None,
     attachment_retention_seconds: None,
+    template_directory: None,
     s3_endpoint: None,
     s3_bucket: None,
     s3_region: None,
@@ -407,6 +411,12 @@ pub fn resolve(
       environment.attachment_retention_seconds,
       toml.attachment_retention_seconds,
       defaults.attachment_retention_seconds,
+    ),
+    template_directory: choose(
+      flags.template_directory,
+      environment.template_directory,
+      toml.template_directory,
+      defaults.template_directory,
     ),
     s3_endpoint: choose(
       flags.s3_endpoint,
@@ -875,6 +885,8 @@ fn set_toml_value(
       ))
       Ok(Partial(..partial, attachment_retention_seconds: Some(value)))
     }
+    "templates.directory" ->
+      Ok(Partial(..partial, template_directory: Some(unquote(raw_value))))
     "s3.endpoint" ->
       Ok(Partial(..partial, s3_endpoint: Some(unquote(raw_value))))
     "s3.bucket" -> Ok(Partial(..partial, s3_bucket: Some(unquote(raw_value))))
@@ -1025,6 +1037,8 @@ fn from_environment() -> Result(Partial, Error) {
     attachment_file_size_bytes: attachment_file_size,
     attachment_total_size_bytes: attachment_total_size,
     attachment_retention_seconds: attachment_retention,
+    template_directory: getenv("NOTIFY_TEMPLATE_DIRECTORY")
+      |> option.from_result,
     s3_endpoint: getenv("NOTIFY_S3_ENDPOINT") |> option.from_result,
     s3_bucket: getenv("NOTIFY_S3_BUCKET") |> option.from_result,
     s3_region: getenv("NOTIFY_S3_REGION") |> option.from_result,
@@ -1223,6 +1237,8 @@ fn parse_flag_loop(
         Partial(..partial, attachment_retention_seconds: Some(expiry)),
       )
     }
+    ["--template-dir", value, ..rest] ->
+      parse_flag_loop(rest, Partial(..partial, template_directory: Some(value)))
     ["--s3-endpoint", value, ..rest] ->
       parse_flag_loop(rest, Partial(..partial, s3_endpoint: Some(value)))
     ["--s3-bucket", value, ..rest] ->
@@ -1402,6 +1418,9 @@ pub fn to_toml(config: Config) -> String {
   <> int.to_string(config.attachment_total_size_bytes)
   <> "\nretention_seconds = "
   <> int.to_string(config.attachment_retention_seconds)
+  <> "\n\n[templates]\ndirectory = \""
+  <> config.template_directory
+  <> "\""
   <> "\n\n[s3]\nendpoint = \""
   <> config.s3_endpoint
   <> "\"\nbucket = \""
