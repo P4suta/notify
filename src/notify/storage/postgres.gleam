@@ -1,6 +1,7 @@
 import gleam/erlang/process.{type Subject}
 import gleam/json
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
 import notify/core/message.{type Message}
@@ -81,12 +82,16 @@ CREATE TABLE IF NOT EXISTS notify_event_log (
 );
 CREATE INDEX IF NOT EXISTS notify_event_log_topic_sequence
   ON notify_event_log(topic, sequence);
+CREATE INDEX IF NOT EXISTS notify_event_log_message_sequence
+  ON notify_event_log(message_id, sequence);
 
 CREATE TABLE IF NOT EXISTS notify_node_cursors (
   node_id TEXT PRIMARY KEY,
   sequence BIGINT NOT NULL DEFAULT 0,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS notify_node_cursors_updated_at
+  ON notify_node_cursors(updated_at);
 
 CREATE TABLE IF NOT EXISTS notify_delivery_outbox (
   id TEXT PRIMARY KEY,
@@ -108,6 +113,55 @@ CREATE INDEX IF NOT EXISTS notify_delivery_outbox_claim
 
 INSERT INTO notify_schema_migrations(version) VALUES (1)
 ON CONFLICT(version) DO NOTHING;
+"
+
+const query_page_size = 256
+
+const page_query = "
+SELECT m.position, m.payload, m.scheduled
+FROM notify_messages AS m
+WHERE m.position > $1
+  AND m.topic IN (SELECT jsonb_array_elements_text($2::jsonb))
+  AND COALESCE((m.payload->>'_notify_cached')::boolean, TRUE) = TRUE
+  AND ($3::boolean = TRUE OR m.scheduled = FALSE)
+  AND ($4::boolean = FALSE OR m.time >= $5)
+  AND ($6::boolean = FALSE OR m.id = $7)
+  AND ($8::boolean = FALSE OR m.payload->>'message' = $9)
+  AND ($10::boolean = FALSE OR m.payload->>'title' = $11)
+  AND (
+    $12::boolean = FALSE
+    OR COALESCE((m.payload->>'priority')::bigint, 3) IN (
+      SELECT value::bigint
+      FROM jsonb_array_elements_text($13::jsonb) AS priority(value)
+    )
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM jsonb_array_elements_text($14::jsonb) AS required_tag(value)
+    WHERE NOT (COALESCE(m.payload->'tags', '[]'::jsonb) ? required_tag.value)
+  )
+  AND (
+    $15::boolean = FALSE
+    OR m.position = (
+      SELECT MAX(latest.position)
+      FROM notify_messages AS latest
+      WHERE latest.topic = m.topic
+        AND latest.scheduled = FALSE
+        AND COALESCE((latest.payload->>'_notify_cached')::boolean, TRUE) = TRUE
+    )
+  )
+ORDER BY m.position ASC
+LIMIT $16
+"
+
+const after_id_cursor_query = "
+SELECT position
+FROM notify_messages
+WHERE id = $1
+  AND topic IN (SELECT jsonb_array_elements_text($2::jsonb))
+  AND COALESCE((payload->>'_notify_cached')::boolean, TRUE) = TRUE
+  AND ($3::boolean = TRUE OR scheduled = FALSE)
+LIMIT 1
 "
 
 pub fn start(
@@ -316,15 +370,58 @@ fn run_query(
   state: State,
   selection: Query,
 ) -> Result(List(Message), storage.Error) {
+  case selection.since {
+    storage.NoneSince -> Ok([])
+    _ -> {
+      use cursor <- result.try(initial_query_cursor(state.connection, selection))
+      query_pages(state.connection, selection, cursor, [])
+    }
+  }
+}
+
+fn initial_query_cursor(
+  connection: postgleam.Connection,
+  selection: Query,
+) -> Result(Int, storage.Error) {
+  case selection.since {
+    storage.AfterId(id) ->
+      postgleam.query_with(
+        connection,
+        after_id_cursor_query,
+        [
+          postgleam.text(id),
+          postgleam.jsonb(json_strings(topic.many_to_strings(selection.topics))),
+          postgleam.bool(selection.include_scheduled),
+        ],
+        {
+          use position <- decode.element(0, decode.int)
+          decode.success(position)
+        },
+      )
+      |> result.map(fn(response) {
+        response.rows |> list.first |> result.unwrap(0)
+      })
+      |> result.map_error(map_error)
+    _ -> Ok(0)
+  }
+}
+
+fn query_pages(
+  connection: postgleam.Connection,
+  selection: Query,
+  cursor: Int,
+  pages: List(List(Message)),
+) -> Result(List(Message), storage.Error) {
   use response <- result.try(
     postgleam.query_with(
-      state.connection,
-      "SELECT payload, scheduled FROM notify_messages ORDER BY position ASC",
-      [],
+      connection,
+      page_query,
+      page_parameters(selection, cursor),
       {
-        use payload <- decode.element(0, decode.jsonb)
-        use scheduled <- decode.element(1, decode.bool)
-        decode.success(#(payload, scheduled))
+        use position <- decode.element(0, decode.int)
+        use payload <- decode.element(1, decode.jsonb)
+        use scheduled <- decode.element(2, decode.bool)
+        decode.success(#(position, payload, scheduled))
       },
     )
     |> result.map_error(map_error),
@@ -332,15 +429,76 @@ fn run_query(
   use messages <- result.try(
     list.try_map(response.rows, fn(row) {
       use decoded <- result.try(
-        json.parse(row.0, message_json.decoder())
+        json.parse(row.1, message_json.decoder())
         |> result.map_error(fn(_) {
           storage.Corrupt("invalid PostgreSQL message payload")
         }),
       )
-      Ok(message.Message(..decoded, scheduled: row.1))
+      Ok(message.Message(..decoded, scheduled: row.2))
     }),
   )
-  Ok(storage.apply_query(messages, selection))
+  let pages = [messages, ..pages]
+  case list.length(response.rows) < query_page_size {
+    True -> Ok(pages |> list.reverse |> list.flatten)
+    False -> {
+      let next_cursor =
+        response.rows
+        |> list.last
+        |> result.map(fn(row) { row.0 })
+        |> result.unwrap(cursor)
+      query_pages(connection, selection, next_cursor, pages)
+    }
+  }
+}
+
+fn page_parameters(selection: Query, cursor: Int) -> List(postgleam.Param) {
+  let criteria = selection.criteria
+  let #(after_time_enabled, after_time) = case selection.since {
+    storage.AfterTime(time) -> #(True, time)
+    _ -> #(False, 0)
+  }
+  [
+    postgleam.int(cursor),
+    postgleam.jsonb(json_strings(topic.many_to_strings(selection.topics))),
+    postgleam.bool(selection.include_scheduled),
+    postgleam.bool(after_time_enabled),
+    postgleam.int(after_time),
+    postgleam.bool(is_some(criteria.id)),
+    postgleam.text(optional_string(criteria.id)),
+    postgleam.bool(is_some(criteria.message)),
+    postgleam.text(optional_string(criteria.message)),
+    postgleam.bool(is_some(criteria.title)),
+    postgleam.text(optional_string(criteria.title)),
+    postgleam.bool(criteria.priorities != []),
+    postgleam.jsonb(
+      json_ints(list.map(criteria.priorities, message.priority_to_int)),
+    ),
+    postgleam.jsonb(json_strings(criteria.tags)),
+    postgleam.bool(selection.since == storage.Latest),
+    postgleam.int(query_page_size),
+  ]
+}
+
+fn json_strings(values: List(String)) -> String {
+  json.array(values, json.string) |> json.to_string
+}
+
+fn json_ints(values: List(Int)) -> String {
+  json.array(values, json.int) |> json.to_string
+}
+
+fn is_some(value: Option(a)) -> Bool {
+  case value {
+    Some(_) -> True
+    None -> False
+  }
+}
+
+fn optional_string(value: Option(String)) -> String {
+  case value {
+    Some(value) -> value
+    None -> ""
+  }
 }
 
 fn release_due(
@@ -352,7 +510,7 @@ fn release_due(
     use response <- result.try(
       postgleam.query_with(
         tx,
-        "WITH due AS (SELECT position FROM notify_messages WHERE scheduled = TRUE AND time <= $1 ORDER BY position ASC FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE notify_messages AS m SET scheduled = FALSE FROM due WHERE m.position = due.position RETURNING m.payload",
+        "WITH due AS (SELECT position FROM notify_messages WHERE scheduled = TRUE AND time <= $1 ORDER BY position ASC FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE notify_messages AS m SET scheduled = FALSE, payload = jsonb_set(m.payload, '{_notify_scheduled}', 'false'::jsonb, TRUE) FROM due WHERE m.position = due.position RETURNING m.payload",
         [postgleam.int(now), postgleam.int(max(0, limit))],
         {
           use payload <- decode.element(0, decode.jsonb)
@@ -388,16 +546,34 @@ fn cleanup_expired(
   connection: postgleam.Connection,
   now: Int,
 ) -> Result(Int, storage.Error) {
-  postgleam.query_with(
-    connection,
-    "WITH deleted AS (DELETE FROM notify_messages WHERE (expires IS NOT NULL AND expires <= $1) OR COALESCE((payload->>'_notify_cached')::boolean, TRUE) = FALSE RETURNING 1) SELECT COUNT(*)::bigint FROM deleted",
-    [postgleam.int(now)],
-    {
-      use count <- decode.element(0, decode.int)
-      decode.success(count)
-    },
-  )
-  |> result.map(fn(response) { response.rows |> list.first |> result.unwrap(0) })
+  postgleam.transaction(connection, fn(tx) {
+    use _ <- result.try(
+      postgleam.query(
+        tx,
+        "DELETE FROM notify_node_cursors WHERE updated_at < now() - INTERVAL '7 days'",
+        [],
+      ),
+    )
+    use deleted <- result.try(
+      postgleam.query_one(
+        tx,
+        "WITH deleted AS (DELETE FROM notify_messages WHERE (expires IS NOT NULL AND expires <= $1) OR COALESCE((payload->>'_notify_cached')::boolean, TRUE) = FALSE RETURNING 1) SELECT COUNT(*)::bigint FROM deleted",
+        [postgleam.int(now)],
+        {
+          use count <- decode.element(0, decode.int)
+          decode.success(count)
+        },
+      ),
+    )
+    use _ <- result.try(
+      postgleam.query(
+        tx,
+        "WITH watermark AS (SELECT COALESCE(MIN(sequence), (SELECT COALESCE(MAX(sequence), 0) FROM notify_event_log)) AS sequence FROM notify_node_cursors) DELETE FROM notify_event_log AS event USING watermark WHERE event.sequence <= watermark.sequence AND NOT EXISTS (SELECT 1 FROM notify_messages AS message WHERE message.id = event.message_id)",
+        [],
+      ),
+    )
+    Ok(deleted)
+  })
   |> result.map_error(map_error)
 }
 
@@ -429,6 +605,7 @@ fn fetch_events(
   node_id: String,
   limit: Int,
 ) -> Result(List(ClusterEvent), storage.Error) {
+  use _ <- result.try(touch_node_cursor(connection, node_id))
   use cursor <- result.try(node_cursor(connection, node_id))
   use response <- result.try(
     postgleam.query_with(
@@ -453,6 +630,19 @@ fn fetch_events(
     )
     Ok(ClusterEvent(row.0, row.1, decoded))
   })
+}
+
+fn touch_node_cursor(
+  connection: postgleam.Connection,
+  node_id: String,
+) -> Result(Nil, storage.Error) {
+  postgleam.query(
+    connection,
+    "INSERT INTO notify_node_cursors(node_id, sequence) VALUES ($1, 0) ON CONFLICT(node_id) DO UPDATE SET updated_at = now()",
+    [postgleam.text(node_id)],
+  )
+  |> result.map(fn(_) { Nil })
+  |> result.map_error(map_error)
 }
 
 fn node_cursor(

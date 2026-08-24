@@ -6,7 +6,15 @@
 
 Notify is a self-hosted notification server written in Gleam/OTP. It exposes an
 ntfy-compatible HTTP surface, durable pub/sub, a bilingual Lustre PWA, access
-control, attachments, Web Push, and PostgreSQL active-active operation.
+control, attachments, Web Push, and an experimental PostgreSQL active-active
+mode.
+
+> **Development status:** Notify is not yet production-ready. The v2.27.0
+> differential corpus is intentionally pinned but still incomplete, the full
+> fault-injection matrix has not run, and the 10,000-subscription / 500
+> publish-per-second soak target has not been demonstrated. See the measured
+> [compatibility status](docs/compatibility.md) and
+> [operational limits](docs/operations.md) before testing a deployment.
 
 The compatibility baseline is ntfy **v2.27.0**. Notify is an independent
 implementation based on the public protocol; it does not copy ntfy source code
@@ -150,7 +158,8 @@ Node A is exposed on port 8080 and node B on 8081. The development-only
 PostgreSQL and MinIO APIs are bound to loopback ports 15432 and 19000; the MinIO
 console is on loopback port 19001. Replace all example
 credentials, place both nodes behind a trusted reverse proxy, and set the public
-base URL before production use.
+base URL before any shared test deployment. This mode is not yet certified for
+production use.
 
 The first cluster-wide setup challenge is installed transactionally. Concurrent
 nodes never rotate it or print unusable competing URLs; any node can consume the
@@ -158,13 +167,20 @@ single URL, after which reuse is rejected across the cluster.
 
 The durable PostgreSQL event log is authoritative. LISTEN/NOTIFY only wakes
 nodes; each node resumes from its stored cursor after lost notifications or a
-restart. Scheduled publication uses `FOR UPDATE SKIP LOCKED`. Web Push and the
-privacy-preserving mobile relay use a leased durable outbox with retry and
-dead-letter states. Distributed request limiting uses an atomic PostgreSQL
-counter. SQLite uses WAL plus a per-database live-process lock and is strictly
-single-node.
+restart. Cursor heartbeats protect active readers, cursors stale for seven days
+are removed, and compaction deletes only acknowledged event rows whose message
+has already expired. Scheduled publication uses `FOR UPDATE SKIP LOCKED` and
+commits the released message plus its event in one transaction. These paths
+have real-PostgreSQL contract coverage; multi-node outage and long-duration
+soak coverage remain open. SQLite uses WAL plus a per-database live-process
+lock and is strictly single-node.
 
-## Protocol and operations
+## Implemented surface
+
+The following items exist in the current tree. Inclusion here does not mean the
+entire surface has passed differential, fault-injection, accessibility, or load
+certification; the exact evidence is recorded in
+[docs/compatibility.md](docs/compatibility.md).
 
 - Publish: plaintext, JSON, query/header aliases, delay, actions, updates,
   delete/clear controls, and local/remote attachments.
@@ -188,10 +204,12 @@ raw tokens. This is an intentional security deviation where an ntfy client
 expects an already-issued raw token to be listed again; revoke and create a
 replacement instead.
 
-Stable connections do not duplicate messages. Across reconnects delivery is
-at-least-once; clients should de-duplicate using the message ID. No outbound
-telemetry, tracking, CDN, or external fonts are used. Outbound traffic is limited
-to explicitly configured PostgreSQL, S3, Web Push endpoints, and ntfy relay.
+The intended reconnect contract is at-least-once with de-duplication by the
+12-character message ID; exactly-once delivery across reconnects is not
+promised. Stable-connection zero-loss/zero-duplicate behavior remains a soak
+acceptance target, not a published performance claim. No outbound telemetry,
+tracking, CDN, or external fonts are used. Outbound traffic is limited to
+explicitly configured PostgreSQL, S3, Web Push endpoints, and mobile relay.
 
 ## Builds and tests
 
@@ -212,10 +230,12 @@ priority, delay, JSON codec, and ACL invariants. Accepted Birdie snapshots pin
 the complete message wire shape, action normalisation, and validation errors;
 run the Birdie reviewer only when intentionally changing those contracts.
 
-The Playwright suite covers first-run setup, Secure-cookie login, live publish,
+The current Chromium Playwright flow covers first-run setup, login, live publish,
 attachments, ACL denial, one-time token display, Web Push registration,
 English/Japanese switching, keyboard operation, mobile layout, and WCAG 2.2 AA
-rules. It runs only against an isolated local Compose project:
+automated rules. Firefox, WebKit, install/offline lifecycle, screen-reader, and
+manual WCAG audits are still pending. The test runs only against an isolated
+local Compose project:
 
 ```sh
 npm ci --prefix test/e2e

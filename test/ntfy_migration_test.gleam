@@ -35,7 +35,7 @@ fn create_cache(path: String, invalid_topic: Bool) {
     sqlight.query(
       "INSERT INTO messages(mid, sequence_id, time, event, expires, topic, message, title, priority, tags, click, icon, actions, attachment_name, attachment_type, attachment_size, attachment_expires, attachment_url, attachment_deleted, sender, user, content_type, encoding, published) VALUES (?, '', 1700000000, 'message', 1700043200, ?, 'from ntfy', 'Imported', 4, 'warning,migration', 'https://example.test', '', '', 'report.txt', 'text/plain', 0, 0, 'https://files.example.test/report.txt', 0, '', 'u_phil', 'text/markdown', '', 1)",
       on: connection,
-      with: [sqlight.text("AbCdEf1234"), sqlight.text(topic_name)],
+      with: [sqlight.text("AbCdEf1234XY"), sqlight.text(topic_name)],
       expecting: decode.dynamic,
     )
   assert sqlight.close(connection) == Ok(Nil)
@@ -77,7 +77,7 @@ fn create_v9_cache(path: String) {
   let assert Ok(connection) = sqlight.open(path)
   let assert Ok(_) =
     sqlight.exec(
-      "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, mid TEXT NOT NULL, time INT NOT NULL, topic TEXT NOT NULL, message TEXT NOT NULL, title TEXT NOT NULL, priority INT NOT NULL, tags TEXT NOT NULL, click TEXT NOT NULL, attachment_name TEXT NOT NULL, attachment_type TEXT NOT NULL, attachment_size INT NOT NULL, attachment_expires INT NOT NULL, attachment_url TEXT NOT NULL, sender TEXT NOT NULL, encoding TEXT NOT NULL, published INT NOT NULL, actions TEXT NOT NULL, icon TEXT NOT NULL); CREATE TABLE schemaVersion (id INT PRIMARY KEY, version INT NOT NULL); INSERT INTO schemaVersion VALUES (1, 9); INSERT INTO messages(mid, time, topic, message, title, priority, tags, click, attachment_name, attachment_type, attachment_size, attachment_expires, attachment_url, sender, encoding, published, actions, icon) VALUES ('OldCache09', 1000, 'legacy', 'old schema', '', 3, '', '', '', '', 0, 0, '', '', '', 1, '', '');",
+      "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, mid TEXT NOT NULL, time INT NOT NULL, topic TEXT NOT NULL, message TEXT NOT NULL, title TEXT NOT NULL, priority INT NOT NULL, tags TEXT NOT NULL, click TEXT NOT NULL, attachment_name TEXT NOT NULL, attachment_type TEXT NOT NULL, attachment_size INT NOT NULL, attachment_expires INT NOT NULL, attachment_url TEXT NOT NULL, sender TEXT NOT NULL, encoding TEXT NOT NULL, published INT NOT NULL, actions TEXT NOT NULL, icon TEXT NOT NULL); CREATE TABLE schemaVersion (id INT PRIMARY KEY, version INT NOT NULL); INSERT INTO schemaVersion VALUES (1, 9); INSERT INTO messages(mid, time, topic, message, title, priority, tags, click, attachment_name, attachment_type, attachment_size, attachment_expires, attachment_url, sender, encoding, published, actions, icon) VALUES ('OldCache09XY', 1000, 'legacy', 'old schema', '', 3, '', '', '', '', 0, 0, '', '', '', 1, '', '');",
       connection,
     )
   assert sqlight.close(connection) == Ok(Nil)
@@ -157,7 +157,7 @@ pub fn ntfy_v227_migration_is_dry_runnable_source_preserving_and_idempotent_test
       include_scheduled: True,
       criteria: filter.none(),
     ))
-  assert imported.id == "AbCdEf1234"
+  assert imported.id == "AbCdEf1234XY"
   assert imported.message == "from ntfy"
   assert imported.title == Some("Imported")
   assert imported.priority == message.High
@@ -274,10 +274,10 @@ pub fn local_ntfy_attachments_are_content_addressed_and_rolled_back_on_db_failur
   let contents = <<"payload":utf8>>
   create_local_attachment_cache(
     source,
-    "LocalAt001",
+    "LocalAt001XY",
     bit_array.byte_size(contents),
   )
-  assert write_binary_file(source_files <> "/LocalAt001", contents) == Ok(Nil)
+  assert write_binary_file(source_files <> "/LocalAt001XY", contents) == Ok(Nil)
   let assert Ok(target) =
     attachment_memory.start(max_file_bytes: 100, max_total_bytes: 100)
   let migration =
@@ -306,7 +306,7 @@ pub fn local_ntfy_attachments_are_content_addressed_and_rolled_back_on_db_failur
   let assert Ok(files) = topic.parse("files")
   let conflicting =
     message.Message(
-      id: "LocalAt001",
+      id: "LocalAt001XY",
       time: 1_700_000_000,
       expires: Some(1_700_043_200),
       event: message.MessageEvent,

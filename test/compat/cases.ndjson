@@ -6,3 +6,19 @@
 {"name":"json_poll","method":"GET","path":"/__TOPIC___json/json?poll=1","body":"","content_type":"","normalizer":"ndjson"}
 {"name":"webhook_alias","method":"GET","path":"/__TOPIC___hook/trigger?message=triggered&title=Hook","body":"","content_type":"","normalizer":"message"}
 {"name":"invalid_topic","method":"POST","path":"/invalid.topic","body":"bad","content_type":"text/plain","normalizer":"error"}
+{"name":"header_precedence_publish","method":"POST","path":"/__TOPIC___precedence?title=query-title&message=query-message&priority=low","body":"body-message","content_type":"text/plain","headers":{"X-Title":"header-title","X-Message":"header-message","X-Priority":"high"},"normalizer":"message"}
+{"name":"header_precedence_poll","method":"GET","path":"/__TOPIC___precedence/json?poll=1","body":"","content_type":"","normalizer":"ndjson"}
+{"name":"actions_publish","method":"POST","path":"/__TOPIC___actions","body":"act now","content_type":"text/plain","headers":{"X-Actions":"view, Open, https://example.test, clear=true; copy, Copy code, 123456"},"normalizer":"message"}
+{"name":"actions_poll","method":"GET","path":"/__TOPIC___actions/json?poll=1","body":"","content_type":"","normalizer":"ndjson"}
+{"name":"raw_poll","method":"GET","path":"/__TOPIC__/raw?poll=1","body":"","content_type":"","normalizer":"raw"}
+{"name":"sse_poll","method":"GET","path":"/__TOPIC__/sse?poll=1","body":"","content_type":"","normalizer":"sse"}
+{"name":"multi_topic_poll","method":"GET","path":"/__TOPIC__,__TOPIC___meta/json?poll=1","body":"","content_type":"","normalizer":"ndjson"}
+{"name":"latest_poll","method":"GET","path":"/__TOPIC__/json?poll=1&since=latest","body":"","content_type":"","normalizer":"ndjson"}
+{"name":"invalid_since","method":"GET","path":"/__TOPIC__/json?poll=1&since=INVALID","body":"","content_type":"","normalizer":"error"}
+{"name":"invalid_priority","method":"POST","path":"/__TOPIC___bad_priority","body":"bad","content_type":"text/plain","headers":{"X-Priority":"impossible"},"normalizer":"error"}
+{"name":"invalid_json","method":"POST","path":"/","body":"{not-json","content_type":"application/json","normalizer":"error"}
+{"name":"delay_unparseable","method":"POST","path":"/__TOPIC___delay_parse","body":"later","content_type":"text/plain","headers":{"X-Delay":"eventually"},"normalizer":"error"}
+{"name":"delay_too_short","method":"POST","path":"/__TOPIC___delay_short","body":"later","content_type":"text/plain","headers":{"X-Delay":"9s"},"normalizer":"error"}
+{"name":"delay_too_long","method":"POST","path":"/__TOPIC___delay_long","body":"later","content_type":"text/plain","headers":{"X-Delay":"259201s"},"normalizer":"error"}
+{"name":"cors_options","method":"OPTIONS","path":"/__TOPIC__","body":"","content_type":"","normalizer":"empty","response_headers":["Access-Control-Allow-Methods","Access-Control-Allow-Origin","Access-Control-Allow-Headers"]}
+{"name":"invalid_bearer","method":"GET","path":"/__TOPIC__/json?poll=1","body":"","content_type":"","headers":{"Authorization":"Bearer invalid-token"},"normalizer":"ndjson"}

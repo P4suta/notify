@@ -158,7 +158,7 @@ fn set_positional(
 fn settings_to_action(settings: Settings) -> Result(Action, Error) {
   case settings.kind, settings.label, settings.url, settings.value {
     Some("view"), Some(label), Some(url), _ ->
-      Ok(message.ViewAction(label:, url:, clear: settings.clear))
+      Ok(message.ViewAction(label:, url:, clear: settings.clear, id: None))
     Some("http"), Some(label), Some(url), _ ->
       Ok(message.HttpAction(
         label:,
@@ -167,9 +167,10 @@ fn settings_to_action(settings: Settings) -> Result(Action, Error) {
         headers: list.reverse(settings.headers),
         body: settings.body,
         clear: settings.clear,
+        id: None,
       ))
     Some("copy"), Some(label), _, Some(value) ->
-      Ok(message.CopyAction(label:, value:, clear: settings.clear))
+      Ok(message.CopyAction(label:, value:, clear: settings.clear, id: None))
     _, _, _, _ -> Error(InvalidAction)
   }
 }
@@ -187,11 +188,11 @@ fn validate_actions(actions: List(Action)) -> Result(List(Action), Error) {
 
 fn valid_action(action: Action) -> Bool {
   case action {
-    message.ViewAction(label, url, _) ->
+    message.ViewAction(label, url, _, _) ->
       !string.is_empty(label) && !string.is_empty(url)
-    message.CopyAction(label, value, _) ->
+    message.CopyAction(label, value, _, _) ->
       !string.is_empty(label) && !string.is_empty(value)
-    message.HttpAction(label, url, method, _, body, _) ->
+    message.HttpAction(label, url, method, _, body, _, _) ->
       !string.is_empty(label)
       && !string.is_empty(url)
       && valid_http_body(method, body)

@@ -27,6 +27,8 @@ pub type Broker {
       Int,
     ) -> Int,
     activate: fn(Int, List(String), Int) -> Nil,
+    activate_prepared: fn(Int, Subject(Delivery), Delivery, List(Notification)) ->
+      Nil,
     ack: fn(Int) -> Nil,
     unsubscribe: fn(Int) -> Nil,
     broadcast: fn(Notification) -> Nil,
@@ -61,6 +63,13 @@ type Command {
     Subject(Int),
   )
   Activate(Int, List(String), Int, Subject(Nil))
+  ActivatePrepared(
+    Int,
+    Subject(Delivery),
+    Delivery,
+    List(Notification),
+    Subject(Nil),
+  )
   Ack(Int)
   Unsubscribe(Int)
   Broadcast(Notification)
@@ -104,6 +113,11 @@ pub fn start() -> Result(Broker, actor.StartError) {
       activate: fn(id, replay_ids, replay_count) {
         process.call(subject, 5000, fn(reply) {
           Activate(id, replay_ids, max(0, replay_count), reply)
+        })
+      },
+      activate_prepared: fn(id, stream, opening, replay) {
+        process.call(subject, 5000, fn(reply) {
+          ActivatePrepared(id, stream, opening, replay, reply)
         })
       },
       ack: fn(id) { process.send(subject, Ack(id)) },
@@ -160,6 +174,19 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
     Activate(id, replay_ids, replay_count, reply) -> {
       let updated =
         activate_subscriber(state.subscribers, id, replay_ids, replay_count, [])
+      process.send(reply, Nil)
+      actor.continue(State(..state, subscribers: updated))
+    }
+    ActivatePrepared(id, stream, opening, replay, reply) -> {
+      let updated =
+        activate_prepared_subscriber(
+          state.subscribers,
+          id,
+          stream,
+          opening,
+          replay,
+          [],
+        )
       process.send(reply, Nil)
       actor.continue(State(..state, subscribers: updated))
     }
@@ -272,6 +299,63 @@ fn activate_subscriber(
               let activated =
                 Subscriber(
                   ..subscriber,
+                  active: True,
+                  pending: [],
+                  credit: credit - list.length(pending),
+                )
+              list.append(list.reverse([activated, ..retained]), rest)
+            }
+          }
+        }
+      }
+  }
+}
+
+fn activate_prepared_subscriber(
+  subscribers: List(Subscriber),
+  id: Int,
+  stream: Subject(Delivery),
+  opening: Delivery,
+  replay: List(Notification),
+  retained: List(Subscriber),
+) -> List(Subscriber) {
+  case subscribers {
+    [] -> list.reverse(retained)
+    [subscriber, ..rest] ->
+      case subscriber.id == id {
+        False ->
+          activate_prepared_subscriber(rest, id, stream, opening, replay, [
+            subscriber,
+            ..retained
+          ])
+        True -> {
+          process.send(stream, opening)
+          replay
+          |> list.take(subscriber.max_credit)
+          |> list.each(fn(message) { process.send(stream, Replay(message)) })
+          let replay_ids = list.map(replay, fn(message) { message.id })
+          let pending =
+            list.filter(subscriber.pending, fn(message) {
+              !list.contains(replay_ids, message.id)
+            })
+          let credit = max(0, subscriber.max_credit - list.length(replay))
+          case
+            list.length(replay) > subscriber.max_credit
+            || subscriber.overflowed
+            || list.length(pending) > credit
+          {
+            True -> {
+              process.send(stream, Overflow)
+              list.append(list.reverse(retained), rest)
+            }
+            False -> {
+              list.each(pending, fn(message) {
+                process.send(stream, Message(message))
+              })
+              let activated =
+                Subscriber(
+                  ..subscriber,
+                  subject: stream,
                   active: True,
                   pending: [],
                   credit: credit - list.length(pending),

@@ -111,3 +111,30 @@ pub fn paused_subscription_replays_before_buffered_live_without_duplicates_test(
   let assert Ok(broker.Message(live)) = process.receive(subject, 1000)
   assert live.id == "B000000008"
 }
+
+pub fn prepared_activation_rebinds_and_orders_replay_before_live_test() {
+  let assert Ok(bus) = broker.start()
+  let placeholder = process.new_subject()
+  let stream = process.new_subject()
+  let assert Ok(alerts) = topic.parse("alerts")
+  let subscription = bus.subscribe_paused([alerts], placeholder, 3)
+  let overlapping = fixture("B000000009XY")
+  bus.broadcast(overlapping)
+
+  bus.activate_prepared(
+    subscription,
+    stream,
+    broker.Open("O000000001XY", 100, [alerts]),
+    [overlapping],
+  )
+
+  let assert Ok(broker.Open(_, _, _)) = process.receive(stream, 1000)
+  let assert Ok(broker.Replay(replayed)) = process.receive(stream, 1000)
+  assert replayed.id == overlapping.id
+  assert process.receive(stream, 10) == Error(Nil)
+  assert process.receive(placeholder, 10) == Error(Nil)
+
+  bus.broadcast(fixture("B000000010XY"))
+  let assert Ok(broker.Message(live)) = process.receive(stream, 1000)
+  assert live.id == "B000000010XY"
+}

@@ -22,7 +22,7 @@ fn webpush_runtime() -> #(runtime.Runtime, webpush.Store) {
     runtime.new(
       storage: messages,
       clock: runtime.Clock(fn() { 1000 }),
-      ids: runtime.IdGenerator(fn() { "WebPush001" }),
+      ids: runtime.IdGenerator(fn() { "WebPush001XY" }),
       retention_seconds: 43_200,
     )
       |> runtime.with_webpush(configured),
@@ -92,7 +92,7 @@ pub fn webpush_api_is_not_exposed_when_unconfigured_test() {
     runtime.new(
       storage: messages,
       clock: runtime.Clock(fn() { 1000 }),
-      ids: runtime.IdGenerator(fn() { "WebPush001" }),
+      ids: runtime.IdGenerator(fn() { "WebPush001XY" }),
       retention_seconds: 43_200,
     )
   let response = call(http.Post, "{}", runtime)

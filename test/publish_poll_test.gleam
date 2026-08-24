@@ -2,6 +2,7 @@ import gleam/bit_array
 import gleam/http
 import gleam/http/request
 import gleam/http/response.{type Response}
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option
@@ -23,7 +24,7 @@ fn test_runtime() -> runtime.Runtime {
   runtime.new(
     storage:,
     clock: runtime.Clock(fn() { 1_725_000_000 }),
-    ids: runtime.IdGenerator(fn() { "AbCdEf1234" }),
+    ids: runtime.IdGenerator(fn() { "AbCdEf1234XY" }),
     retention_seconds: 43_200,
   )
 }
@@ -91,6 +92,66 @@ pub fn publish_header_aliases_override_plaintext_defaults_test() {
   assert value.title == option.Some("Storage")
   assert value.priority == message.Max
   assert value.tags == ["warning", "disk"]
+}
+
+pub fn publish_headers_take_precedence_over_query_aliases_test() {
+  let runtime = test_runtime()
+  let publish_request =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/alerts")
+    |> request.set_query([
+      #("title", "query title"),
+      #("message", "query message"),
+      #("priority", "low"),
+    ])
+    |> request.set_header("x-title", "header title")
+    |> request.set_header("x-message", "header message")
+    |> request.set_header("x-priority", "high")
+    |> request.set_body(<<"body message":utf8>>)
+
+  let response = router.handle(publish_request, runtime)
+  assert response.status == 200
+  let assert Ok(value) = json.parse(body(response), message_json.decoder())
+  assert value.title == option.Some("header title")
+  assert value.message == "body message"
+  assert value.priority == message.High
+}
+
+pub fn delay_errors_match_the_pinned_ntfy_shape_test() {
+  let cases = [
+    #("eventually", 40_004, "unable to parse delay"),
+    #("9s", 40_005, "too small"),
+    #("259201s", 40_006, "too large"),
+  ]
+  list.each(cases, fn(item) {
+    let response =
+      request.new()
+      |> request.set_method(http.Post)
+      |> request.set_path("/alerts")
+      |> request.set_header("x-delay", item.0)
+      |> request.set_body(<<"later":utf8>>)
+      |> router.handle(test_runtime())
+    assert response.status == 400
+    assert string.contains(body(response), "\"code\":" <> int.to_string(item.1))
+    assert string.contains(body(response), item.2)
+    assert string.contains(body(response), "#scheduled-delivery")
+  })
+}
+
+pub fn options_matches_ntfy_cors_contract_test() {
+  let response =
+    request.new()
+    |> request.set_method(http.Options)
+    |> request.set_path("/alerts")
+    |> request.set_body(<<>>)
+    |> router.handle(test_runtime())
+
+  assert response.status == 200
+  assert response_header(response, "access-control-allow-origin") == Ok("*")
+  assert response_header(response, "access-control-allow-methods")
+    == Ok("GET, PUT, POST, PATCH, DELETE")
+  assert response_header(response, "access-control-allow-headers") == Ok("*")
 }
 
 pub fn invalid_path_topic_is_a_route_miss_like_ntfy_test() {
@@ -278,8 +339,14 @@ pub fn action_header_supports_ntfy_simple_format_test() {
         label: "Open",
         url: "https://example.test",
         clear: True,
+        id: option.Some("AbCdEf12AA"),
       ),
-      message.CopyAction(label: "Copy OTP", value: "123456", clear: False),
+      message.CopyAction(
+        label: "Copy OTP",
+        value: "123456",
+        clear: False,
+        id: option.Some("AbCdEf12AB"),
+      ),
     ]
 }
 

@@ -488,7 +488,8 @@ fn storage_error(error: storage.Error) -> String {
   case error {
     storage.Unavailable(detail)
     | storage.Conflict(detail)
-    | storage.Corrupt(detail) -> detail
+    | storage.Corrupt(detail)
+    | storage.UnsupportedSchema(detail) -> detail
     storage.MigrationRequired(version) ->
       "migration " <> int.to_string(version) <> " is required"
   }

@@ -788,15 +788,31 @@ unix_seconds() ->
     erlang:system_time(second).
 
 random_id() ->
-    random_alphanumeric(10).
+    random_alphanumeric(12).
 
 random_token_entropy() ->
     random_alphanumeric(29).
 
 random_alphanumeric(Length) ->
     Alphabet = <<"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789">>,
-    Bytes = crypto:strong_rand_bytes(Length),
-    << <<(binary:at(Alphabet, Byte rem 62))>> || <<Byte>> <= Bytes >>.
+    random_alphanumeric(Length, Alphabet, []).
+
+random_alphanumeric(0, _Alphabet, Acc) ->
+    list_to_binary(lists:reverse(Acc));
+random_alphanumeric(Remaining, Alphabet, Acc) ->
+    %% 248 is the largest multiple of 62 below 256. Rejecting bytes outside
+    %% that range avoids the modulo bias that would otherwise make the first
+    %% eight alphabet characters more likely.
+    Bytes = crypto:strong_rand_bytes(Remaining + 8),
+    {NextRemaining, NextAcc} = lists:foldl(
+        fun(_Byte, {0, Current}) -> {0, Current};
+           (Byte, {Needed, Current}) when Byte < 248 ->
+                {Needed - 1, [binary:at(Alphabet, Byte rem 62) | Current]};
+           (_Byte, State) -> State
+        end,
+        {Remaining, Acc},
+        binary_to_list(Bytes)),
+    random_alphanumeric(NextRemaining, Alphabet, NextAcc).
 
 sha256_hex(Value) ->
     binary:encode_hex(crypto:hash(sha256, Value), lowercase).

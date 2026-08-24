@@ -16,9 +16,13 @@ type Command {
   Health(Subject(Result(Nil, storage.Error)))
 }
 
+type State {
+  State(messages: List(Message), events: Int)
+}
+
 pub fn start() -> Result(Storage, actor.StartError) {
   use started <- result.try(
-    actor.new([])
+    actor.new(State(messages: [], events: 0))
     |> actor.on_message(handle)
     |> actor.start,
   )
@@ -44,52 +48,59 @@ pub fn start() -> Result(Storage, actor.StartError) {
   )
 }
 
-fn handle(
-  messages: List(Message),
-  command: Command,
-) -> actor.Next(List(Message), Command) {
+fn handle(state: State, command: Command) -> actor.Next(State, Command) {
   case command {
     Save(message, reply) -> {
       process.send(reply, Ok(message))
-      actor.continue(list.append(messages, [message]))
+      actor.continue(State(
+        messages: list.append(state.messages, [message]),
+        events: state.events + 1,
+      ))
     }
     RunQuery(query, reply) -> {
-      process.send(reply, Ok(storage.apply_query(messages, query)))
-      actor.continue(messages)
+      process.send(reply, Ok(storage.apply_query(state.messages, query)))
+      actor.continue(state)
     }
     ReleaseDue(now, limit, reply) -> {
-      let #(updated, released) = release(messages, now, max(0, limit), [], [])
+      let #(updated, released) =
+        release(state.messages, now, max(0, limit), [], [])
       process.send(reply, Ok(released))
-      actor.continue(updated)
+      actor.continue(State(
+        messages: updated,
+        events: state.events + list.length(released),
+      ))
     }
     CleanupExpired(now, reply) -> {
       let remaining =
-        list.filter(messages, fn(message) {
+        list.filter(state.messages, fn(message) {
           case message.cached, message.expires {
             False, _ -> False
             True, option.Some(expires) -> expires > now
             True, option.None -> True
           }
         })
-      process.send(reply, Ok(list.length(messages) - list.length(remaining)))
-      actor.continue(remaining)
+      process.send(
+        reply,
+        Ok(list.length(state.messages) - list.length(remaining)),
+      )
+      actor.continue(State(..state, messages: remaining))
     }
     Stats(reply) -> {
       process.send(
         reply,
         Ok(storage.Stats(
-          messages: list.length(messages),
-          scheduled: messages
+          messages: list.length(state.messages),
+          scheduled: state.messages
             |> list.filter(fn(message) { message.scheduled })
             |> list.length,
-          events: list.length(messages),
+          events: state.events,
         )),
       )
-      actor.continue(messages)
+      actor.continue(state)
     }
     Migrate(reply) | Health(reply) -> {
       process.send(reply, Ok(Nil))
-      actor.continue(messages)
+      actor.continue(state)
     }
   }
 }

@@ -2,4 +2,4 @@
 version: 1.5.5
 title: action alias normalization
 ---
-Ok([HttpAction("Acknowledge", "https://api.example.test/incidents/42", "PATCH", [#("X-Trace", "request-42")], Some("{\"ok\":true}"), True)])
+Ok([HttpAction("Acknowledge", "https://api.example.test/incidents/42", "PATCH", [#("X-Trace", "request-42")], Some("{\"ok\":true}"), True, None)])

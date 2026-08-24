@@ -642,6 +642,8 @@ pub fn error_message(error: Error) -> String {
     StorageError(storage.Corrupt(detail)) -> "storage corrupt: " <> detail
     StorageError(storage.MigrationRequired(version)) ->
       "database migration required: " <> int.to_string(version)
+    StorageError(storage.UnsupportedSchema(detail)) ->
+      "unsupported database schema: " <> detail
     BrokerStartError(_) -> "live subscription broker could not start"
     HttpStartError(_) -> "HTTP listener could not start"
     DatabaseDirectoryError(path) ->

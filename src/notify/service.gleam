@@ -22,13 +22,25 @@ pub type Error {
   WebPush(webpush.Error)
 }
 
+const unique_id_attempts = 8
+
 pub fn publish(draft: Draft, runtime: Runtime) -> Result(Message, Error) {
   let runtime.Clock(now) = runtime.clock
-  let runtime.IdGenerator(next_id) = runtime.ids
   let timestamp = now()
   use scheduled_for <- result.try(
     resolve_schedule(draft.delay, timestamp) |> result.map_error(InvalidDelay),
   )
+  publish_attempt(draft, runtime, timestamp, scheduled_for, unique_id_attempts)
+}
+
+fn publish_attempt(
+  draft: Draft,
+  runtime: Runtime,
+  timestamp: Int,
+  scheduled_for: Option(Int),
+  attempts_remaining: Int,
+) -> Result(Message, Error) {
+  let runtime.IdGenerator(next_id) = runtime.ids
   use candidate <- result.try(
     message.materialise(
       draft,
@@ -50,7 +62,17 @@ pub fn publish(draft: Draft, runtime: Runtime) -> Result(Message, Error) {
         scheduled: True,
       )
   }
-  commit_and_maybe_broadcast(candidate, runtime)
+  case commit_and_maybe_broadcast(candidate, runtime) {
+    Error(Persistence(storage.Conflict(_))) if attempts_remaining > 1 ->
+      publish_attempt(
+        draft,
+        runtime,
+        timestamp,
+        scheduled_for,
+        attempts_remaining - 1,
+      )
+    outcome -> outcome
+  }
 }
 
 pub fn publish_control(
@@ -60,8 +82,26 @@ pub fn publish_control(
   runtime runtime: Runtime,
 ) -> Result(Message, Error) {
   let runtime.Clock(now) = runtime.clock
-  let runtime.IdGenerator(next_id) = runtime.ids
   let timestamp = now()
+  publish_control_attempt(
+    topic,
+    event,
+    sequence_id,
+    runtime,
+    timestamp,
+    unique_id_attempts,
+  )
+}
+
+fn publish_control_attempt(
+  topic: notify_topic.Topic,
+  event: message.Event,
+  sequence_id: String,
+  runtime: Runtime,
+  timestamp: Int,
+  attempts_remaining: Int,
+) -> Result(Message, Error) {
+  let runtime.IdGenerator(next_id) = runtime.ids
   use candidate <- result.try(
     message.materialise_control(
       topic:,
@@ -72,13 +112,26 @@ pub fn publish_control(
     )
     |> result.map_error(InvalidMessage),
   )
-  commit_and_maybe_broadcast(
-    message.Message(
-      ..candidate,
-      expires: Some(timestamp + runtime.retention_seconds),
-    ),
-    runtime,
-  )
+  let outcome =
+    commit_and_maybe_broadcast(
+      message.Message(
+        ..candidate,
+        expires: Some(timestamp + runtime.retention_seconds),
+      ),
+      runtime,
+    )
+  case outcome {
+    Error(Persistence(storage.Conflict(_))) if attempts_remaining > 1 ->
+      publish_control_attempt(
+        topic,
+        event,
+        sequence_id,
+        runtime,
+        timestamp,
+        attempts_remaining - 1,
+      )
+    outcome -> outcome
+  }
 }
 
 pub fn release_due(runtime: Runtime, limit: Int) -> Result(Int, Error) {

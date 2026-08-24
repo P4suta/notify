@@ -14,7 +14,7 @@ pub fn openapi_document_is_valid_json_and_describes_security_boundaries_test() {
     runtime.new(
       storage: store,
       clock: runtime.Clock(fn() { 1000 }),
-      ids: runtime.IdGenerator(fn() { "OpenApi001" }),
+      ids: runtime.IdGenerator(fn() { "OpenApi001XY" }),
       retention_seconds: 43_200,
     )
   let response =

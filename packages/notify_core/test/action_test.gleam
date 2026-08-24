@@ -13,6 +13,7 @@ pub fn parses_simple_actions_and_options_test() {
         label: "Open portal",
         url: "https://example.test",
         clear: True,
+        id: None,
       ),
       message.HttpAction(
         label: "Turn down",
@@ -21,8 +22,14 @@ pub fn parses_simple_actions_and_options_test() {
         headers: [#("Authorization", "Bearer token")],
         body: Some("target=65"),
         clear: False,
+        id: None,
       ),
-      message.CopyAction(label: "Copy code", value: "1234", clear: False),
+      message.CopyAction(
+        label: "Copy code",
+        value: "1234",
+        clear: False,
+        id: None,
+      ),
     ]
 }
 
@@ -35,6 +42,7 @@ pub fn quoted_commas_and_json_are_supported_test() {
         label: "Look, commas; and quotes",
         url: "https://example.test",
         clear: False,
+        id: None,
       ),
     ]
 
@@ -44,7 +52,7 @@ pub fn quoted_commas_and_json_are_supported_test() {
     )
   assert json
     == [
-      message.CopyAction(label: "OTP", value: "567890", clear: False),
+      message.CopyAction(label: "OTP", value: "567890", clear: False, id: None),
     ]
 }
 
@@ -82,6 +90,7 @@ pub fn explicit_keys_are_trimmed_case_insensitively_and_all_fields_survive_test(
         label: "Open",
         url: "https://example.test",
         clear: False,
+        id: None,
       ),
     ]
 
@@ -98,12 +107,14 @@ pub fn explicit_keys_are_trimmed_case_insensitively_and_all_fields_survive_test(
         headers: [#("X-Trace", "request-42")],
         body: Some("payload"),
         clear: False,
+        id: None,
       ),
     ]
 
   let assert Ok(copy) =
     action.parse("Action=copy,Label=Copy,Value=42,Clear=false")
-  assert copy == [message.CopyAction(label: "Copy", value: "42", clear: False)]
+  assert copy
+    == [message.CopyAction(label: "Copy", value: "42", clear: False, id: None)]
 }
 
 pub fn simple_action_defaults_and_empty_fields_are_validated_independently_test() {
@@ -117,6 +128,7 @@ pub fn simple_action_defaults_and_empty_fields_are_validated_independently_test(
         headers: [],
         body: None,
         clear: False,
+        id: None,
       ),
     ]
 
@@ -174,6 +186,7 @@ pub fn quotes_escapes_and_syntax_errors_are_preserved_test() {
         label: "Open \"now\", please; safely",
         url: "https://example.test",
         clear: False,
+        id: None,
       ),
     ]
 
@@ -185,6 +198,7 @@ pub fn quotes_escapes_and_syntax_errors_are_preserved_test() {
         label: "\"Quoted\" label",
         url: "https://example.test",
         clear: False,
+        id: None,
       ),
     ]
 

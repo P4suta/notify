@@ -30,7 +30,7 @@ fn configured_runtime(now: Int) -> runtime.Runtime {
   runtime.new(
     storage: messages,
     clock: runtime.Clock(fn() { now }),
-    ids: runtime.IdGenerator(fn() { "Message001" }),
+    ids: runtime.IdGenerator(fn() { "Message001XY" }),
     retention_seconds: 43_200,
   )
   |> runtime.with_deliveries(outbox)
@@ -47,12 +47,12 @@ pub fn committed_publish_enqueues_durable_webpush_before_returning_test() {
   let assert Ok(alerts) = topic.parse("alerts")
   let assert Ok(saved) =
     service.publish(message.plaintext_draft(alerts, "important body"), runtime)
-  assert saved.id == "Message001"
+  assert saved.id == "Message001XY"
   let assert Some(outbox) = runtime.deliveries
   let assert Ok([job]) = outbox.list(delivery.WebPush)
-  assert job.id == "wp_Message001_wps_browser"
+  assert job.id == "wp_Message001XY_wps_browser"
   assert job.endpoint == "https://fcm.googleapis.com/fcm/send/browser-token"
-  assert job.message_id == "Message001"
+  assert job.message_id == "Message001XY"
   let assert Ok(payload) = bit_array.to_string(job.payload)
   assert string.contains(payload, "\"event\":\"message\"")
   assert string.contains(payload, "\"subscription_id\":\"/alerts\"")

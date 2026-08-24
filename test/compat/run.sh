@@ -34,16 +34,29 @@ normalise_body() {
   local destination="$3"
   case "$kind" in
     message)
-      jq --sort-keys 'del(.id, .time, .expires, .attachment.expires)' \
+      jq --sort-keys \
+        'def action: {id_contract: {length: ((.id // "") | length), alphanumeric: ((.id // "") | test("^[A-Za-z0-9]+$"))}, value: del(.id)}; {id_contract: {length: (.id | length), alphanumeric: (.id | test("^[A-Za-z0-9]+$"))}, value: (del(.id, .time, .expires, .attachment.expires) | if has("actions") then .actions |= map(action) else . end)}' \
         "$source" >"$destination"
       ;;
     ndjson)
       jq --slurp --sort-keys \
-        'map(del(.id, .time, .expires, .attachment.expires))' \
+        'def action: {id_contract: {length: ((.id // "") | length), alphanumeric: ((.id // "") | test("^[A-Za-z0-9]+$"))}, value: del(.id)}; map({id_contract: {length: (.id | length), alphanumeric: (.id | test("^[A-Za-z0-9]+$"))}, value: (del(.id, .time, .expires, .attachment.expires) | if has("actions") then .actions |= map(action) else . end)})' \
         "$source" >"$destination"
+      ;;
+    sse)
+      sed -n 's/^data: //p' "$source" \
+        | jq --slurp --sort-keys \
+          'def action: {id_contract: {length: ((.id // "") | length), alphanumeric: ((.id // "") | test("^[A-Za-z0-9]+$"))}, value: del(.id)}; map({id_contract: {length: (.id | length), alphanumeric: (.id | test("^[A-Za-z0-9]+$"))}, value: (del(.id, .time, .expires, .attachment.expires) | if has("actions") then .actions |= map(action) else . end)})' \
+          >"$destination"
       ;;
     error)
       jq --sort-keys . "$source" >"$destination"
+      ;;
+    raw)
+      jq --raw-input --slurp . "$source" >"$destination"
+      ;;
+    empty)
+      printf 'null\n' >"$destination"
       ;;
     *)
       cp "$source" "$destination"
@@ -57,13 +70,17 @@ run_case() {
   local encoded_case="$3"
   local case_json
   case_json="$(printf '%s' "$encoded_case" | base64 --decode)"
-  local name method path body content_type normalizer
+  local name method path body content_type normalizer body_repeat
   name="$(jq -r .name <<<"$case_json")"
   method="$(jq -r .method <<<"$case_json")"
   path="$(jq -r .path <<<"$case_json" | sed "s/__TOPIC__/$topic/g")"
   body="$(jq -r .body <<<"$case_json" | sed "s/__TOPIC__/$topic/g")"
   content_type="$(jq -r .content_type <<<"$case_json")"
   normalizer="$(jq -r .normalizer <<<"$case_json")"
+  body_repeat="$(jq -r '.body_repeat // 0' <<<"$case_json")"
+  if [[ "$body_repeat" -gt 0 ]]; then
+    body="$(printf '%*s' "$body_repeat" '' | tr ' ' x)"
+  fi
   local raw_body="$fixture_dir/$side-$name.raw"
   local raw_headers="$fixture_dir/$side-$name.headers"
   local result="$fixture_dir/$side-$name.json"
@@ -83,12 +100,23 @@ run_case() {
   media_type="$(awk 'tolower($1) == "content-type:" {gsub(/\r/, ""); split($2, type, ";"); print type[1]}' "$raw_headers" | tail -1)"
   local normalised="$fixture_dir/$side-$name.body"
   normalise_body "$normalizer" "$raw_body" "$normalised"
+  local response_headers='{}'
+  while IFS= read -r header; do
+    local value
+    value="$(awk -v target="$header" \
+      'tolower($1) == tolower(target ":") {gsub(/\r/, ""); $1=""; sub(/^ /, ""); print}' \
+      "$raw_headers" | tail -1)"
+    response_headers="$(jq --compact-output \
+      --arg key "${header,,}" --arg value "$value" \
+      '. + {($key): $value}' <<<"$response_headers")"
+  done < <(jq -r '.response_headers // [] | .[]' <<<"$case_json")
   jq --null-input --sort-keys \
     --arg name "$name" \
     --argjson status "$status" \
     --arg media_type "$media_type" \
+    --argjson response_headers "$response_headers" \
     --slurpfile body "$normalised" \
-    '{name: $name, status: $status, media_type: $media_type, body: $body[0]}' \
+    '{name: $name, status: $status, media_type: $media_type, response_headers: $response_headers, body: $body[0]}' \
     >"$result"
 }
 

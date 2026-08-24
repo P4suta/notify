@@ -2,6 +2,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
+import gleam/string
 import notify/attachment_store
 import notify/attachment_store/postgres as attachment_postgres
 import notify/core/filter
@@ -68,8 +69,8 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
       let postgres.Adapter(storage: messages, ..) = adapter_a
       assert messages.health() == Ok(Nil)
 
-      let first = fixture("PgStore001", False, 100)
-      let delayed = fixture("PgDelay001", True, 200)
+      let first = fixture("PgStore001XY", False, 100)
+      let delayed = fixture("PgDelay001XY", True, 200)
       assert messages.save(first) == Ok(first)
       assert messages.save(delayed) == Ok(delayed)
       let assert Ok(topic) = topic.parse("postgres-contract")
@@ -80,17 +81,52 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
           include_scheduled: False,
           criteria: filter.none(),
         ))
-      assert list.map(before, fn(value) { value.id }) == ["PgStore001"]
+      assert list.map(before, fn(value) { value.id }) == ["PgStore001XY"]
       let assert Ok(released) = messages.release_due(200, 10)
-      assert list.map(released, fn(value) { value.id }) == ["PgDelay001"]
+      assert list.map(released, fn(value) { value.id }) == ["PgDelay001XY"]
+
+      let expired =
+        message.Message(
+          ..fixture("PgExpire01XY", False, 109),
+          expires: Some(110),
+        )
+      assert messages.save(expired) == Ok(expired)
 
       let assert Ok(adapter_b) = postgres.start(configuration, "node-b")
       let postgres.Adapter(fetch_events:, ack_events:, ..) = adapter_b
       let assert Ok(events) = fetch_events("node-b", 100)
-      assert list.any(events, fn(event) { event.message.id == "PgStore001" })
+      assert list.any(events, fn(event) { event.message.id == "PgStore001XY" })
       let assert Ok(last) = list.last(events)
       assert ack_events("node-b", last.sequence) == Ok(Nil)
       assert fetch_events("node-b", 100) == Ok([])
+
+      let assert Ok(before_cleanup) = messages.stats()
+      assert messages.cleanup_expired(110) == Ok(1)
+      let assert Ok(after_cleanup) = messages.stats()
+      assert after_cleanup.messages == before_cleanup.messages - 1
+      assert after_cleanup.events == before_cleanup.events - 1
+
+      save_page_fixtures(messages, 1, 260)
+      let assert Ok(page_topic) = topic.parse("postgres-page")
+      let assert Ok(pages) =
+        messages.query(storage.Query(
+          topics: [page_topic],
+          since: storage.All,
+          include_scheduled: False,
+          criteria: filter.none(),
+        ))
+      assert list.length(pages) == 260
+      assert list.first(pages) == Ok(page_fixture(1))
+      assert list.last(pages) == Ok(page_fixture(260))
+      let assert Ok(after_page) =
+        messages.query(storage.Query(
+          topics: [page_topic],
+          since: storage.AfterId(page_id(256)),
+          include_scheduled: False,
+          criteria: filter.none(),
+        ))
+      assert list.length(after_page) == 4
+      assert list.first(after_page) == Ok(page_fixture(257))
 
       let assert Ok(identity_postgres.Started(identity, Some(_))) =
         identity_postgres.start(configuration, fn() { 1000 }, fn() {
@@ -121,7 +157,7 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
           kind: delivery.MobileRelay,
           endpoint: "https://relay.example",
           payload: <<"{}":utf8>>,
-          message_id: "PgStore001",
+          message_id: "PgStore001XY",
           topic_hash: "hash",
           available_at: 100,
         ))
@@ -165,6 +201,26 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
         == Ok(rate_limit.Limited(retry_after: 60, reset_at: 660))
     }
   }
+}
+
+fn save_page_fixtures(store: storage.Storage, current: Int, count: Int) -> Nil {
+  case current > count {
+    True -> Nil
+    False -> {
+      let value = page_fixture(current)
+      assert store.save(value) == Ok(value)
+      save_page_fixtures(store, current + 1, count)
+    }
+  }
+}
+
+fn page_fixture(index: Int) -> message.Message {
+  let assert Ok(page_topic) = topic.parse("postgres-page")
+  message.Message(..fixture(page_id(index), False, index), topic: page_topic)
+}
+
+fn page_id(index: Int) -> String {
+  "P" <> string.pad_start(int.to_string(index), to: 11, with: "0")
 }
 
 @external(erlang, "notify_ffi", "getenv")

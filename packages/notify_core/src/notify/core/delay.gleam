@@ -6,7 +6,13 @@ import gleam/string
 pub type Error {
   InvalidDelay
   NotInFuture
+  TooSoon(minimum_seconds: Int)
+  TooFar(maximum_seconds: Int)
 }
+
+pub const minimum_seconds = 10
+
+pub const maximum_seconds = 259_200
 
 /// Resolves the ntfy delay forms that are deterministic without locale data:
 /// a future Unix timestamp or an integer followed by seconds, minutes, hours,
@@ -61,8 +67,11 @@ fn parse_duration(value: String) -> Result(Int, Error) {
 }
 
 fn ensure_future(timestamp: Int, now: Int) -> Result(Int, Error) {
-  case timestamp > now {
-    True -> Ok(timestamp)
-    False -> Error(NotInFuture)
+  let seconds = timestamp - now
+  case seconds {
+    seconds if seconds <= 0 -> Error(NotInFuture)
+    seconds if seconds < minimum_seconds -> Error(TooSoon(minimum_seconds))
+    seconds if seconds > maximum_seconds -> Error(TooFar(maximum_seconds))
+    _ -> Ok(timestamp)
   }
 }

@@ -22,7 +22,7 @@ pub fn liveness_readiness_and_prometheus_endpoints_are_distinct_test() {
     runtime.new(
       storage: messages,
       clock: runtime.Clock(fn() { 1000 }),
-      ids: runtime.IdGenerator(fn() { "OpsMetric1" }),
+      ids: runtime.IdGenerator(fn() { "OpsMetric1XY" }),
       retention_seconds: 43_200,
     )
 
@@ -31,7 +31,7 @@ pub fn liveness_readiness_and_prometheus_endpoints_are_distinct_test() {
   assert bit_array.to_string(live.body) == Ok("ok\n")
   let assert Ok(generated_request_id) =
     response.get_header(live, "x-request-id")
-  assert string.length(generated_request_id) == 10
+  assert string.length(generated_request_id) == 12
   let ready = call("/readyz", runtime)
   assert ready.status == 200
   assert bit_array.to_string(ready.body) == Ok("ready\n")
@@ -53,7 +53,7 @@ pub fn safe_request_id_is_preserved_and_header_injection_is_rejected_test() {
     runtime.new(
       storage: messages,
       clock: runtime.Clock(fn() { 1000 }),
-      ids: runtime.IdGenerator(fn() { "OpsMetric1" }),
+      ids: runtime.IdGenerator(fn() { "OpsMetric1XY" }),
       retention_seconds: 43_200,
     )
   let accepted =
@@ -74,7 +74,7 @@ pub fn safe_request_id_is_preserved_and_header_injection_is_rejected_test() {
     |> router.handle(runtime)
   let assert Ok(replacement) = response.get_header(rejected, "x-request-id")
   assert replacement != "unsafe/id"
-  assert string.length(replacement) == 10
+  assert string.length(replacement) == 12
 }
 
 pub fn readiness_fails_but_liveness_survives_dependency_failure_test() {
@@ -92,7 +92,7 @@ pub fn readiness_fails_but_liveness_survives_dependency_failure_test() {
     runtime.new(
       storage: unavailable,
       clock: runtime.Clock(fn() { 1000 }),
-      ids: runtime.IdGenerator(fn() { "OpsMetric1" }),
+      ids: runtime.IdGenerator(fn() { "OpsMetric1XY" }),
       retention_seconds: 43_200,
     )
   assert call("/healthz", runtime).status == 200

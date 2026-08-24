@@ -13,6 +13,7 @@ import notify/access
 import notify/attachment_store
 import notify/core/acl
 import notify/core/action as action_parser
+import notify/core/delay
 import notify/core/message.{type Draft, type Message}
 import notify/core/message_json
 import notify/core/topic
@@ -20,6 +21,7 @@ import notify/http/admin
 import notify/http/auth as http_auth
 import notify/http/compat_account
 import notify/http/filter_params
+import notify/http/parameter as http_parameter
 import notify/runtime.{type Runtime}
 import notify/service
 import notify/since
@@ -71,7 +73,7 @@ fn handle_protocol(
 ) -> Response(BitArray) {
   let segments = request.path_segments(req)
   case req.method, segments {
-    Options, _ -> empty_response(204)
+    Options, _ -> cors_options_response()
     Get, [] -> public_asset("index.html", "text/html; charset=utf-8")
     Get, ["setup"] -> public_asset("setup.html", "text/html; charset=utf-8")
     Get, ["notify_web.js"] ->
@@ -489,7 +491,12 @@ fn publish_control(
           Ok(control) ->
             json_response(200, message_json.encode(control) |> json.to_string)
           Error(service.InvalidMessage(_)) ->
-            ntfy_error(400, 40_007, "invalid sequence ID", ntfy_docs)
+            ntfy_error(
+              400,
+              40_049,
+              "invalid request: sequence ID invalid",
+              "https://ntfy.sh/docs/publish/#updating-deleting-notifications",
+            )
           Error(service.InvalidDelay(_)) ->
             ntfy_error(400, 40_007, "invalid delay", ntfy_docs)
           Error(service.Persistence(_))
@@ -516,8 +523,8 @@ fn publish_plaintext(
     Ok(parsed_topic) ->
       with_authorization(req, [parsed_topic], acl.Write, runtime, fn() {
         case
-          param(req, ["filename", "x-filename", "file", "f"]),
-          param(req, ["attach", "x-attach", "a"])
+          param(req, ["x-filename", "filename", "file", "f"]),
+          param(req, ["x-attach", "attach", "a"])
         {
           Some(filename), None ->
             publish_local_attachment(req, parsed_topic, filename, runtime)
@@ -545,7 +552,7 @@ fn publish_local_attachment(
   runtime: Runtime,
 ) -> Response(BitArray) {
   let body =
-    param(req, ["message", "x-message", "m"])
+    param(req, ["x-message", "message", "m"])
     |> option.unwrap("You received a file: " <> filename)
   case
     valid_filename(filename),
@@ -777,12 +784,19 @@ fn publish_json(
         Error(message_json.InvalidTopic(_)) -> invalid_topic()
         Error(message_json.InvalidPriority(_)) ->
           ntfy_error(400, 40_007, "invalid priority", ntfy_docs)
+        Error(message_json.MalformedJson) ->
+          ntfy_error(
+            400,
+            40_024,
+            "invalid request: request body must be valid JSON",
+            "",
+          )
         Error(message_json.InvalidJson) ->
           ntfy_error(
             400,
-            40_007,
-            "invalid request: unable to parse JSON",
-            ntfy_docs,
+            40_017,
+            "invalid request: request body must be message JSON",
+            "https://ntfy.sh/docs/publish/#publish-as-json",
           )
       }
   }
@@ -798,7 +812,7 @@ fn publish_webhook(
     Ok(parsed_topic) -> {
       with_authorization(req, [parsed_topic], acl.Write, runtime, fn() {
         let body =
-          param(req, ["message", "x-message", "m"])
+          param(req, ["x-message", "message", "m"])
           |> option.unwrap("triggered")
         message.plaintext_draft(parsed_topic, body)
         |> publish_with_parameters(req, runtime)
@@ -812,9 +826,8 @@ fn publish_draft(draft: Draft, runtime: Runtime) -> Response(BitArray) {
     Ok(message) ->
       json_response(200, message_json.encode(message) |> json.to_string)
     Error(service.InvalidMessage(_)) ->
-      ntfy_error(400, 40_007, "invalid request", ntfy_docs)
-    Error(service.InvalidDelay(_)) ->
-      ntfy_error(400, 40_007, "invalid delay: must be in the future", ntfy_docs)
+      ntfy_error(400, 40_000, "invalid request", "")
+    Error(service.InvalidDelay(error)) -> delay_error(error)
     Error(service.Persistence(_))
     | Error(service.Delivery(_))
     | Error(service.WebPush(_)) ->
@@ -823,6 +836,33 @@ fn publish_draft(draft: Draft, runtime: Runtime) -> Response(BitArray) {
         50_301,
         "temporarily unavailable: message was not stored",
         ntfy_docs,
+      )
+  }
+}
+
+fn delay_error(error: delay.Error) -> Response(BitArray) {
+  let docs = "https://ntfy.sh/docs/publish/#scheduled-delivery"
+  case error {
+    delay.InvalidDelay ->
+      ntfy_error(
+        400,
+        40_004,
+        "invalid delay parameter: unable to parse delay",
+        docs,
+      )
+    delay.NotInFuture | delay.TooSoon(_) ->
+      ntfy_error(
+        400,
+        40_005,
+        "invalid delay parameter: too small, please refer to the docs",
+        docs,
+      )
+    delay.TooFar(_) ->
+      ntfy_error(
+        400,
+        40_006,
+        "invalid delay parameter: too large, please refer to the docs",
+        docs,
       )
   }
 }
@@ -889,13 +929,18 @@ fn poll(
         let runtime.Clock(now) = runtime.clock
         case
           since.parse(
-            param(req, ["since", "x-since", "si"]),
+            param(req, ["x-since", "since", "si"]),
             poll: True,
             now: now(),
           )
         {
           Error(_) ->
-            ntfy_error(400, 40_008, "invalid since parameter", ntfy_docs)
+            ntfy_error(
+              400,
+              40_008,
+              "invalid since parameter",
+              "https://ntfy.sh/docs/subscribe/api/#fetch-cached-messages",
+            )
           Ok(marker) -> {
             case filter_params.parse(req) {
               Error(_) ->
@@ -912,8 +957,8 @@ fn poll(
                     since: marker,
                     include_scheduled: truthy(
                       param(req, [
-                        "scheduled",
                         "x-scheduled",
+                        "scheduled",
                         "sched",
                       ]),
                     ),
@@ -1001,15 +1046,18 @@ fn apply_publish_parameters(
   draft: Draft,
   req: Request(BitArray),
 ) -> Result(Draft, PublishParameterError) {
-  let title = param(req, ["title", "x-title", "ti", "t"])
-  let body = param(req, ["message", "x-message", "m"])
-  let priority = param(req, ["priority", "x-priority", "prio", "p"])
-  let tags = param(req, ["tags", "x-tags", "tag", "ta"])
-  let markdown = param(req, ["markdown", "x-markdown", "md"])
-  let cache = param(req, ["cache", "x-cache"])
-  let actions = param(req, ["actions", "x-actions", "action"])
-  let attach = param(req, ["attach", "x-attach", "a"])
-  let filename = param(req, ["filename", "x-filename", "file", "f"])
+  let title = param(req, ["x-title", "title", "t"])
+  let body = case string.is_empty(draft.message) {
+    True -> param(req, ["x-message", "message", "m"])
+    False -> None
+  }
+  let priority = param(req, ["x-priority", "priority", "prio", "p"])
+  let tags = param(req, ["x-tags", "tags", "tag", "ta"])
+  let markdown = param(req, ["x-markdown", "markdown", "md"])
+  let cache = param(req, ["x-cache", "cache"])
+  let actions = param(req, ["x-actions", "actions", "action"])
+  let attach = param(req, ["x-attach", "attach", "a"])
+  let filename = param(req, ["x-filename", "filename", "file", "f"])
 
   use priority <- result.try(case priority {
     Some(value) ->
@@ -1035,8 +1083,8 @@ fn apply_publish_parameters(
       },
       markdown: option.map(markdown, parse_bool)
         |> option.unwrap(draft.markdown),
-      icon: option.or(param(req, ["icon", "x-icon"]), draft.icon),
-      click: option.or(param(req, ["click", "x-click"]), draft.click),
+      icon: option.or(param(req, ["x-icon", "icon"]), draft.icon),
+      click: option.or(param(req, ["x-click", "click"]), draft.click),
       actions:,
       attachment: case attach {
         None -> draft.attachment
@@ -1050,11 +1098,11 @@ fn apply_publish_parameters(
           ))
       },
       delay: option.or(
-        param(req, ["delay", "x-delay", "at", "in"]),
+        param(req, ["x-delay", "delay", "x-at", "at", "x-in", "in"]),
         draft.delay,
       ),
       sequence_id: option.or(
-        param(req, ["sequence_id", "x-sequence-id", "sequence-id", "sid"]),
+        param(req, ["x-sequence-id", "sequence-id", "sid"]),
         draft.sequence_id,
       ),
       cache: option.map(cache, parse_bool) |> option.unwrap(draft.cache),
@@ -1090,23 +1138,7 @@ fn split_csv(value: String) -> List(String) {
 }
 
 fn param(req: Request(body), aliases: List(String)) -> Option(String) {
-  let query = request.get_query(req) |> result.unwrap([])
-  case
-    list.find_map(aliases, fn(alias) {
-      list.find_map(query, fn(pair) {
-        case string.lowercase(pair.0) == alias {
-          True -> Ok(pair.1)
-          False -> Error(Nil)
-        }
-      })
-    })
-  {
-    Ok(value) -> Some(value)
-    Error(_) ->
-      aliases
-      |> list.find_map(fn(alias) { request.get_header(req, alias) })
-      |> option.from_result
-  }
+  http_parameter.read(req, aliases)
 }
 
 fn truthy(value: Option(String)) -> Bool {
@@ -1278,12 +1310,7 @@ fn compatibility_config(runtime: Runtime) -> Response(BitArray) {
 }
 
 fn invalid_topic() -> Response(BitArray) {
-  ntfy_error(
-    400,
-    40_010,
-    "invalid topic: must match [-_A-Za-z0-9]{1,64}",
-    ntfy_docs,
-  )
+  ntfy_error(400, 40_009, "invalid request: topic invalid", "")
 }
 
 fn page_not_found() -> Response(BitArray) {
@@ -1342,6 +1369,17 @@ fn text_response(
 
 fn empty_response(status: Int) -> Response(BitArray) {
   text_response("", status, "text/plain; charset=utf-8")
+}
+
+fn cors_options_response() -> Response(BitArray) {
+  response.new(200)
+  |> response.set_body(<<>>)
+  |> response.set_header("access-control-allow-origin", "*")
+  |> response.set_header(
+    "access-control-allow-methods",
+    "GET, PUT, POST, PATCH, DELETE",
+  )
+  |> response.set_header("access-control-allow-headers", "*")
 }
 
 fn public_asset(name: String, content_type: String) -> Response(BitArray) {

@@ -22,7 +22,7 @@ pub fn delayed_message_is_hidden_until_atomically_released_test() {
     runtime.new(
       storage: store,
       clock: runtime.Clock(fn() { 1_725_000_000 }),
-      ids: runtime.IdGenerator(fn() { "Delay00001" }),
+      ids: runtime.IdGenerator(fn() { "Delay00001XY" }),
       retention_seconds: 43_200,
     )
   let publish =
@@ -53,7 +53,7 @@ pub fn delayed_message_is_hidden_until_atomically_released_test() {
     |> request.set_query([#("poll", "1"), #("scheduled", "1")])
     |> request.set_body(<<>>)
     |> router.handle(first_runtime)
-  assert string.contains(response_body(scheduled_poll), "Delay00001")
+  assert string.contains(response_body(scheduled_poll), "Delay00001XY")
 
   let deliveries = process.new_subject()
   let due_runtime =
@@ -64,10 +64,10 @@ pub fn delayed_message_is_hidden_until_atomically_released_test() {
     )
   assert service.release_due(due_runtime, 10) == Ok(1)
   let assert Ok(delivered) = process.receive(deliveries, 1000)
-  assert delivered.id == "Delay00001"
+  assert delivered.id == "Delay00001XY"
 
   let after_release = router.handle(poll_request, due_runtime)
-  assert string.contains(response_body(after_release), "Delay00001")
+  assert string.contains(response_body(after_release), "Delay00001XY")
   assert service.release_due(due_runtime, 10) == Ok(0)
 }
 
@@ -77,7 +77,7 @@ pub fn invalid_delay_is_rejected_without_storage_test() {
     runtime.new(
       storage: store,
       clock: runtime.Clock(fn() { 1_725_000_000 }),
-      ids: runtime.IdGenerator(fn() { "Delay00002" }),
+      ids: runtime.IdGenerator(fn() { "Delay00002XY" }),
       retention_seconds: 43_200,
     )
   let publish =

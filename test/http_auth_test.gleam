@@ -20,7 +20,7 @@ fn managed_runtime() -> #(runtime.Runtime, String) {
     runtime.new(
       storage: messages,
       clock: runtime.Clock(fn() { 1001 }),
-      ids: runtime.IdGenerator(fn() { "AuthId0001" }),
+      ids: runtime.IdGenerator(fn() { "AuthId0001XY" }),
       retention_seconds: 43_200,
     )
     |> runtime.with_access(control)
@@ -49,6 +49,11 @@ pub fn setup_gate_then_acl_protects_publish_and_poll_test() {
   assert setup.status == 201
 
   assert router.handle(publish, runtime).status == 403
+  let invalid_bearer =
+    publish
+    |> request.set_header("authorization", "Bearer invalid")
+    |> router.handle(runtime)
+  assert invalid_bearer.status == 401
   let basic =
     "admin:correct horse battery staple"
     |> bit_array.from_string
@@ -74,6 +79,30 @@ pub fn setup_gate_then_acl_protects_publish_and_poll_test() {
       runtime,
     ).status
     == 200
+}
+
+pub fn invalid_bearer_falls_back_to_permitted_anonymous_acl_test() {
+  let #(runtime, setup_token) = managed_runtime()
+  let setup =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/api/v1/setup")
+    |> request.set_body(bit_array.from_string(
+      "{\"token\":\""
+      <> setup_token
+      <> "\",\"username\":\"admin\",\"password\":\"correct horse battery staple\",\"anonymous_access\":\"read-write\"}",
+    ))
+    |> router.handle(runtime)
+  assert setup.status == 201
+
+  let publish =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/public")
+    |> request.set_header("authorization", "Bearer invalid")
+    |> request.set_body(<<"anonymous fallback":utf8>>)
+    |> router.handle(runtime)
+  assert publish.status == 200
 }
 
 pub fn websocket_auth_query_decodes_like_ntfy_test() {

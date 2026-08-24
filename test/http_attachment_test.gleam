@@ -18,7 +18,7 @@ fn test_runtime() -> runtime.Runtime {
   runtime.new(
     storage: messages,
     clock: runtime.Clock(fn() { 1_725_000_000 }),
-    ids: runtime.IdGenerator(fn() { "Attach0001" }),
+    ids: runtime.IdGenerator(fn() { "Attach0001XY" }),
     retention_seconds: 43_200,
   )
   |> runtime.with_attachments(

@@ -27,6 +27,7 @@ pub type Error {
   Conflict(String)
   Corrupt(String)
   MigrationRequired(Int)
+  UnsupportedSchema(String)
 }
 
 pub type Stats {

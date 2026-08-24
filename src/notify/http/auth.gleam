@@ -27,16 +27,31 @@ pub fn check(
   use credentials <- result.try(
     credentials(request) |> result.map_error(fn(_) { MalformedCredentials }),
   )
-  use principal <- result.try(
-    access.authenticate(control, credentials, now)
-    |> result.map_error(fn(error) {
-      case error {
-        access.InvalidCredentials -> Unauthenticated
-        access.SetupRequired -> SetupRequired
-        _ -> Unavailable
+  let principal = case access.authenticate(control, credentials, now) {
+    Ok(principal) -> Ok(principal)
+    // ntfy treats an invalid credential on a topic endpoint as an anonymous
+    // request when the anonymous ACL permits the operation. Authentication-only
+    // endpoints continue to reject it through `authenticate` below.
+    Error(access.InvalidCredentials) ->
+      case authorize(control, acl.Anonymous, topics, operation) {
+        Ok(acl.Anonymous) -> Ok(acl.Anonymous)
+        Ok(_) -> Error(Unauthenticated)
+        Error(Forbidden) -> Error(Unauthenticated)
+        Error(error) -> Error(error)
       }
-    }),
-  )
+    Error(access.SetupRequired) -> Error(SetupRequired)
+    Error(_) -> Error(Unavailable)
+  }
+  use principal <- result.try(principal)
+  authorize(control, principal, topics, operation)
+}
+
+fn authorize(
+  control: Access,
+  principal: acl.Principal,
+  topics: List(Topic),
+  operation: acl.Operation,
+) -> Result(acl.Principal, Failure) {
   case access.authorize(control, principal, topics, operation) {
     Ok(True) -> Ok(principal)
     Ok(False) -> Error(Forbidden)
