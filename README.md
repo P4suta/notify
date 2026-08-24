@@ -192,8 +192,8 @@ certification; the exact evidence is recorded in
   scheduled events, keepalive, and bounded credit-based fan-out.
 - Identity: setup gate, fixed-policy Argon2id passwords with successful-login
   legacy rehash, one-time bearer-token display, monotonic token last-access
-  tracking, Basic/Bearer authentication, wildcard ACLs, and CSRF-protected
-  admin sessions.
+  tracking, bounded ID/hash collision retry, Basic/Bearer authentication,
+  wildcard ACLs, and CSRF-protected admin sessions.
 - Attachments: filesystem/shared-filesystem, PostgreSQL chunk, and S3-compatible
   stores with `begin/write/finish/abort`, incremental SHA-256,
   content-addressed promotion, byte ranges, quotas, expiry, and one-hour staging

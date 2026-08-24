@@ -141,7 +141,7 @@ fn login(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
       case
         access.create_token_for_username(
           runtime.access,
-          "ses_" <> next_id(),
+          fn() { "ses_" <> next_id() },
           login.username,
           "__web_session__",
           Some(now() + 43_200),
@@ -384,7 +384,7 @@ fn create_token(
   case
     access.create_token_for_username(
       runtime.access,
-      "tok_" <> next_id(),
+      fn() { "tok_" <> next_id() },
       requested.username,
       requested.label,
       requested.expires,

@@ -878,7 +878,10 @@ fn in_transaction(
 fn map_error(error: sqlight.Error) -> identity.Error {
   let sqlight.SqlightError(code:, message:, ..) = error
   case code {
-    sqlight.Constraint | sqlight.ConstraintUnique -> identity.Conflict(message)
+    sqlight.Constraint
+    | sqlight.ConstraintPrimarykey
+    | sqlight.ConstraintRowid
+    | sqlight.ConstraintUnique -> identity.Conflict(message)
     sqlight.Corrupt | sqlight.Notadb -> identity.Corrupt(message)
     _ -> identity.Unavailable(message)
   }

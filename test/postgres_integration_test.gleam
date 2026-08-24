@@ -1,4 +1,5 @@
 import gleam/bit_array
+import gleam/erlang/process
 import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
@@ -82,7 +83,7 @@ pub fn postgres_identity_token_activity_contract_test() {
       let assert Ok(#(created_token, raw_token)) =
         access.create_token(
           control,
-          "tok_pg_token_contract",
+          fn() { "tok_pg_token_contract" },
           user.id,
           "postgres-token-contract",
           None,
@@ -92,7 +93,7 @@ pub fn postgres_identity_token_activity_contract_test() {
       let assert Ok(#(expired_token, expired_raw)) =
         access.create_token(
           control,
-          "tok_pg_expired_contract",
+          fn() { "tok_pg_expired_contract" },
           user.id,
           "expired-token-contract",
           Some(2000),
@@ -107,8 +108,32 @@ pub fn postgres_identity_token_activity_contract_test() {
         == Ok(acl.Authenticated("pg_token_contract", acl.User))
       assert access.authenticate(control, access.Bearer(expired_raw), 2003)
         == Error(access.InvalidCredentials)
-      let assert Ok([used_token, unused_expired]) =
+      let ids = process.new_subject()
+      process.send(ids, "tok_pg_token_contract")
+      process.send(ids, "tok_pg_recovered_contract")
+      let entropies = process.new_subject()
+      process.send(entropies, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFF")
+      process.send(entropies, "GGGGGGGGGGGGGGGGGGGGGGGGGGGGG")
+      let assert Ok(#(recovered, _)) =
+        access.create_token(
+          control,
+          fn() {
+            let assert Ok(id) = process.receive(ids, 1000)
+            id
+          },
+          user.id,
+          "recovered-token-contract",
+          None,
+          2004,
+          fn() {
+            let assert Ok(entropy) = process.receive(entropies, 1000)
+            entropy
+          },
+        )
+      assert recovered.id == "tok_pg_recovered_contract"
+      let assert Ok([recovered_token, used_token, unused_expired]) =
         access.list_tokens(control, "pg_token_contract")
+      assert recovered_token.last_access == None
       assert used_token.last_access == Some(2003)
       assert unused_expired.last_access == None
     }

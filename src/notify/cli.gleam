@@ -152,7 +152,7 @@ pub fn token_command(action: String, args: List(String)) -> Nil {
           case
             access.create_token_for_username(
               control,
-              "tok_" <> next_id(),
+              fn() { "tok_" <> next_id() },
               username,
               label,
               expires,

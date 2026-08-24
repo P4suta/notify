@@ -1,4 +1,6 @@
 import argus
+import gleam/erlang/process
+import gleam/list
 import gleam/option.{None, Some}
 import notify/access
 import notify/attachment_store/filesystem
@@ -156,7 +158,7 @@ pub fn user_acl_and_hashed_bearer_token_work_together_test() {
   let assert Ok(#(stored_token, raw_token)) =
     access.create_token(
       access,
-      "tok_pat",
+      fn() { "tok_pat" },
       user.id,
       "automation",
       None,
@@ -176,6 +178,117 @@ pub fn user_acl_and_hashed_bearer_token_work_together_test() {
   assert used_again.last_access == Some(2004)
   assert access.authorize(access, principal, [jobs], acl.Write) == Ok(True)
   assert access.authorize(access, principal, [secret], acl.Read) == Ok(False)
+}
+
+pub fn token_id_and_hash_conflicts_are_retried_with_fresh_values_test() {
+  let assert Ok(identity_sqlite.Started(store, Some(setup_token))) =
+    identity_sqlite.start(":memory:", fn() { 4000 }, fn() { setup_entropy })
+  let assert Ok(control) = access.managed(store)
+  let assert Ok(admin) =
+    access.complete_setup(
+      control,
+      setup_token,
+      "u_retry_admin",
+      "retry-admin",
+      "correct horse battery staple",
+      acl.Deny,
+      4001,
+    )
+  let existing_entropy = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+  let assert Ok(_) =
+    access.create_token(
+      control,
+      fn() { "tok_existing" },
+      admin.id,
+      "existing",
+      None,
+      4002,
+      fn() { existing_entropy },
+    )
+
+  let ids = process.new_subject()
+  process.send(ids, "tok_existing")
+  process.send(ids, "tok_hash_collision")
+  process.send(ids, "tok_recovered")
+  let entropies = process.new_subject()
+  process.send(entropies, "BBBBBBBBBBBBBBBBBBBBBBBBBBBBB")
+  process.send(entropies, existing_entropy)
+  process.send(entropies, "CCCCCCCCCCCCCCCCCCCCCCCCCCCCC")
+  let assert Ok(#(recovered, raw)) =
+    access.create_token(
+      control,
+      fn() {
+        let assert Ok(id) = process.receive(ids, 1000)
+        id
+      },
+      admin.id,
+      "recovered",
+      None,
+      4003,
+      fn() {
+        let assert Ok(entropy) = process.receive(entropies, 1000)
+        entropy
+      },
+    )
+
+  assert recovered.id == "tok_recovered"
+  assert raw == "tk_CCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+  let assert Ok(tokens) = access.list_tokens(control, "retry-admin")
+  assert list.length(tokens) == 2
+  assert process.receive(ids, 10) == Error(Nil)
+  assert process.receive(entropies, 10) == Error(Nil)
+}
+
+pub fn token_conflict_retry_is_bounded_to_eight_attempts_test() {
+  let assert Ok(identity_sqlite.Started(store, Some(setup_token))) =
+    identity_sqlite.start(":memory:", fn() { 5000 }, fn() { setup_entropy })
+  let assert Ok(control) = access.managed(store)
+  let assert Ok(admin) =
+    access.complete_setup(
+      control,
+      setup_token,
+      "u_bounded_admin",
+      "bounded-admin",
+      "correct horse battery staple",
+      acl.Deny,
+      5001,
+    )
+  let assert Ok(_) =
+    access.create_token(
+      control,
+      fn() { "tok_bounded_collision" },
+      admin.id,
+      "existing",
+      None,
+      5002,
+      fn() { "DDDDDDDDDDDDDDDDDDDDDDDDDDDDD" },
+    )
+  let ids = process.new_subject()
+  let entropies = process.new_subject()
+  list.repeat(Nil, times: 8)
+  |> list.each(fn(_) {
+    process.send(ids, "tok_bounded_collision")
+    process.send(entropies, "EEEEEEEEEEEEEEEEEEEEEEEEEEEEE")
+  })
+
+  let assert Error(access.IdentityError(identity.Conflict(_))) =
+    access.create_token(
+      control,
+      fn() {
+        let assert Ok(id) = process.receive(ids, 1000)
+        id
+      },
+      admin.id,
+      "must-fail",
+      None,
+      5003,
+      fn() {
+        let assert Ok(entropy) = process.receive(entropies, 1000)
+        entropy
+      },
+    )
+  assert process.receive(ids, 10) == Error(Nil)
+  assert process.receive(entropies, 10) == Error(Nil)
 }
 
 pub fn old_argon2_and_bcrypt_are_rehashed_after_successful_login_test() {

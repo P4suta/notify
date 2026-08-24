@@ -214,7 +214,7 @@ fn account_login(username: String, runtime: Runtime) -> Response(BitArray) {
   case
     access.create_token_for_username(
       runtime.access,
-      "tok_" <> next_id(),
+      fn() { "tok_" <> next_id() },
       username,
       "",
       Some(now() + 259_200),
@@ -246,7 +246,7 @@ fn account_token_create(
   case
     access.create_token_for_username(
       runtime.access,
-      "tok_" <> next_id(),
+      fn() { "tok_" <> next_id() },
       username,
       issued.label,
       expires,

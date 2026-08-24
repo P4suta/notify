@@ -8,6 +8,8 @@ import notify/identity
 import notify/security/password
 import notify/security/token as security_token
 
+const token_issue_attempts = 8
+
 pub type Credentials {
   NoCredentials
   Basic(username: String, password: String)
@@ -222,7 +224,7 @@ pub fn add_user(
 
 pub fn create_token(
   access: Access,
-  id: String,
+  next_id: fn() -> String,
   user_id: String,
   label: String,
   expires: Option(Int),
@@ -234,23 +236,57 @@ pub fn create_token(
       Error(IdentityError(identity.Unavailable("identity disabled")))
     ManagedAccess(store, _) -> {
       use _ <- result.try(validate_token_label(label))
-      use issued <- result.try(
-        security_token.issue(entropy) |> result.map_error(TokenError),
+      create_token_attempt(
+        store,
+        next_id,
+        user_id,
+        label,
+        expires,
+        now,
+        entropy,
+        token_issue_attempts,
       )
-      use stored <- result.try(
-        store.add_token(identity.NewToken(
-          id:,
-          user_id:,
-          token_hash: issued.hash,
-          prefix: string.slice(issued.value, at_index: 0, length: 8),
-          label:,
-          created_at: now,
-          expires:,
-        ))
-        |> result.map_error(IdentityError),
-      )
-      Ok(#(stored, issued.value))
     }
+  }
+}
+
+fn create_token_attempt(
+  store: identity.Store,
+  next_id: fn() -> String,
+  user_id: String,
+  label: String,
+  expires: Option(Int),
+  now: Int,
+  entropy: fn() -> String,
+  attempts_remaining: Int,
+) -> Result(#(identity.Token, String), Error) {
+  use issued <- result.try(
+    security_token.issue(entropy) |> result.map_error(TokenError),
+  )
+  case
+    store.add_token(identity.NewToken(
+      id: next_id(),
+      user_id:,
+      token_hash: issued.hash,
+      prefix: string.slice(issued.value, at_index: 0, length: 8),
+      label:,
+      created_at: now,
+      expires:,
+    ))
+  {
+    Error(identity.Conflict(_)) if attempts_remaining > 1 ->
+      create_token_attempt(
+        store,
+        next_id,
+        user_id,
+        label,
+        expires,
+        now,
+        entropy,
+        attempts_remaining - 1,
+      )
+    Error(error) -> Error(IdentityError(error))
+    Ok(stored) -> Ok(#(stored, issued.value))
   }
 }
 
@@ -333,7 +369,7 @@ pub fn list_tokens(
 
 pub fn create_token_for_username(
   access: Access,
-  id: String,
+  next_id: fn() -> String,
   username: String,
   label: String,
   expires: Option(Int),
@@ -341,7 +377,7 @@ pub fn create_token_for_username(
   entropy: fn() -> String,
 ) -> Result(#(identity.Token, String), Error) {
   use user <- result.try(user_by_name(access, username))
-  create_token(access, id, user.id, label, expires, now, entropy)
+  create_token(access, next_id, user.id, label, expires, now, entropy)
 }
 
 pub fn revoke_token(access: Access, id: String) -> Result(Nil, Error) {
