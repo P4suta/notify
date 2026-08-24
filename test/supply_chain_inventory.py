@@ -133,7 +133,10 @@ def _github_component(package: dict[str, Any], source: str) -> Component:
     )
 
 
-def _collect_gleam(root: Path, components: dict[str, Component]) -> None:
+def _collect_gleam(
+    root: Path, components: dict[str, Component]
+) -> dict[str, tuple[str, str]]:
+    root_hex_packages: dict[str, tuple[str, str]] = {}
     for relative_path in GLEAM_MANIFESTS:
         document = _read_toml(root / relative_path)
         packages = document.get("packages")
@@ -163,6 +166,14 @@ def _collect_gleam(root: Path, components: dict[str, Component]) -> None:
                     optional=False,
                     sha256=checksum,
                 )
+                if relative_path == Path("manifest.toml"):
+                    existing = root_hex_packages.get(name)
+                    identity = (version, checksum.lower())
+                    if existing is not None and existing != identity:
+                        raise InventoryError(
+                            f"conflicting root manifest dependency: {name}"
+                        )
+                    root_hex_packages[name] = identity
             elif source == "git":
                 component = _github_component(package, relative_path.as_posix())
             else:
@@ -170,6 +181,7 @@ def _collect_gleam(root: Path, components: dict[str, Component]) -> None:
                     f"unsupported dependency source in {relative_path}: {source!r}"
                 )
             _add_component(components, component)
+    return root_hex_packages
 
 
 def _normalise_licenses(value: Any) -> tuple[str, ...]:
@@ -219,7 +231,11 @@ def _collect_npm(root: Path, components: dict[str, Component]) -> None:
         )
 
 
-def _collect_mix(root: Path, components: dict[str, Component]) -> None:
+def _collect_mix(
+    root: Path,
+    components: dict[str, Component],
+    root_hex_packages: dict[str, tuple[str, str]],
+) -> None:
     path = root / MIX_LOCK
     if not path.is_file():
         raise InventoryError(f"required lock file is missing: {path}")
@@ -231,14 +247,25 @@ def _collect_mix(root: Path, components: dict[str, Component]) -> None:
     if not matches:
         raise InventoryError(f"no Hex packages found in {MIX_LOCK}")
     for match in matches:
+        name = match.group("name")
+        version = match.group("version")
+        checksum = match.group("checksum").lower()
+        manifest_identity = root_hex_packages.get(name)
+        if manifest_identity is not None and manifest_identity != (version, checksum):
+            manifest_version, manifest_checksum = manifest_identity
+            raise InventoryError(
+                f"Mix lock dependency does not match root manifest: {name} "
+                f"(manifest {manifest_version}/{manifest_checksum}; "
+                f"Mix {version}/{checksum})"
+            )
         _add_component(
             components,
             _hex_component(
-                match.group("name"),
-                match.group("version"),
+                name,
+                version,
                 MIX_LOCK.as_posix(),
                 optional=True,
-                sha256=match.group("checksum"),
+                sha256=checksum,
             ),
         )
 
@@ -352,9 +379,9 @@ def collect_inventory(
     root: Path, *, apply_license_policy: bool = True
 ) -> list[Component]:
     components: dict[str, Component] = {}
-    _collect_gleam(root, components)
+    root_hex_packages = _collect_gleam(root, components)
     _collect_npm(root, components)
-    _collect_mix(root, components)
+    _collect_mix(root, components, root_hex_packages)
     _collect_mix_archives(root, components)
     if apply_license_policy:
         _apply_license_policy(root, components)

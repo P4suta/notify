@@ -1,0 +1,130 @@
+---
+name: Native packaging
+
+on:
+  push:
+    branches:
+      - main
+  schedule:
+    - cron: "19 19 * * 4"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  ELIXIR_VERSION: "1.20.3"
+  GLEAM_VERSION: "1.18.1"
+  OTP_VERSION: "28.4.3"
+  ZIG_VERSION: "0.15.2"
+
+jobs:
+  posix:
+    name: Native ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux_amd64
+            binary: burrito_out/notify_linux_amd64
+          - runner: ubuntu-24.04-arm
+            target: linux_arm64
+            binary: burrito_out/notify_linux_arm64
+          - runner: macos-15-intel
+            target: macos_amd64
+            binary: burrito_out/notify_macos_amd64
+          - runner: macos-15
+            target: macos_arm64
+            binary: burrito_out/notify_macos_arm64
+    env:
+      NATIVE_BINARY: ${{ matrix.binary }}
+      NATIVE_TARGET: ${{ matrix.target }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install BEAM and Gleam toolchains
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+          rebar3-version: "3"
+      - name: Install checksum-verified Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: notify-native
+      - name: Install exact MixGleam archive
+        run: mix archive.install hex mix_gleam 0.6.2 --force
+      - name: Build locked host-native executable
+        run: packaging/native/build.sh "$NATIVE_TARGET"
+      - name: Smoke-test native lifecycle
+        run: test/native_smoke.sh "$NATIVE_BINARY"
+
+  windows-build:
+    name: Build Native windows_amd64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install BEAM and Gleam toolchains
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          elixir-version: ${{ env.ELIXIR_VERSION }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          otp-version: ${{ env.OTP_VERSION }}
+          rebar3-version: "3"
+      - name: Install checksum-verified Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+          cache-key: notify-native-windows
+      - name: Verify Windows cross-build tools
+        run: |
+          command -v 7z
+          command -v xz
+      - name: Install exact MixGleam archive
+        run: mix archive.install hex mix_gleam 0.6.2 --force
+      - name: Build locked Windows executable
+        run: packaging/native/build.sh windows_amd64
+      - name: Transfer Windows executable within this workflow only
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: notify-native-windows-${{ github.run_id }}
+          path: burrito_out/notify_windows_amd64.exe
+          if-no-files-found: error
+          retention-days: 3
+
+  windows-smoke:
+    name: Native windows_amd64 smoke
+    needs: windows-build
+    runs-on: windows-2025
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Check out smoke harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Download this workflow's Windows executable
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: notify-native-windows-${{ github.run_id }}
+          path: native-windows
+      - name: Smoke-test Windows recovery
+        shell: pwsh
+        run: test/native_smoke.ps1 -Artifact native-windows/notify_windows_amd64.exe

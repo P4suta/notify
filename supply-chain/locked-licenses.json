@@ -58,13 +58,13 @@
       "sha256": "08e0fdb78dc4d8a5d3c80295b021505c7d2a2e7b6c6d5eab7286c36f4a53c851",
       "source": "https://repo.hex.pm/tarballs/booklet-1.1.0.tar"
     },
-    "pkg:hex/burrito@1.6.0": {
+    "pkg:hex/burrito@1.5.0": {
       "license_source": "contents.tar.gz/mix.exs",
       "licenses": [
         "MIT"
       ],
-      "sha256": "e636a00b032c45a69ff755d9fc53fa5fdc9e1d21bdbd229075fe4a15b05355fe",
-      "source": "https://repo.hex.pm/tarballs/burrito-1.6.0.tar"
+      "sha256": "3861abda7bffa733862b48da3e03df0b4cd41abf6fd24b91745f5c16d971e5fa",
+      "source": "https://repo.hex.pm/tarballs/burrito-1.5.0.tar"
     },
     "pkg:hex/child_process@2.1.2": {
       "license_source": "metadata.config",

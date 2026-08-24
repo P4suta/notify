@@ -372,8 +372,11 @@ types, JSON messages, and errors with ntfy v2.27.0. Upstream-main drift uses a
 separate endpoint/artifact and never rewrites the stable baseline.
 
 The optional ERTS-embedded native build scaffold is under `packaging/native`.
-It uses MixGleam and Burrito only at build time; no registry publication or
-release-page automation is included.
+It uses exact MixGleam, Mix lock, Zig, and Burrito inputs. Scheduled/main CI
+builds Linux amd64/arm64 and macOS amd64/arm64 on matching standard runners;
+the upstream-supported Linux cross-build path produces Windows amd64 for a
+Windows recovery smoke. The transfer artifact expires after three days. No
+registry publication or release-page automation is included.
 
 ## License
 

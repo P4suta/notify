@@ -46,7 +46,7 @@ packages = [
             'name = "notify"\nversion = "0.1.0"\n', encoding="utf-8"
         )
         (self.root / "mix.lock").write_text(
-            '%{\n  "burrito": {:hex, :burrito, "1.6.0", "checksum", [:mix], [], "hexpm", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},\n}\n',
+            '%{\n  "burrito": {:hex, :burrito, "1.5.0", "checksum", [:mix], [], "hexpm", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},\n  "gleam_stdlib": {:hex, :gleam_stdlib, "1.0.5", "checksum", [:mix], [], "hexpm", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},\n}\n',
             encoding="utf-8",
         )
         (self.root / "mix.exs").write_text(
@@ -90,7 +90,7 @@ packages = [
                     "commit": "21f2798f5b7eaebe6cdbb2067f38e35dac2b6b1d",
                     "licenses": ["Apache-2.0", "MIT"],
                 },
-                "pkg:hex/burrito@1.6.0": {
+                "pkg:hex/burrito@1.5.0": {
                     "licenses": ["Apache-2.0"],
                     "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 },
@@ -116,7 +116,7 @@ packages = [
             [component.purl for component in inventory],
             [
                 "pkg:github/P4suta/gleam-mutants@21f2798f5b7eaebe6cdbb2067f38e35dac2b6b1d",
-                "pkg:hex/burrito@1.6.0",
+                "pkg:hex/burrito@1.5.0",
                 "pkg:hex/gleam_stdlib@1.0.5",
                 "pkg:hex/mix_gleam@0.6.2",
                 "pkg:npm/%40axe-core/playwright@4.13.0",
@@ -126,8 +126,27 @@ packages = [
         self.assertEqual(stdlib.licenses, ("Apache-2.0",))
         self.assertEqual(
             stdlib.sources,
-            ("manifest.toml", "packages/notify_core/manifest.toml"),
+            (
+                "manifest.toml",
+                "mix.lock",
+                "packages/notify_core/manifest.toml",
+            ),
         )
+
+    def test_rejects_mix_dependency_drift_from_root_manifest(self) -> None:
+        lock = (self.root / "mix.lock").read_text(encoding="utf-8")
+        (self.root / "mix.lock").write_text(
+            lock.replace(
+                ':gleam_stdlib, "1.0.5"', ':gleam_stdlib, "1.0.4"'
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            supply_chain_inventory.InventoryError,
+            "Mix lock dependency does not match root manifest: gleam_stdlib",
+        ):
+            supply_chain_inventory.collect_inventory(self.root)
 
     def test_rejects_build_tool_version_drift(self) -> None:
         (self.root / "mix.exs").write_text(
@@ -146,7 +165,7 @@ packages = [
         osv = supply_chain_inventory.osv_document(inventory)
         packages = [entry["package"] for entry in osv["results"][0]["packages"]]
         self.assertIn(
-            {"ecosystem": "Hex", "name": "burrito", "version": "1.6.0"},
+            {"ecosystem": "Hex", "name": "burrito", "version": "1.5.0"},
             packages,
         )
         self.assertIn(
@@ -178,7 +197,7 @@ packages = [
             supply_chain_inventory.collect_inventory(self.root)
 
     def test_rejects_license_policy_drift(self) -> None:
-        del self.license_policy["components"]["pkg:hex/burrito@1.6.0"]
+        del self.license_policy["components"]["pkg:hex/burrito@1.5.0"]
         self._write_license_policy()
 
         with self.assertRaisesRegex(

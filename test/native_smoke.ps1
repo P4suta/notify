@@ -1,0 +1,132 @@
+# SPDX-License-Identifier: Apache-2.0
+param(
+    [Parameter(Mandatory = $true)]
+    [string]$Artifact
+)
+
+$ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
+$artifactPath = (Resolve-Path -LiteralPath $Artifact).Path
+$smokeDirectory = Join-Path ([IO.Path]::GetTempPath()) ("notify-native-smoke-" + [guid]::NewGuid().ToString("N"))
+$serverProcess = $null
+$port = if ($env:NOTIFY_NATIVE_SMOKE_PORT) { [int]$env:NOTIFY_NATIVE_SMOKE_PORT } else { 18083 + (Get-Random -Minimum 0 -Maximum 1000) }
+if ($port -lt 1024 -or $port -gt 65535) {
+    throw "NOTIFY_NATIVE_SMOKE_PORT must be between 1024 and 65535"
+}
+$baseUrl = "http://127.0.0.1:$port"
+$username = "admin"
+$password = "native smoke password"
+$topic = "native-smoke-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())-$PID"
+$message = "durable native smoke message"
+
+function Invoke-Notify {
+    param([string[]]$Arguments)
+    $output = @(& $script:artifactPath @Arguments 2>&1 | ForEach-Object { "$_" })
+    if ($LASTEXITCODE -ne 0) {
+        $redacted = ($output -join "`n") -replace 'tk_[A-Za-z0-9]{29}', '<redacted>'
+        throw "native command failed: $($Arguments[0])`n$redacted"
+    }
+    return $output
+}
+
+function Start-NotifyServer {
+    $script:serverLog = Join-Path $script:smokeDirectory "server.log"
+    $script:serverError = Join-Path $script:smokeDirectory "server-error.log"
+    $arguments = @(
+        "serve", "--listen-host", "127.0.0.1", "--port", "$script:port",
+        "--base-url", $script:baseUrl, "--log-format", "json"
+    )
+    $script:serverProcess = Start-Process -FilePath $script:artifactPath `
+        -ArgumentList $arguments `
+        -RedirectStandardOutput $script:serverLog `
+        -RedirectStandardError $script:serverError `
+        -PassThru
+    for ($attempt = 0; $attempt -lt 30; $attempt += 1) {
+        try {
+            Invoke-WebRequest -Uri "$script:baseUrl/healthz" -UseBasicParsing -TimeoutSec 2 | Out-Null
+            return
+        }
+        catch {
+            if ($script:serverProcess.HasExited) {
+                throw "native Windows server exited before becoming healthy"
+            }
+            Start-Sleep -Seconds 1
+        }
+    }
+    throw "native Windows server did not become healthy within 30 seconds"
+}
+
+function Stop-NotifyServerForRecovery {
+    if ($null -ne $script:serverProcess -and -not $script:serverProcess.HasExited) {
+        taskkill.exe /PID $script:serverProcess.Id /T /F | Out-Null
+        $script:serverProcess.WaitForExit()
+
+        for ($attempt = 0; $attempt -lt 10; $attempt += 1) {
+            try {
+                Invoke-WebRequest -Uri "$script:baseUrl/healthz" -UseBasicParsing -TimeoutSec 1 | Out-Null
+                Start-Sleep -Milliseconds 250
+            }
+            catch {
+                $script:serverProcess = $null
+                return
+            }
+        }
+        throw "native Windows listener survived forced process-tree stop"
+    }
+    $script:serverProcess = $null
+}
+
+try {
+    New-Item -ItemType Directory -Path $smokeDirectory | Out-Null
+    $env:NOTIFY_INSTALL_DIR = Join-Path $smokeDirectory "install"
+    $env:NOTIFY_DATABASE_BACKEND = "sqlite"
+    $env:NOTIFY_DATABASE_PATH = Join-Path $smokeDirectory "notify.db"
+    $env:NOTIFY_ATTACHMENT_BACKEND = "filesystem"
+    $env:NOTIFY_ATTACHMENT_DIRECTORY = Join-Path $smokeDirectory "attachments"
+    $env:NOTIFY_PASSWORD = $password
+
+    $help = Invoke-Notify @("help")
+    if (($help -join "`n") -notmatch "Usage: notify <command> \[options\]") {
+        throw "native help contract is missing"
+    }
+    $setup = Invoke-Notify @("setup", "--username", $username, "--anonymous-access", "deny")
+    if (($setup -join "`n") -notmatch "setup complete; administrator admin created") {
+        throw "native setup did not complete"
+    }
+    $tokenOutput = Invoke-Notify @("token", "create", $username, "--label", "native-smoke")
+    $rawToken = @($tokenOutput | Where-Object { $_ -match '^tk_[A-Za-z0-9]{29}$' } | Select-Object -Last 1)
+    if ($rawToken.Count -ne 1) {
+        throw "native token command did not return the fixed 32-character contract"
+    }
+
+    Start-NotifyServer
+    $publishOutput = Invoke-Notify @("publish", $topic, $message, "--server", $baseUrl, "--token", $rawToken[0])
+    $publishLine = $publishOutput | Where-Object { $_.TrimStart().StartsWith("{") } | Select-Object -Last 1
+    $published = $publishLine | ConvertFrom-Json
+    if ($published.id.Length -ne 12 -or $published.topic -ne $topic -or $published.message -ne $message) {
+        throw "native publish response violated the message contract"
+    }
+    $messageId = $published.id
+    $pollOutput = Invoke-Notify @("subscribe", $topic, "--server", $baseUrl, "--token", $rawToken[0], "--since", "all")
+    $matches = @($pollOutput | Where-Object { $_.TrimStart().StartsWith("{") } | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.event -eq "message" -and $_.id -eq $messageId })
+    if ($matches.Count -ne 1) {
+        throw "native poll did not return exactly one published message"
+    }
+    Stop-NotifyServerForRecovery
+
+    Start-NotifyServer
+    $pollOutput = Invoke-Notify @("subscribe", $topic, "--server", $baseUrl, "--token", $rawToken[0], "--since", "all")
+    $matches = @($pollOutput | Where-Object { $_.TrimStart().StartsWith("{") } | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object { $_.event -eq "message" -and $_.id -eq $messageId })
+    if ($matches.Count -ne 1) {
+        throw "native Windows restart did not recover exactly one published message"
+    }
+    Stop-NotifyServerForRecovery
+
+    Write-Output "Windows native setup, publish/poll, and forced-stop recovery smoke passed"
+}
+finally {
+    Stop-NotifyServerForRecovery
+    if (Test-Path -LiteralPath $smokeDirectory) {
+        Remove-Item -LiteralPath $smokeDirectory -Recurse -Force
+    }
+}
