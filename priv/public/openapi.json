@@ -1,0 +1,114 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Notify API",
+    "version": "0.1.0",
+    "description": "Notify management API and the implemented ntfy v2.27.0-compatible wire surface."
+  },
+  "servers": [{"url": "/"}],
+  "tags": [
+    {"name": "ntfy compatibility"},
+    {"name": "session"},
+    {"name": "administration"},
+    {"name": "operations"}
+  ],
+  "paths": {
+    "/healthz": {"get": {"tags": ["operations"], "summary": "Process liveness probe", "responses": {"200": {"description": "Process is alive", "content": {"text/plain": {"schema": {"type": "string"}}}}}}},
+    "/readyz": {"get": {"tags": ["operations"], "summary": "Dependency readiness probe", "responses": {"200": {"description": "Ready"}, "503": {"description": "A required dependency is unavailable"}}}},
+    "/metrics": {"get": {"tags": ["operations"], "summary": "Prometheus metrics", "responses": {"200": {"description": "Prometheus text exposition", "content": {"text/plain": {"schema": {"type": "string"}}}}}}},
+    "/{topic}": {
+      "parameters": [{"$ref": "#/components/parameters/topic"}],
+      "post": {"tags": ["ntfy compatibility"], "summary": "Publish a notification", "security": [{"basicAuth": []}, {"bearerAuth": []}], "requestBody": {"required": true, "content": {"text/plain": {"schema": {"type": "string"}}, "application/octet-stream": {"schema": {"type": "string", "contentEncoding": "binary"}}}}, "responses": {"200": {"description": "Committed message", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Message"}}}}, "400": {"$ref": "#/components/responses/NtfyError"}, "403": {"$ref": "#/components/responses/NtfyError"}, "503": {"$ref": "#/components/responses/NtfyError"}}},
+      "put": {"tags": ["ntfy compatibility"], "summary": "Publish a notification", "security": [{"basicAuth": []}, {"bearerAuth": []}], "requestBody": {"required": true, "content": {"text/plain": {"schema": {"type": "string"}}}}, "responses": {"200": {"description": "Committed message"}}}
+    },
+    "/{topics}/json": {"get": {"tags": ["ntfy compatibility"], "summary": "Subscribe as NDJSON or poll cached messages", "parameters": [{"$ref": "#/components/parameters/topics"}, {"$ref": "#/components/parameters/since"}, {"name": "poll", "in": "query", "schema": {"type": "boolean"}}], "security": [{"basicAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "NDJSON stream", "content": {"application/x-ndjson": {"schema": {"type": "string"}}}}, "400": {"$ref": "#/components/responses/NtfyError"}}}},
+    "/{topics}/sse": {"get": {"tags": ["ntfy compatibility"], "summary": "Subscribe using server-sent events", "parameters": [{"$ref": "#/components/parameters/topics"}, {"$ref": "#/components/parameters/since"}], "security": [{"basicAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "SSE stream", "content": {"text/event-stream": {"schema": {"type": "string"}}}}}}},
+    "/{topics}/raw": {"get": {"tags": ["ntfy compatibility"], "summary": "Subscribe as plaintext", "parameters": [{"$ref": "#/components/parameters/topics"}, {"$ref": "#/components/parameters/since"}], "security": [{"basicAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "Plaintext stream"}}}},
+    "/{topics}/ws": {"get": {"tags": ["ntfy compatibility"], "summary": "Subscribe over WebSocket", "parameters": [{"$ref": "#/components/parameters/topics"}, {"$ref": "#/components/parameters/since"}], "security": [{"basicAuth": []}, {"bearerAuth": []}], "responses": {"101": {"description": "WebSocket upgraded"}}}},
+    "/{topics}/auth": {"get": {"tags": ["ntfy compatibility"], "summary": "Check topic read access", "parameters": [{"$ref": "#/components/parameters/topics"}], "security": [{"basicAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "Authorized"}, "403": {"$ref": "#/components/responses/NtfyError"}}}},
+    "/v1/health": {"get": {"tags": ["ntfy compatibility"], "summary": "Liveness and storage health", "responses": {"200": {"description": "Healthy"}, "503": {"description": "Storage unavailable"}}}},
+    "/v1/version": {"get": {"tags": ["ntfy compatibility"], "summary": "Server and compatibility versions", "responses": {"200": {"description": "Version information"}}}},
+    "/v1/config": {"get": {"tags": ["ntfy compatibility"], "summary": "Public client capabilities", "responses": {"200": {"description": "Client configuration"}}}},
+    "/v1/webpush": {
+      "post": {"tags": ["ntfy compatibility"], "summary": "Create or replace a browser Push API subscription", "security": [{"basicAuth": []}, {"bearerAuth": []}, {"sessionCookie": []}], "parameters": [{"$ref": "#/components/parameters/csrf"}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/WebPushSubscription"}}}}, "responses": {"200": {"description": "Subscription updated"}, "400": {"$ref": "#/components/responses/NtfyError"}, "403": {"$ref": "#/components/responses/NtfyError"}}},
+      "delete": {"tags": ["ntfy compatibility"], "summary": "Remove a browser Push API subscription", "security": [{"basicAuth": []}, {"bearerAuth": []}, {"sessionCookie": []}], "parameters": [{"$ref": "#/components/parameters/csrf"}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["endpoint"], "properties": {"endpoint": {"type": "string", "format": "uri"}}}}}}, "responses": {"200": {"description": "Subscription removed"}, "403": {"$ref": "#/components/responses/NtfyError"}}}
+    },
+    "/v1/stats": {"get": {"tags": ["ntfy compatibility"], "summary": "Public message statistics", "responses": {"200": {"description": "Statistics"}}}},
+    "/v1/account": {
+      "get": {"tags": ["ntfy compatibility"], "summary": "Read anonymous or authenticated account limits and statistics", "security": [{}, {"basicAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "ntfy account response"}, "401": {"$ref": "#/components/responses/NtfyError"}}},
+      "delete": {"tags": ["ntfy compatibility"], "summary": "Delete the authenticated account after password confirmation", "security": [{"basicAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "Account deleted"}, "400": {"$ref": "#/components/responses/NtfyError"}, "409": {"$ref": "#/components/responses/NtfyError"}}}
+    },
+    "/v1/account/login": {"post": {"tags": ["ntfy compatibility"], "summary": "Authenticate and mint a 72-hour token", "security": [{"basicAuth": []}], "responses": {"200": {"description": "Raw token and canonical username"}, "401": {"$ref": "#/components/responses/NtfyError"}}}},
+    "/v1/account/password": {"post": {"tags": ["ntfy compatibility"], "summary": "Change the authenticated user's password", "security": [{"basicAuth": []}, {"bearerAuth": []}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["password", "new_password"], "properties": {"password": {"type": "string", "format": "password", "writeOnly": true}, "new_password": {"type": "string", "format": "password", "writeOnly": true, "minLength": 12}}}}}}, "responses": {"200": {"description": "Password changed"}, "400": {"$ref": "#/components/responses/NtfyError"}}}},
+    "/v1/account/token": {
+      "post": {"tags": ["ntfy compatibility"], "summary": "Create an API token; the raw value is returned once", "security": [{"basicAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "New raw token"}, "400": {"$ref": "#/components/responses/NtfyError"}}},
+      "delete": {"tags": ["ntfy compatibility"], "summary": "Revoke a token supplied in X-Token, Token query, or bearer credentials", "security": [{"basicAuth": []}, {"bearerAuth": []}], "parameters": [{"name": "X-Token", "in": "header", "schema": {"type": "string", "writeOnly": true}}], "responses": {"200": {"description": "Token revoked"}, "400": {"$ref": "#/components/responses/NtfyError"}}}
+    },
+    "/v1/users": {
+      "get": {"tags": ["ntfy compatibility"], "summary": "List ntfy-format users and grants", "security": [{"basicAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "User array"}, "401": {"$ref": "#/components/responses/NtfyError"}}},
+      "post": {"tags": ["ntfy compatibility"], "summary": "Create a regular user", "security": [{"basicAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "User created"}, "409": {"$ref": "#/components/responses/NtfyError"}}},
+      "put": {"tags": ["ntfy compatibility"], "summary": "Change a regular user's password or create the user", "security": [{"basicAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "User changed"}, "400": {"$ref": "#/components/responses/NtfyError"}}},
+      "delete": {"tags": ["ntfy compatibility"], "summary": "Delete a regular user", "security": [{"basicAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "User deleted"}, "400": {"$ref": "#/components/responses/NtfyError"}}}
+    },
+    "/v1/users/access": {
+      "post": {"tags": ["ntfy compatibility"], "summary": "Create or replace a user's topic grant", "security": [{"basicAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "Grant changed"}, "400": {"$ref": "#/components/responses/NtfyError"}}},
+      "put": {"tags": ["ntfy compatibility"], "summary": "Create or replace a user's topic grant", "security": [{"basicAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "Grant changed"}}},
+      "delete": {"tags": ["ntfy compatibility"], "summary": "Remove a user's topic grant", "security": [{"basicAuth": []}, {"bearerAuth": []}], "responses": {"200": {"description": "Grant removed"}}}
+    },
+    "/api/v1/setup": {"post": {"tags": ["session"], "summary": "Consume the one-time setup challenge", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/SetupRequest"}}}}, "responses": {"201": {"description": "Administrator created"}, "403": {"$ref": "#/components/responses/Problem"}, "409": {"$ref": "#/components/responses/Problem"}}}},
+    "/api/v1/session": {
+      "post": {"tags": ["session"], "summary": "Create an HttpOnly web session", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/LoginRequest"}}}}, "responses": {"201": {"description": "Session created; raw token is only set as a cookie"}, "401": {"$ref": "#/components/responses/Problem"}}},
+      "get": {"tags": ["session"], "summary": "Inspect the current session and obtain its CSRF token", "responses": {"200": {"description": "Current session"}, "401": {"$ref": "#/components/responses/Problem"}}},
+      "delete": {"tags": ["session"], "summary": "Revoke the current session", "parameters": [{"$ref": "#/components/parameters/csrf"}], "responses": {"204": {"description": "Session revoked"}, "403": {"$ref": "#/components/responses/Problem"}}}
+    },
+    "/api/v1/users": {
+      "get": {"tags": ["administration"], "summary": "List users", "security": [{"basicAuth": []}, {"sessionCookie": []}], "parameters": [{"$ref": "#/components/parameters/cursor"}, {"$ref": "#/components/parameters/limit"}], "responses": {"200": {"description": "Cursor page"}}},
+      "post": {"tags": ["administration"], "summary": "Create a user", "security": [{"basicAuth": []}, {"sessionCookie": []}], "parameters": [{"$ref": "#/components/parameters/csrf"}], "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/NewUser"}}}}, "responses": {"201": {"description": "User created"}, "409": {"$ref": "#/components/responses/Problem"}}}
+    },
+    "/api/v1/users/{username}": {"delete": {"tags": ["administration"], "summary": "Delete a user and their Push API subscriptions", "security": [{"basicAuth": []}, {"sessionCookie": []}], "parameters": [{"name": "username", "in": "path", "required": true, "schema": {"type": "string"}}, {"$ref": "#/components/parameters/csrf"}], "responses": {"204": {"description": "User deleted"}, "409": {"$ref": "#/components/responses/Problem"}}}},
+    "/api/v1/users/{username}/password": {"put": {"tags": ["administration"], "summary": "Replace a user's password", "security": [{"basicAuth": []}, {"sessionCookie": []}], "parameters": [{"name": "username", "in": "path", "required": true, "schema": {"type": "string"}}, {"$ref": "#/components/parameters/csrf"}], "responses": {"204": {"description": "Password changed"}}}},
+    "/api/v1/tokens": {
+      "get": {"tags": ["administration"], "summary": "List token metadata; raw tokens are never returned", "security": [{"basicAuth": []}, {"sessionCookie": []}], "responses": {"200": {"description": "Token metadata"}}},
+      "post": {"tags": ["administration"], "summary": "Create a token; the raw value is returned once", "security": [{"basicAuth": []}, {"sessionCookie": []}], "parameters": [{"$ref": "#/components/parameters/csrf"}], "responses": {"201": {"description": "New token"}}}
+    },
+    "/api/v1/tokens/{id}": {"delete": {"tags": ["administration"], "summary": "Revoke a token", "security": [{"basicAuth": []}, {"sessionCookie": []}], "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string"}}, {"$ref": "#/components/parameters/csrf"}], "responses": {"204": {"description": "Token revoked"}}}},
+    "/api/v1/acl": {
+      "get": {"tags": ["administration"], "summary": "List ACL rules", "security": [{"basicAuth": []}, {"sessionCookie": []}], "responses": {"200": {"description": "ACL rules"}}},
+      "put": {"tags": ["administration"], "summary": "Create or replace an ACL rule", "security": [{"basicAuth": []}, {"sessionCookie": []}], "parameters": [{"$ref": "#/components/parameters/csrf"}], "responses": {"200": {"description": "ACL rule"}}},
+      "delete": {"tags": ["administration"], "summary": "Delete an ACL rule", "security": [{"basicAuth": []}, {"sessionCookie": []}], "parameters": [{"$ref": "#/components/parameters/csrf"}], "responses": {"204": {"description": "ACL rule deleted"}}}
+    },
+    "/api/v1/anonymous-access": {"get": {"tags": ["administration"], "summary": "Read the default anonymous ACL", "security": [{"basicAuth": []}, {"sessionCookie": []}], "responses": {"200": {"description": "Anonymous policy"}}}, "put": {"tags": ["administration"], "summary": "Replace the default anonymous ACL", "security": [{"basicAuth": []}, {"sessionCookie": []}], "parameters": [{"$ref": "#/components/parameters/csrf"}], "responses": {"200": {"description": "Anonymous policy updated"}}}},
+    "/api/v1/system/health": {"get": {"tags": ["administration"], "summary": "Detailed storage, attachment, delivery, and Web Push health", "security": [{"basicAuth": []}, {"sessionCookie": []}], "responses": {"200": {"description": "Healthy"}, "503": {"description": "A dependency is unavailable"}}}},
+    "/api/v1/delivery-jobs": {"get": {"tags": ["administration"], "summary": "Inspect durable Web Push and mobile relay jobs without message payloads", "security": [{"basicAuth": []}, {"sessionCookie": []}], "parameters": [{"name": "kind", "in": "query", "schema": {"type": "string", "enum": ["webpush", "mobile_relay"]}}], "responses": {"200": {"description": "Delivery job page"}}}},
+    "/api/v1/attachments": {"get": {"tags": ["administration"], "summary": "List attachment metadata", "security": [{"basicAuth": []}, {"sessionCookie": []}], "parameters": [{"$ref": "#/components/parameters/cursor"}, {"$ref": "#/components/parameters/limit"}], "responses": {"200": {"description": "Attachment page"}}}},
+    "/api/v1/attachments/{key}": {"delete": {"tags": ["administration"], "summary": "Delete an attachment object", "security": [{"basicAuth": []}, {"sessionCookie": []}], "parameters": [{"name": "key", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, {"$ref": "#/components/parameters/csrf"}], "responses": {"204": {"description": "Attachment deleted"}, "404": {"$ref": "#/components/responses/Problem"}}}}
+  },
+  "components": {
+    "securitySchemes": {
+      "basicAuth": {"type": "http", "scheme": "basic"},
+      "bearerAuth": {"type": "http", "scheme": "bearer"},
+      "sessionCookie": {"type": "apiKey", "in": "cookie", "name": "notify_session"}
+    },
+    "parameters": {
+      "topic": {"name": "topic", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[-_A-Za-z0-9]{1,64}$"}},
+      "topics": {"name": "topics", "in": "path", "required": true, "schema": {"type": "string", "description": "Comma-separated topic names"}},
+      "since": {"name": "since", "in": "query", "schema": {"oneOf": [{"type": "string", "enum": ["all", "none", "latest"]}, {"type": "string", "pattern": "^[A-Za-z0-9]{10}$"}, {"type": "integer"}]}},
+      "csrf": {"name": "X-CSRF-Token", "in": "header", "required": false, "description": "Required for cookie-authenticated mutations", "schema": {"type": "string"}},
+      "cursor": {"name": "cursor", "in": "query", "schema": {"type": "string"}},
+      "limit": {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 100, "default": 50}}
+    },
+    "schemas": {
+      "Message": {"type": "object", "required": ["id", "time", "event", "topic"], "properties": {"id": {"type": "string", "pattern": "^[A-Za-z0-9]{10}$"}, "time": {"type": "integer"}, "expires": {"type": "integer"}, "event": {"type": "string", "enum": ["open", "keepalive", "message", "message_delete", "message_clear", "poll_request"]}, "topic": {"type": "string"}, "message": {"type": "string"}, "title": {"type": "string"}, "priority": {"type": "integer", "minimum": 1, "maximum": 5}, "tags": {"type": "array", "items": {"type": "string"}}, "markdown": {"type": "boolean"}, "sequence_id": {"type": "string"}}},
+      "SetupRequest": {"type": "object", "required": ["token", "username", "password"], "properties": {"token": {"type": "string", "writeOnly": true}, "username": {"type": "string", "minLength": 1, "maxLength": 64}, "password": {"type": "string", "format": "password", "writeOnly": true, "minLength": 12}, "anonymous_access": {"type": "string", "enum": ["deny", "read", "write", "read-write"], "default": "deny"}}},
+      "LoginRequest": {"type": "object", "required": ["username", "password"], "properties": {"username": {"type": "string"}, "password": {"type": "string", "format": "password", "writeOnly": true}}},
+      "NewUser": {"type": "object", "required": ["username", "password"], "properties": {"username": {"type": "string"}, "password": {"type": "string", "format": "password", "writeOnly": true, "minLength": 12}, "role": {"type": "string", "enum": ["user", "admin"], "default": "user"}}},
+      "WebPushSubscription": {"type": "object", "required": ["endpoint", "auth", "p256dh", "topics"], "properties": {"endpoint": {"type": "string", "format": "uri"}, "auth": {"type": "string", "writeOnly": true}, "p256dh": {"type": "string", "writeOnly": true}, "topics": {"type": "array", "maxItems": 50, "items": {"type": "string", "pattern": "^[-_A-Za-z0-9]{1,64}$"}}}},
+      "NtfyError": {"type": "object", "required": ["code", "http", "error"], "properties": {"code": {"type": "integer"}, "http": {"type": "integer"}, "error": {"type": "string"}, "link": {"type": "string", "format": "uri"}}},
+      "Problem": {"type": "object", "required": ["type", "title", "status", "detail"], "properties": {"type": {"type": "string", "format": "uri-reference"}, "title": {"type": "string"}, "status": {"type": "integer"}, "detail": {"type": "string"}}}
+    },
+    "responses": {
+      "NtfyError": {"description": "ntfy-compatible error", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/NtfyError"}}}},
+      "Problem": {"description": "RFC 9457 problem details", "content": {"application/problem+json": {"schema": {"$ref": "#/components/schemas/Problem"}}}}
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{"name":"plaintext_publish","method":"POST","path":"/__TOPIC__","body":"deployment complete","content_type":"text/plain","normalizer":"message"}
+{"name":"plaintext_poll","method":"GET","path":"/__TOPIC__/json?poll=1","body":"","content_type":"","normalizer":"ndjson"}
+{"name":"metadata_publish","method":"POST","path":"/__TOPIC___meta","body":"high priority","content_type":"text/plain","headers":{"X-Title":"Release","X-Priority":"high","X-Tags":"warning,deploy","X-Markdown":"yes"},"normalizer":"message"}
+{"name":"metadata_poll","method":"GET","path":"/__TOPIC___meta/json?poll=1","body":"","content_type":"","normalizer":"ndjson"}
+{"name":"json_publish","method":"POST","path":"/","body":"{\"topic\":\"__TOPIC___json\",\"message\":\"from json\",\"priority\":4,\"tags\":[\"test\"]}","content_type":"application/json","normalizer":"message"}
+{"name":"json_poll","method":"GET","path":"/__TOPIC___json/json?poll=1","body":"","content_type":"","normalizer":"ndjson"}
+{"name":"webhook_alias","method":"GET","path":"/__TOPIC___hook/trigger?message=triggered&title=Hook","body":"","content_type":"","normalizer":"message"}
+{"name":"invalid_topic","method":"POST","path":"/invalid.topic","body":"bad","content_type":"text/plain","normalizer":"error"}

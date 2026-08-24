@@ -1,0 +1,49 @@
+---
+name: Feature request
+description: Propose a focused capability or compatibility improvement.
+title: "feature: "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the concrete user or operator problem.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Include protocol, configuration, UI, and operational details where relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Primary area
+      options:
+        - ntfy compatibility
+        - Pub/sub and delivery
+        - Authentication and ACL
+        - Attachments
+        - PostgreSQL clustering
+        - Web UI and accessibility
+        - Operations and packaging
+        - Documentation
+    validations:
+      required: true
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Project boundaries
+      options:
+        - label: The proposal does not require a hosted SaaS, billing, tracking, or a proprietary mobile app.
+          required: true
+        - label: I have described any new external communication or credential requirement.
+          required: true

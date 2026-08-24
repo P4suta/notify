@@ -1,0 +1,435 @@
+import gleam/dynamic/decode
+import gleam/erlang/process.{type Subject}
+import gleam/list
+import gleam/option.{None, Some}
+import gleam/otp/actor
+import gleam/result
+import notify/delivery.{type Job, type Store}
+import sqlight.{type Connection}
+
+type Command {
+  Enqueue(delivery.NewJob, Subject(Result(Job, delivery.Error)))
+  Claim(
+    delivery.Kind,
+    String,
+    Int,
+    Int,
+    Int,
+    Subject(Result(List(Job), delivery.Error)),
+  )
+  Complete(String, String, Subject(Result(Nil, delivery.Error)))
+  Fail(
+    String,
+    String,
+    Int,
+    String,
+    Int,
+    Int,
+    Subject(Result(Job, delivery.Error)),
+  )
+  List(delivery.Kind, Subject(Result(List(Job), delivery.Error)))
+  Health(Subject(Result(Nil, delivery.Error)))
+}
+
+const migration = "
+PRAGMA journal_mode=WAL;
+PRAGMA busy_timeout=5000;
+
+CREATE TABLE IF NOT EXISTS delivery_outbox (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('webpush', 'mobile_relay')),
+  endpoint TEXT NOT NULL,
+  payload BLOB NOT NULL,
+  message_id TEXT NOT NULL,
+  topic_hash TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('pending', 'leased', 'dead_letter')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  available_at INTEGER NOT NULL,
+  lease_owner TEXT,
+  lease_until INTEGER,
+  last_error TEXT,
+  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+);
+CREATE INDEX IF NOT EXISTS delivery_outbox_claim
+  ON delivery_outbox(kind, state, available_at, lease_until, created_at);
+"
+
+pub fn start(path: String) -> Result(Store, delivery.Error) {
+  use connection <- result.try(
+    sqlight.open(path) |> result.map_error(map_error),
+  )
+  case sqlight.exec(migration, connection) {
+    Error(error) -> {
+      let _ = sqlight.close(connection)
+      Error(map_error(error))
+    }
+    Ok(_) -> start_actor(connection)
+  }
+}
+
+fn start_actor(connection: Connection) -> Result(Store, delivery.Error) {
+  use started <- result.try(
+    actor.new(connection)
+    |> actor.on_message(handle)
+    |> actor.start
+    |> result.map_error(fn(_) {
+      delivery.Unavailable("SQLite delivery actor failed to start")
+    }),
+  )
+  let subject = started.data
+  Ok(
+    delivery.Store(
+      enqueue: fn(job) {
+        process.call(subject, 10_000, fn(reply) { Enqueue(job, reply) })
+      },
+      claim: fn(kind, owner, now, lease_seconds, limit) {
+        process.call(subject, 10_000, fn(reply) {
+          Claim(kind, owner, now, lease_seconds, limit, reply)
+        })
+      },
+      complete: fn(id, owner) {
+        process.call(subject, 10_000, fn(reply) { Complete(id, owner, reply) })
+      },
+      fail: fn(id, owner, now, detail, max_attempts, base_delay) {
+        process.call(subject, 10_000, fn(reply) {
+          Fail(id, owner, now, detail, max_attempts, base_delay, reply)
+        })
+      },
+      list: fn(kind) {
+        process.call(subject, 10_000, fn(reply) { List(kind, reply) })
+      },
+      health: fn() { process.call(subject, 10_000, Health) },
+    ),
+  )
+}
+
+fn handle(
+  connection: Connection,
+  command: Command,
+) -> actor.Next(Connection, Command) {
+  case command {
+    Enqueue(job, reply) -> process.send(reply, enqueue(connection, job))
+    Claim(kind, owner, now, lease_seconds, limit, reply) ->
+      process.send(
+        reply,
+        claim(connection, kind, owner, now, lease_seconds, limit),
+      )
+    Complete(id, owner, reply) ->
+      process.send(reply, complete(connection, id, owner))
+    Fail(id, owner, now, detail, max_attempts, base_delay, reply) ->
+      process.send(
+        reply,
+        fail(connection, id, owner, now, detail, max_attempts, base_delay),
+      )
+    List(kind, reply) -> process.send(reply, list_jobs(connection, kind))
+    Health(reply) -> process.send(reply, health(connection))
+  }
+  actor.continue(connection)
+}
+
+fn enqueue(
+  connection: Connection,
+  new_job: delivery.NewJob,
+) -> Result(Job, delivery.Error) {
+  let job = delivery.job_from_new(new_job)
+  sqlight.query(
+    "INSERT INTO delivery_outbox(id, kind, endpoint, payload, message_id, topic_hash, state, attempts, available_at) VALUES (?, ?, ?, ?, ?, ?, 'pending', 0, ?)",
+    on: connection,
+    with: [
+      sqlight.text(job.id),
+      sqlight.text(kind_string(job.kind)),
+      sqlight.text(job.endpoint),
+      sqlight.blob(job.payload),
+      sqlight.text(job.message_id),
+      sqlight.text(job.topic_hash),
+      sqlight.int(job.available_at),
+    ],
+    expecting: decode.dynamic,
+  )
+  |> result.map(fn(_) { job })
+  |> result.map_error(map_error)
+}
+
+fn claim(
+  connection: Connection,
+  kind: delivery.Kind,
+  owner: String,
+  now: Int,
+  lease_seconds: Int,
+  limit: Int,
+) -> Result(List(Job), delivery.Error) {
+  transaction(connection, fn() {
+    use jobs <- result.try(
+      sqlight.query(
+        "SELECT id, kind, endpoint, payload, message_id, topic_hash, state, attempts, available_at, lease_owner, lease_until, last_error FROM delivery_outbox WHERE kind = ? AND ((state = 'pending' AND available_at <= ?) OR (state = 'leased' AND lease_until <= ?)) ORDER BY created_at, id LIMIT ?",
+        on: connection,
+        with: [
+          sqlight.text(kind_string(kind)),
+          sqlight.int(now),
+          sqlight.int(now),
+          sqlight.int(max(0, limit)),
+        ],
+        expecting: job_decoder(),
+      )
+      |> result.map_error(map_error),
+    )
+    list.try_map(jobs, fn(job) {
+      use _ <- result.try(
+        sqlight.query(
+          "UPDATE delivery_outbox SET state = 'leased', lease_owner = ?, lease_until = ? WHERE id = ?",
+          on: connection,
+          with: [
+            sqlight.text(owner),
+            sqlight.int(now + lease_seconds),
+            sqlight.text(job.id),
+          ],
+          expecting: decode.dynamic,
+        )
+        |> result.map_error(map_error),
+      )
+      Ok(
+        delivery.Job(
+          ..job,
+          state: delivery.Leased,
+          lease_owner: Some(owner),
+          lease_until: Some(now + lease_seconds),
+        ),
+      )
+    })
+  })
+}
+
+fn complete(
+  connection: Connection,
+  id: String,
+  owner: String,
+) -> Result(Nil, delivery.Error) {
+  transaction(connection, fn() {
+    use job <- result.try(find_job(connection, id))
+    case job.state == delivery.Leased && job.lease_owner == Some(owner) {
+      False -> Error(delivery.LeaseLost)
+      True ->
+        sqlight.query(
+          "DELETE FROM delivery_outbox WHERE id = ?",
+          on: connection,
+          with: [sqlight.text(id)],
+          expecting: decode.dynamic,
+        )
+        |> result.map(fn(_) { Nil })
+        |> result.map_error(map_error)
+    }
+  })
+}
+
+fn fail(
+  connection: Connection,
+  id: String,
+  owner: String,
+  now: Int,
+  detail: String,
+  max_attempts: Int,
+  base_delay: Int,
+) -> Result(Job, delivery.Error) {
+  transaction(connection, fn() {
+    use job <- result.try(find_job(connection, id))
+    case job.state == delivery.Leased && job.lease_owner == Some(owner) {
+      False -> Error(delivery.LeaseLost)
+      True -> {
+        let attempts = job.attempts + 1
+        let #(state, available_at) = case attempts >= max_attempts {
+          True -> #(delivery.DeadLetter, job.available_at)
+          False -> #(
+            delivery.Pending,
+            now + delivery.retry_delay(base_delay, attempts),
+          )
+        }
+        let updated =
+          delivery.Job(
+            ..job,
+            state:,
+            attempts:,
+            available_at:,
+            lease_owner: None,
+            lease_until: None,
+            last_error: Some(detail),
+          )
+        use _ <- result.try(
+          sqlight.query(
+            "UPDATE delivery_outbox SET state = ?, attempts = ?, available_at = ?, lease_owner = NULL, lease_until = NULL, last_error = ? WHERE id = ?",
+            on: connection,
+            with: [
+              sqlight.text(state_string(state)),
+              sqlight.int(attempts),
+              sqlight.int(available_at),
+              sqlight.text(detail),
+              sqlight.text(id),
+            ],
+            expecting: decode.dynamic,
+          )
+          |> result.map_error(map_error),
+        )
+        Ok(updated)
+      }
+    }
+  })
+}
+
+fn find_job(connection: Connection, id: String) -> Result(Job, delivery.Error) {
+  use jobs <- result.try(
+    sqlight.query(
+      "SELECT id, kind, endpoint, payload, message_id, topic_hash, state, attempts, available_at, lease_owner, lease_until, last_error FROM delivery_outbox WHERE id = ?",
+      on: connection,
+      with: [sqlight.text(id)],
+      expecting: job_decoder(),
+    )
+    |> result.map_error(map_error),
+  )
+  one(jobs)
+}
+
+fn list_jobs(
+  connection: Connection,
+  kind: delivery.Kind,
+) -> Result(List(Job), delivery.Error) {
+  sqlight.query(
+    "SELECT id, kind, endpoint, payload, message_id, topic_hash, state, attempts, available_at, lease_owner, lease_until, last_error FROM delivery_outbox WHERE kind = ? ORDER BY created_at, id",
+    on: connection,
+    with: [sqlight.text(kind_string(kind))],
+    expecting: job_decoder(),
+  )
+  |> result.map_error(map_error)
+}
+
+fn job_decoder() -> decode.Decoder(Job) {
+  use id <- decode.field(0, decode.string)
+  use raw_kind <- decode.field(1, decode.string)
+  use endpoint <- decode.field(2, decode.string)
+  use payload <- decode.field(3, decode.bit_array)
+  use message_id <- decode.field(4, decode.string)
+  use topic_hash <- decode.field(5, decode.string)
+  use raw_state <- decode.field(6, decode.string)
+  use attempts <- decode.field(7, decode.int)
+  use available_at <- decode.field(8, decode.int)
+  use lease_owner <- decode.field(9, decode.optional(decode.string))
+  use lease_until <- decode.field(10, decode.optional(decode.int))
+  use last_error <- decode.field(11, decode.optional(decode.string))
+  case parse_kind(raw_kind), parse_state(raw_state) {
+    Ok(kind), Ok(state) ->
+      decode.success(delivery.Job(
+        id:,
+        kind:,
+        endpoint:,
+        payload:,
+        message_id:,
+        topic_hash:,
+        state:,
+        attempts:,
+        available_at:,
+        lease_owner:,
+        lease_until:,
+        last_error:,
+      ))
+    _, _ ->
+      decode.failure(
+        delivery.Job(
+          id: "",
+          kind: delivery.WebPush,
+          endpoint: "",
+          payload: <<>>,
+          message_id: "",
+          topic_hash: "",
+          state: delivery.DeadLetter,
+          attempts: 0,
+          available_at: 0,
+          lease_owner: None,
+          lease_until: None,
+          last_error: None,
+        ),
+        expected: "delivery outbox enum",
+      )
+  }
+}
+
+fn transaction(
+  connection: Connection,
+  work: fn() -> Result(a, delivery.Error),
+) -> Result(a, delivery.Error) {
+  use _ <- result.try(
+    sqlight.exec("BEGIN IMMEDIATE", connection) |> result.map_error(map_error),
+  )
+  case work() {
+    Error(error) -> {
+      let _ = sqlight.exec("ROLLBACK", connection)
+      Error(error)
+    }
+    Ok(value) ->
+      case sqlight.exec("COMMIT", connection) {
+        Ok(_) -> Ok(value)
+        Error(error) -> {
+          let _ = sqlight.exec("ROLLBACK", connection)
+          Error(map_error(error))
+        }
+      }
+  }
+}
+
+fn health(connection: Connection) -> Result(Nil, delivery.Error) {
+  sqlight.query("SELECT 1", on: connection, with: [], expecting: decode.dynamic)
+  |> result.map(fn(_) { Nil })
+  |> result.map_error(map_error)
+}
+
+fn one(jobs: List(Job)) -> Result(Job, delivery.Error) {
+  case jobs {
+    [job] -> Ok(job)
+    [] -> Error(delivery.NotFound)
+    _ -> Error(delivery.Unavailable("duplicate delivery job"))
+  }
+}
+
+fn kind_string(kind: delivery.Kind) -> String {
+  case kind {
+    delivery.WebPush -> "webpush"
+    delivery.MobileRelay -> "mobile_relay"
+  }
+}
+
+fn parse_kind(value: String) -> Result(delivery.Kind, Nil) {
+  case value {
+    "webpush" -> Ok(delivery.WebPush)
+    "mobile_relay" -> Ok(delivery.MobileRelay)
+    _ -> Error(Nil)
+  }
+}
+
+fn state_string(state: delivery.State) -> String {
+  case state {
+    delivery.Pending -> "pending"
+    delivery.Leased -> "leased"
+    delivery.DeadLetter -> "dead_letter"
+  }
+}
+
+fn parse_state(value: String) -> Result(delivery.State, Nil) {
+  case value {
+    "pending" -> Ok(delivery.Pending)
+    "leased" -> Ok(delivery.Leased)
+    "dead_letter" -> Ok(delivery.DeadLetter)
+    _ -> Error(Nil)
+  }
+}
+
+fn max(first: Int, second: Int) -> Int {
+  case first > second {
+    True -> first
+    False -> second
+  }
+}
+
+fn map_error(error: sqlight.Error) -> delivery.Error {
+  let sqlight.SqlightError(code:, message:, ..) = error
+  case code {
+    sqlight.Constraint | sqlight.ConstraintUnique -> delivery.Conflict
+    _ -> delivery.Unavailable(message)
+  }
+}

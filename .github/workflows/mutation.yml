@@ -1,0 +1,62 @@
+---
+name: Mutation
+
+on:
+  pull_request:
+  schedule:
+    - cron: "23 19 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutation-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GLEAM_VERSION: "1.18.1"
+  OTP_VERSION: "29.0.5"
+
+jobs:
+  mutation:
+    name: Mutation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Gleam and Erlang
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          rebar3-version: "3"
+      - name: Download dependencies
+        working-directory: packages/notify_core
+        run: gleam deps download
+      - name: Run strict mutation gate
+        working-directory: packages/notify_core
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            if git diff --quiet "origin/$BASE_REF"...HEAD -- src; then
+              echo 'No notify_core source changes; mutation gate is not needed.'
+              exit 0
+            fi
+            gleam run -m gleam_mutants -- run --strict --changed "origin/$BASE_REF"
+          else
+            gleam run -m gleam_mutants -- run --strict
+          fi
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mutation-report-${{ github.run_id }}
+          path: packages/notify_core/reports/mutation
+          if-no-files-found: ignore
+          retention-days: 14

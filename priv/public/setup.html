@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Set up Notify</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body class="setup-body">
+  <main class="setup-card" aria-labelledby="setup-title">
+    <p class="eyebrow">Notify / 初期設定</p>
+    <h1 id="setup-title">Create the first administrator</h1>
+    <p class="muted">This one-time link expires after 15 minutes. / このリンクは15分で失効します。</p>
+    <form id="setup-form">
+      <label>Username / ユーザー名<input name="username" autocomplete="username" required maxlength="64"></label>
+      <label>Password / パスワード<input name="password" type="password" autocomplete="new-password" minlength="12" required></label>
+      <label>Anonymous access / 匿名アクセス
+        <select name="anonymous_access">
+          <option value="deny">Deny all / すべて拒否</option>
+          <option value="read">Read only / 読み取りのみ</option>
+          <option value="write">Write only / 書き込みのみ</option>
+          <option value="read-write">Read and write / 読み書き</option>
+        </select>
+      </label>
+      <button type="submit">Complete setup / 設定を完了</button>
+      <output id="setup-status" role="status" aria-live="polite"></output>
+    </form>
+  </main>
+  <script src="/setup.js" defer></script>
+</body>
+</html>

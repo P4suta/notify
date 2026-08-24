@@ -1,0 +1,20 @@
+services:
+  notify:
+    build: .
+    environment:
+      NOTIFY_BIND: 0.0.0.0
+      NOTIFY_BASE_URL: http://localhost:18082
+      NOTIFY_DATABASE_BACKEND: sqlite
+      NOTIFY_DATABASE_PATH: /data/notify.db
+      NOTIFY_ATTACHMENT_BACKEND: filesystem
+      NOTIFY_ATTACHMENT_DIRECTORY: /data/attachments
+      NOTIFY_WEBPUSH_PUBLIC_KEY: BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8
+      NOTIFY_WEBPUSH_PRIVATE_KEY: yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw
+      NOTIFY_WEBPUSH_SUBSCRIBER: mailto:admin@example.test
+    ports:
+      - "127.0.0.1:18082:8080"
+    volumes:
+      - notify-e2e-data:/data
+
+volumes:
+  notify-e2e-data:

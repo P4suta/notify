@@ -1,0 +1,8 @@
+* text=auto eol=lf
+
+*.ps1 text eol=crlf
+priv/public/notify_web.js linguist-generated=true
+manifest.toml linguist-generated=true
+packages/notify_core/manifest.toml linguist-generated=true
+web/manifest.toml linguist-generated=true
+test/e2e/package-lock.json linguist-generated=true

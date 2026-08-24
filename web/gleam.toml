@@ -1,0 +1,53 @@
+name = "notify_web"
+version = "0.1.0"
+target = "javascript"
+description = "Lustre PWA for Notify"
+licences = ["Apache-2.0"]
+
+[dependencies]
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+gleam_json = ">= 3.1.0 and < 4.0.0"
+lustre = ">= 5.7.1 and < 6.0.0"
+
+[dev-dependencies]
+gleeunit = ">= 1.9.0 and < 2.0.0"
+lustre_dev_tools = ">= 2.3.6 and < 3.0.0"
+
+[tools.lustre]
+entry = "notify_web"
+
+[tools.glinter]
+stats = true
+warnings_as_errors = true
+include = ["src/"]
+
+[tools.glinter.rules]
+avoid_panic = "error"
+avoid_todo = "error"
+division_by_zero = "error"
+echo = "warning"
+duplicate_import = "warning"
+unnecessary_variable = "warning"
+redundant_case = "warning"
+unnecessary_string_concatenation = "warning"
+trailing_underscore = "warning"
+assert_ok_pattern = "off"
+error_context_lost = "off"
+thrown_away_error = "off"
+stringly_typed_error = "off"
+discarded_result = "off"
+unwrap_used = "off"
+panic_without_message = "off"
+todo_without_message = "off"
+string_inspect = "off"
+short_variable_name = "off"
+prefer_guard_clause = "off"
+missing_type_annotation = "off"
+deep_nesting = "off"
+function_complexity = "off"
+module_complexity = "off"
+label_possible = "off"
+missing_labels = "off"
+unqualified_import = "off"
+unused_exports = "off"
+ffi_usage = "off"

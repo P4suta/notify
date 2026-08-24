@@ -1,0 +1,122 @@
+---
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GLEAM_VERSION: "1.18.1"
+  OTP_VERSION: "29.0.5"
+
+jobs:
+  server:
+    name: Server
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Gleam and Erlang
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          rebar3-version: "3"
+      - name: Download dependencies
+        run: gleam deps download
+      - name: Check formatting
+        run: >-
+          gleam format --check src test
+          packages/notify_core/src packages/notify_core/test
+      - name: Lint production packages
+        run: test/lint.sh
+      - name: Test server and adapters
+        run: gleam test
+      - name: Validate scripts, JavaScript, and OpenAPI
+        run: |
+          rg --files src test packages packaging web -g '*.sh' -g '*.bash' | xargs -r -n1 bash -n
+          rg --files src web/src test/e2e -g '*.mjs' -g '*.js' | xargs -r -n1 node --check
+          jq -e . priv/public/openapi.json >/dev/null
+
+  core:
+    name: Core
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: packages/notify_core
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Gleam and Erlang
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          rebar3-version: "3"
+      - name: Download dependencies
+        run: gleam deps download
+      - name: Test domain, properties, and snapshots
+        run: gleam test
+      - name: Reject unreviewed snapshots
+        run: |
+          if find birdie_snapshots -type f -name '*.new' -print -quit | grep -q .; then
+            echo 'Unreviewed Birdie snapshot found' >&2
+            exit 1
+          fi
+
+  web:
+    name: Web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Gleam and Erlang
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          rebar3-version: "3"
+      - name: Download dependencies
+        run: gleam deps download
+      - name: Test Lustre application
+        run: gleam test
+      - name: Check formatting
+        run: gleam format --check src test
+
+  container:
+    name: Container
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check Dockerfile
+        run: docker build --check .
+      - name: Build local image
+        run: docker build --tag notify:ci .
+      - name: Smoke-test image entrypoint
+        run: docker run --rm notify:ci run help

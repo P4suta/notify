@@ -1,0 +1,140 @@
+import gleam/bit_array
+import gleam/list
+import gleam/option.{Some}
+import gleam/string
+import notify/delivery
+import notify/delivery/memory
+import notify/delivery/relay
+import notify/delivery/sqlite
+import notify/delivery/worker
+
+fn pending(id: String) -> delivery.NewJob {
+  delivery.NewJob(
+    id:,
+    kind: delivery.MobileRelay,
+    endpoint: "https://upstream.example/v1/relay",
+    payload: <<"{}":utf8>>,
+    message_id: "Message001",
+    topic_hash: "hash",
+    available_at: 100,
+  )
+}
+
+pub fn lease_expiry_retry_and_dead_letter_contract_test() {
+  let assert Ok(outbox) = memory.start()
+  let assert Ok(_) = outbox.enqueue(pending("job-1"))
+
+  let assert Ok([first]) =
+    outbox.claim(delivery.MobileRelay, "worker-a", 100, 30, 10)
+  assert first.state == delivery.Leased
+  assert first.lease_until == Some(130)
+  assert outbox.claim(delivery.MobileRelay, "worker-b", 120, 30, 10) == Ok([])
+
+  let assert Ok([reclaimed]) =
+    outbox.claim(delivery.MobileRelay, "worker-b", 130, 30, 10)
+  assert reclaimed.lease_owner == Some("worker-b")
+  let assert Ok(retry) =
+    outbox.fail("job-1", "worker-b", 131, "upstream unavailable", 2, 10)
+  assert retry.state == delivery.Pending
+  assert retry.attempts == 1
+  assert retry.available_at == 141
+  assert outbox.claim(delivery.MobileRelay, "worker-a", 140, 30, 10) == Ok([])
+
+  let assert Ok([second]) =
+    outbox.claim(delivery.MobileRelay, "worker-a", 141, 30, 10)
+  let assert Ok(dead) =
+    outbox.fail(second.id, "worker-a", 142, "still unavailable", 2, 10)
+  assert dead.state == delivery.DeadLetter
+  assert dead.attempts == 2
+  assert outbox.claim(delivery.MobileRelay, "worker-a", 1000, 30, 10) == Ok([])
+}
+
+pub fn completion_requires_current_lease_owner_test() {
+  let assert Ok(outbox) = memory.start()
+  let assert Ok(_) = outbox.enqueue(pending("job-2"))
+  let assert Ok(_) = outbox.claim(delivery.MobileRelay, "worker-a", 100, 30, 1)
+  assert outbox.complete("job-2", "worker-b") == Error(delivery.LeaseLost)
+  assert outbox.complete("job-2", "worker-a") == Ok(Nil)
+  let assert Ok(jobs) = outbox.list(delivery.MobileRelay)
+  assert list.is_empty(jobs)
+}
+
+pub fn sqlite_outbox_implements_lease_and_completion_contract_test() {
+  let assert Ok(outbox) = sqlite.start(":memory:")
+  let assert Ok(_) = outbox.enqueue(pending("sqlite-job"))
+  let assert Ok([claimed]) =
+    outbox.claim(delivery.MobileRelay, "sqlite-worker", 100, 30, 1)
+  assert claimed.lease_until == Some(130)
+  assert outbox.complete(claimed.id, "other-worker")
+    == Error(delivery.LeaseLost)
+  assert outbox.complete(claimed.id, "sqlite-worker") == Ok(Nil)
+  assert outbox.list(delivery.MobileRelay) == Ok([])
+  assert outbox.health() == Ok(Nil)
+}
+
+pub fn relay_payload_contains_no_message_content_or_topic_url_test() {
+  let payload =
+    relay.payload(
+      message_id: "Message001",
+      topic_url: "https://notify.example/private-alerts",
+    )
+  let assert Ok(text) = bit_array.to_string(payload)
+  assert string.contains(text, "\"message_id\":\"Message001\"")
+  assert string.contains(text, "\"topic_url_hash\":")
+  assert !string.contains(text, "private-alerts")
+  assert !string.contains(text, "message\"")
+}
+
+pub fn worker_records_retry_without_losing_the_durable_job_test() {
+  let assert Ok(outbox) = memory.start()
+  let assert Ok(_) = outbox.enqueue(pending("worker-job"))
+  let provider =
+    worker.Provider(kind: delivery.MobileRelay, deliver: fn(_) {
+      Error("HTTP 503")
+    })
+  let assert Ok(report) =
+    worker.run_once(
+      outbox,
+      provider,
+      worker_id: "worker-a",
+      now: 100,
+      lease_seconds: 30,
+      limit: 10,
+      max_attempts: 3,
+      base_delay_seconds: 10,
+    )
+  assert report.claimed == 1
+  assert report.delivered == 0
+  assert report.retried == 1
+  assert report.dead_lettered == 0
+  let assert Ok([job]) = outbox.list(delivery.MobileRelay)
+  assert job.last_error == Some("HTTP 503")
+}
+
+pub fn mobile_relay_provider_sends_only_poll_id_and_prehashed_endpoint_test() {
+  let sender =
+    relay.Sender(fn(endpoint, token, poll_id) {
+      assert endpoint == "https://upstream.example/safe-topic-hash"
+      assert token == "tk_upstream"
+      assert poll_id == "Message001"
+      Ok(200)
+    })
+  let provider = relay.provider("tk_upstream", sender)
+  let private_job =
+    delivery.job_from_new(delivery.NewJob(
+      id: "relay-private",
+      kind: delivery.MobileRelay,
+      endpoint: "https://upstream.example/safe-topic-hash",
+      payload: <<"this content must never leave":utf8>>,
+      message_id: "Message001",
+      topic_hash: "safe-topic-hash",
+      available_at: 100,
+    ))
+  assert provider.deliver(private_job) == Ok(Nil)
+}
+
+pub fn mobile_relay_quota_response_is_retryable_test() {
+  let provider = relay.provider("", relay.Sender(fn(_, _, _) { Ok(429) }))
+  assert provider.deliver(delivery.job_from_new(pending("relay-quota")))
+    == Error("mobile relay HTTP 429")
+}

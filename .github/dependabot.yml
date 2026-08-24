@@ -1,0 +1,72 @@
+---
+version: 2
+
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:00"
+      timezone: Asia/Tokyo
+    groups:
+      actions:
+        patterns:
+          - "*"
+    labels:
+      - dependencies
+      - github-actions
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
+
+  - package-ecosystem: npm
+    directory: "/test/e2e"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:15"
+      timezone: Asia/Tokyo
+    groups:
+      browser-tests:
+        patterns:
+          - "*"
+    labels:
+      - dependencies
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
+
+  - package-ecosystem: mix
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:30"
+      timezone: Asia/Tokyo
+    groups:
+      native-packaging:
+        patterns:
+          - "*"
+    labels:
+      - dependencies
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: build
+
+  - package-ecosystem: docker
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "04:45"
+      timezone: Asia/Tokyo
+    groups:
+      containers:
+        patterns:
+          - "*"
+    labels:
+      - dependencies
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build

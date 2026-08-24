@@ -1,0 +1,5 @@
+---
+version: 1.5.5
+title: publish validation errors
+---
+[Error(InvalidJson), Error(InvalidTopic(InvalidCharacter("/"))), Error(InvalidPriority(9))]

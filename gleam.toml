@@ -1,0 +1,58 @@
+name = "notify"
+version = "0.1.0"
+target = "erlang"
+description = "A self-hosted ntfy-compatible notification server written in Gleam"
+licences = ["Apache-2.0"]
+
+[dependencies]
+argus = ">= 1.0.4 and < 2.0.0"
+beecrypt = ">= 0.4.0 and < 1.0.0"
+gleam_stdlib = ">= 1.0.0 and < 2.0.0"
+gleam_erlang = ">= 1.3.0 and < 2.0.0"
+gleam_http = ">= 4.3.0 and < 5.0.0"
+gleam_json = ">= 3.1.0 and < 4.0.0"
+gleam_otp = ">= 1.3.0 and < 2.0.0"
+mist = ">= 6.0.3 and < 7.0.0"
+notify_core = { path = "packages/notify_core" }
+sqlight = ">= 1.1.0 and < 2.0.0"
+postgleam = ">= 0.8.0 and < 1.0.0"
+
+[dev-dependencies]
+gleeunit = ">= 1.9.0 and < 2.0.0"
+glinter = ">= 2.19.2 and < 3.0.0"
+
+[tools.glinter]
+stats = true
+warnings_as_errors = true
+include = ["src/"]
+
+[tools.glinter.rules]
+avoid_panic = "error"
+avoid_todo = "error"
+division_by_zero = "error"
+echo = "warning"
+duplicate_import = "warning"
+unnecessary_variable = "warning"
+redundant_case = "warning"
+unnecessary_string_concatenation = "warning"
+trailing_underscore = "warning"
+assert_ok_pattern = "off"
+error_context_lost = "off"
+thrown_away_error = "off"
+stringly_typed_error = "off"
+discarded_result = "off"
+unwrap_used = "off"
+panic_without_message = "off"
+todo_without_message = "off"
+string_inspect = "off"
+short_variable_name = "off"
+prefer_guard_clause = "off"
+missing_type_annotation = "off"
+deep_nesting = "off"
+function_complexity = "off"
+module_complexity = "off"
+label_possible = "off"
+missing_labels = "off"
+unqualified_import = "off"
+unused_exports = "off"
+ffi_usage = "off"

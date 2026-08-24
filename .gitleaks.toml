@@ -1,0 +1,14 @@
+title = "Notify secret scanning policy"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Deterministic, public Web Push and token fixtures used only by isolated tests"
+regexTarget = "secret"
+regexes = [
+  '''^yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw$''',
+  '''^kSC3T8aN1JCQxxPdrFLrZg$''',
+  '''^BTBZMqHH6r4Tts7J_aSIgg$''',
+  '''^ZYXWVUTSRQPONMLKJIHGFEDCBA987$''',
+]

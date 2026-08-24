@@ -1,0 +1,56 @@
+---
+name: ntfy compatibility
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - compose.compat.yml
+      - Dockerfile
+      - src/**
+      - packages/notify_core/**
+      - test/compat/**
+      - .github/workflows/compatibility.yml
+  schedule:
+    - cron: "37 19 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compatibility-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compatibility:
+    name: Compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    env:
+      COMPOSE_PROJECT_NAME: notify-compat-${{ github.run_id }}
+      NOTIFY_COMPAT_OUTPUT: /tmp/notify-compat-${{ github.run_id }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Start pinned comparison stack
+        run: docker compose -f compose.compat.yml up --build --detach
+      - name: Compare with ntfy v2.27.0
+        run: test/compat/run.sh
+      - name: Print service logs after failure
+        if: failure()
+        run: docker compose -f compose.compat.yml logs --no-color
+      - name: Upload normalized fixtures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ntfy-compatibility-${{ github.run_id }}
+          path: /tmp/notify-compat-${{ github.run_id }}
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Remove comparison stack
+        if: always()
+        run: docker compose -f compose.compat.yml down --volumes --remove-orphans

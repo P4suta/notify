@@ -1,0 +1,15 @@
+.git
+.gitignore
+build
+data
+web/build
+web/dist
+web/node_modules
+*.db
+*.db-shm
+*.db-wal
+.env
+compose*.yml
+packaging/native/_build
+packaging/native/deps
+burrito_out

@@ -1,0 +1,73 @@
+---
+name: Bug report
+description: Report a reproducible defect in Notify.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Thanks for the report. Remove credentials, bearer tokens, setup URLs,
+        private topics, and personal data before submitting logs or config.
+  - type: input
+    id: revision
+    attributes:
+      label: Notify revision
+      description: Commit SHA or container image identifier. No releases are published yet.
+      placeholder: 0123456789abcdef
+    validations:
+      required: true
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment
+      options:
+        - Docker with SQLite
+        - Native with SQLite
+        - PostgreSQL active-active
+        - Development source checkout
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Provide the smallest deterministic sequence of requests or commands.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Include relevant logs, `notify doctor`, and configuration with all secrets removed.
+      render: text
+  - type: input
+    id: ntfy
+    attributes:
+      label: ntfy v2.27.0 comparison
+      description: For compatibility bugs, describe the pinned upstream behavior.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checklist
+      options:
+        - label: I searched existing issues and discussions.
+          required: true
+        - label: I removed secrets, tokens, setup URLs, and personal data.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

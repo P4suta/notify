@@ -1,0 +1,10 @@
+{
+  "name": "Notify",
+  "short_name": "Notify",
+  "description": "Private, ntfy-compatible notifications",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#101513",
+  "theme_color": "#101513",
+  "icons": []
+}
