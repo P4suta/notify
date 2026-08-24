@@ -2,6 +2,7 @@ import gleam/bit_array
 import gleam/erlang/process.{type Subject}
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/order
 import gleam/otp/actor
 import gleam/result
 import gleam/string
@@ -61,6 +62,16 @@ type Command {
     Subject(Result(attachment_store.Download, attachment_store.Error)),
   )
   List(Subject(Result(List(attachment_store.Stored), attachment_store.Error)))
+  Page(
+    Option(String),
+    Int,
+    Subject(
+      Result(
+        attachment_store.Page(attachment_store.Stored),
+        attachment_store.Error,
+      ),
+    ),
+  )
   Delete(String, Subject(Result(Nil, attachment_store.Error)))
   Cleanup(Int, Subject(Result(Int, attachment_store.Error)))
   Health(Subject(Result(Nil, attachment_store.Error)))
@@ -100,6 +111,9 @@ pub fn start(
         process.call(subject, 5000, fn(reply) { Get(key, range, reply) })
       },
       list: fn() { process.call(subject, 5000, List) },
+      page: fn(after, limit) {
+        process.call(subject, 5000, fn(reply) { Page(after, limit, reply) })
+      },
       delete: fn(key) {
         process.call(subject, 5000, fn(reply) { Delete(key, reply) })
       },
@@ -147,6 +161,10 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
     }
     List(reply) -> {
       process.send(reply, Ok(list_objects(state)))
+      actor.continue(state)
+    }
+    Page(after, limit, reply) -> {
+      process.send(reply, page_objects(state, after, limit))
       actor.continue(state)
     }
     Delete(key, reply) -> {
@@ -426,6 +444,33 @@ fn list_objects(state: State) -> List(attachment_store.Stored) {
     )
   })
   |> list.sort(fn(first, second) { string.compare(first.key, second.key) })
+}
+
+fn page_objects(
+  state: State,
+  after: Option(String),
+  limit: Int,
+) -> Result(
+  attachment_store.Page(attachment_store.Stored),
+  attachment_store.Error,
+) {
+  case attachment_store.valid_page(after, limit) {
+    False -> Error(attachment_store.InvalidPage)
+    True -> {
+      let selected = case after {
+        None -> list_objects(state)
+        Some(after) ->
+          list_objects(state)
+          |> list.filter(fn(item) {
+            string.compare(item.key, after) == order.Gt
+          })
+      }
+      Ok(attachment_store.Page(
+        items: list.take(selected, limit),
+        has_more: list.length(selected) > limit,
+      ))
+    }
+  }
 }
 
 fn find(objects: List(Object), key: String) -> Option(Object) {

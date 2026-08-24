@@ -87,10 +87,12 @@ within a delivery-kind filter, and content hash for attachments. Identity
 pages execute indexed `LIMIT (requested + 1)` keyset queries in both SQLite
 and PostgreSQL, so users, tokens, and ACL rules are bounded at the storage
 boundary. Delivery-job pages use the same bounded query strategy, including a
-`(kind, id)` index for filtered pages. The attachment store port still returns
-complete metadata sets before the HTTP keyset slice is applied; pushing that
-page into each attachment adapter remains necessary for very large
-administration inventories.
+`(kind, id)` index for filtered pages. Attachment pages read at most
+`limit + 1` metadata records: PostgreSQL uses its primary-key index, S3 uses
+ListObjectsV2 `start-after`/`max-keys`, and filesystem reads metadata only for
+the selected hash keys. Filesystem directory-name enumeration still scans and
+sorts the directory, so very large filesystem inventories should be sharded or
+use PostgreSQL/S3 until a persistent filesystem metadata index is available.
 
 ## Audit durability and redaction
 

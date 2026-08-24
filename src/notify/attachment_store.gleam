@@ -1,6 +1,6 @@
 import gleam/bit_array
 import gleam/list
-import gleam/option.{type Option}
+import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
 
@@ -24,6 +24,10 @@ pub type Stored {
   Stored(key: String, size: Int, expires: Int)
 }
 
+pub type Page(a) {
+  Page(items: List(a), has_more: Bool)
+}
+
 pub type ByteRange {
   ByteRange(start: Int, end: Int)
 }
@@ -37,6 +41,7 @@ pub type Error {
   QuotaExceeded(limit: Int)
   NotFound
   InvalidRange
+  InvalidPage
   Unavailable(String)
 }
 
@@ -50,6 +55,7 @@ pub type Store {
     head: fn(String) -> Result(Stored, Error),
     get: fn(String, Option(ByteRange)) -> Result(Download, Error),
     list: fn() -> Result(List(Stored), Error),
+    page: fn(Option(String), Int) -> Result(Page(Stored), Error),
     delete: fn(String) -> Result(Nil, Error),
     cleanup: fn(Int) -> Result(Int, Error),
     health: fn() -> Result(Nil, Error),
@@ -110,6 +116,15 @@ pub fn valid_content_key(key: String) -> Bool {
   && key
   |> string.to_graphemes
   |> list.all(fn(character) { string.contains(hexadecimal, character) })
+}
+
+pub fn valid_page(after: Option(String), limit: Int) -> Bool {
+  limit >= 1
+  && limit <= 100
+  && case after {
+    None -> True
+    Some(key) -> valid_content_key(key)
+  }
 }
 
 pub type Hasher

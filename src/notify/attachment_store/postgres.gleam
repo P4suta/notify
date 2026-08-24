@@ -59,6 +59,16 @@ type Command {
     Subject(Result(attachment_store.Download, attachment_store.Error)),
   )
   List(Subject(Result(List(attachment_store.Stored), attachment_store.Error)))
+  Page(
+    Option(String),
+    Int,
+    Subject(
+      Result(
+        attachment_store.Page(attachment_store.Stored),
+        attachment_store.Error,
+      ),
+    ),
+  )
   Delete(String, Subject(Result(Nil, attachment_store.Error)))
   Cleanup(Int, Subject(Result(Int, attachment_store.Error)))
   Health(Subject(Result(Nil, attachment_store.Error)))
@@ -152,6 +162,9 @@ fn start_actor(state: State) -> Result(Store, attachment_store.Error) {
         process.call(subject, 30_000, fn(reply) { Get(key, range, reply) })
       },
       list: fn() { process.call(subject, 30_000, List) },
+      page: fn(after, limit) {
+        process.call(subject, 30_000, fn(reply) { Page(after, limit, reply) })
+      },
       delete: fn(key) {
         process.call(subject, 30_000, fn(reply) { Delete(key, reply) })
       },
@@ -199,6 +212,10 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
     }
     List(reply) -> {
       process.send(reply, list_objects(state.connection))
+      actor.continue(state)
+    }
+    Page(after, limit, reply) -> {
+      process.send(reply, page_objects(state.connection, after, limit))
       actor.continue(state)
     }
     Delete(key, reply) -> {
@@ -832,6 +849,52 @@ fn list_objects(
   )
   |> result.map(fn(response) { response.rows })
   |> result.map_error(map_error)
+}
+
+fn page_objects(
+  connection: postgleam.Connection,
+  after: Option(String),
+  limit: Int,
+) -> Result(
+  attachment_store.Page(attachment_store.Stored),
+  attachment_store.Error,
+) {
+  case attachment_store.valid_page(after, limit) {
+    False -> Error(attachment_store.InvalidPage)
+    True -> {
+      let rows = case after {
+        None ->
+          postgleam.query_with(
+            connection,
+            "SELECT key, size, expires FROM notify_attachments ORDER BY key LIMIT $1",
+            [postgleam.int(limit + 1)],
+            stored_decoder(),
+          )
+        Some(after) ->
+          postgleam.query_with(
+            connection,
+            "SELECT key, size, expires FROM notify_attachments WHERE key > $1 ORDER BY key LIMIT $2",
+            [postgleam.text(after), postgleam.int(limit + 1)],
+            stored_decoder(),
+          )
+      }
+      rows
+      |> result.map(fn(response) {
+        attachment_store.Page(
+          items: list.take(response.rows, limit),
+          has_more: list.length(response.rows) > limit,
+        )
+      })
+      |> result.map_error(map_error)
+    }
+  }
+}
+
+fn stored_decoder() -> decode.RowDecoder(attachment_store.Stored) {
+  use key <- decode.element(0, decode.text)
+  use size <- decode.element(1, decode.int)
+  use expires <- decode.element(2, decode.int)
+  decode.success(attachment_store.Stored(key:, size:, expires:))
 }
 
 fn cleanup(

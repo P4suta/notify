@@ -755,6 +755,8 @@ pub fn error_message(error: Error) -> String {
       "attachment storage directory not found"
     AttachmentStartError(attachment_store.InvalidRange) ->
       "invalid attachment storage range"
+    AttachmentStartError(attachment_store.InvalidPage) ->
+      "invalid attachment storage page"
     AttachmentStartError(attachment_store.Unavailable(detail)) ->
       "attachment storage unavailable: " <> detail
     DeliveryStartError(delivery.NotFound) -> "delivery outbox record not found"

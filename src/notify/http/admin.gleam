@@ -1046,7 +1046,8 @@ fn list_attachments(
 ) -> Response(BitArray) {
   case keyset_request(req, "attachments") {
     Error(_) -> invalid_page()
-    Ok(page) ->
+    Ok(page) -> {
+      let KeysetRequest(after:, limit:, ..) = page
       case runtime.attachments {
         None ->
           keyset_response(
@@ -1056,7 +1057,8 @@ fn list_attachments(
             attachment_json,
           )
         Some(store) ->
-          case store.list() {
+          case store.page(after, limit) {
+            Error(attachment_store.InvalidPage) -> invalid_page()
             Error(_) ->
               problem(
                 503,
@@ -1064,7 +1066,7 @@ fn list_attachments(
                 "Could not list attachment metadata",
               )
             Ok(items) ->
-              keyset_response(
+              attachment_keyset_response(
                 page,
                 items,
                 fn(item) { item.key },
@@ -1072,6 +1074,7 @@ fn list_attachments(
               )
           }
       }
+    }
   }
 }
 
@@ -1297,6 +1300,25 @@ fn delivery_keyset_response(
 ) -> Response(BitArray) {
   let KeysetRequest(resource:, ..) = paging
   let delivery.Page(items:, has_more:) = stored
+  let next_cursor = case has_more {
+    False -> None
+    True ->
+      items
+      |> list.last
+      |> result.map(fn(item) { cursor.encode_key(resource, key(item)) })
+      |> option_from_result
+  }
+  page_response(items, next_cursor, encode)
+}
+
+fn attachment_keyset_response(
+  paging: KeysetRequest,
+  stored: attachment_store.Page(a),
+  key: fn(a) -> String,
+  encode: fn(a) -> json.Json,
+) -> Response(BitArray) {
+  let KeysetRequest(resource:, ..) = paging
+  let attachment_store.Page(items:, has_more:) = stored
   let next_cursor = case has_more {
     False -> None
     True ->

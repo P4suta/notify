@@ -1,4 +1,5 @@
 import gleam/bit_array
+import gleam/list
 import gleam/option.{None, Some}
 import gleam/result
 import gleam/string
@@ -96,12 +97,45 @@ fn empty_stream_contract(store: attachment_store.Store) {
   assert store.delete(stored.key) == Ok(Nil)
 }
 
+fn management_page_contract(store: attachment_store.Store) {
+  let assert Ok(existing) = store.list()
+  list.each(existing, fn(item) {
+    assert store.delete(item.key) == Ok(Nil)
+  })
+  let assert Ok(first) =
+    store.put(attachment_store.Upload(<<"page-a":utf8>>, expires: 300))
+  let assert Ok(second) =
+    store.put(attachment_store.Upload(<<"page-b":utf8>>, expires: 301))
+  let assert Ok(third) =
+    store.put(attachment_store.Upload(<<"page-c":utf8>>, expires: 302))
+  let expected =
+    [first, second, third]
+    |> list.sort(fn(left, right) { string.compare(left.key, right.key) })
+
+  let assert Ok(attachment_store.Page(first_page, True)) = store.page(None, 2)
+  assert first_page == list.take(expected, 2)
+  let assert Ok(after) = list.last(first_page)
+  let assert Ok(attachment_store.Page(second_page, False)) =
+    store.page(Some(after.key), 2)
+  assert second_page == list.drop(expected, 2)
+
+  assert store.page(None, 0) == Error(attachment_store.InvalidPage)
+  assert store.page(None, 101) == Error(attachment_store.InvalidPage)
+  assert store.page(Some("not-a-content-key"), 2)
+    == Error(attachment_store.InvalidPage)
+
+  list.each(expected, fn(item) {
+    assert store.delete(item.key) == Ok(Nil)
+  })
+}
+
 pub fn memory_attachment_store_contract_test() {
   let assert Ok(store) = memory.start(max_file_bytes: 10, max_total_bytes: 20)
   contract(store)
   streaming_contract(store)
   empty_stream_contract(store)
   orphan_grace_contract(store)
+  management_page_contract(store)
 }
 
 pub fn filesystem_attachment_store_contract_test() {
@@ -112,6 +146,7 @@ pub fn filesystem_attachment_store_contract_test() {
   streaming_contract(store)
   empty_stream_contract(store)
   orphan_grace_contract(store)
+  management_page_contract(store)
 }
 
 fn concurrent_quota_contract(store: attachment_store.Store) {
@@ -214,6 +249,7 @@ pub fn s3_compatible_attachment_store_contract_test() {
       assert boundary.data == <<"xyz":utf8>>
       let assert Ok(_) = multipart_store.delete(stored.key)
       orphan_grace_contract(multipart_store)
+      management_page_contract(multipart_store)
     }
   }
 }

@@ -508,6 +508,13 @@ pub fn management_collections_use_filter_scoped_keyset_pages_test() {
     ])
     |> router.handle(runtime)
   assert malformed_acl_position.status == 400
+  let malformed_attachment_position =
+    admin_request(http.Get, "/api/v1/attachments", "")
+    |> request.set_query([
+      #("cursor", cursor.encode_key("attachments", "not-a-content-key")),
+    ])
+    |> router.handle(runtime)
+  assert malformed_attachment_position.status == 400
 }
 
 pub fn management_collection_default_is_fifty_and_maximum_is_one_hundred_test() {

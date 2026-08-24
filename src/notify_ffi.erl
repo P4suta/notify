@@ -13,14 +13,15 @@
          attachment_upload_begin/2, attachment_upload_write/3,
          attachment_upload_finish/6, attachment_upload_abort/2,
          attachment_read_range/4,
-         attachment_delete/2, attachment_list/1,
+         attachment_delete/2, attachment_list/1, attachment_page/3,
          attachment_cleanup_expired/2,
          attachment_health/1, make_temporary_directory/0, public_asset/1,
          read_password/1, http_request/4, generate_vapid_keys/0, exit_failure/0,
          webpush_encrypt_with_values/6, webpush_encrypt/3,
          webpush_vapid_header/5, webpush_verify_vapid_header/2,
          webpush_send/9, valid_vapid_keys/2, relay_send/3,
-         s3_put/5, s3_head/2, s3_get/3, s3_delete/2, s3_list/1, s3_cleanup/2,
+         s3_put/5, s3_head/2, s3_get/3, s3_delete/2, s3_list/1, s3_page/3,
+         s3_cleanup/2,
          s3_multipart_begin/3, s3_multipart_write/5,
          s3_multipart_complete/4, s3_multipart_abort/3,
          s3_promote_staging/5,
@@ -1090,6 +1091,37 @@ attachment_list_names(Directory, [Name | Rest], Acc) ->
         _ -> attachment_list_names(Directory, Rest, Acc)
     end.
 
+attachment_page(Directory, After, Limit)
+  when is_integer(Limit), Limit > 0 ->
+    case file:list_dir(Directory) of
+        {ok, Names} ->
+            Keys = lists:sort([
+                filename:rootname(NameBinary, <<".blob">>)
+                || Name <- Names,
+                   NameBinary <- [unicode:characters_to_binary(Name)],
+                   filename:extension(NameBinary) =:= <<".blob">>
+            ]),
+            Remaining = case After of
+                none -> Keys;
+                {some, Cursor} -> lists:dropwhile(
+                    fun(Key) -> Key =< Cursor end, Keys)
+            end,
+            attachment_page_keys(
+                Directory, lists:sublist(Remaining, Limit), []);
+        {error, Reason} -> {error, atom_to_binary(Reason)}
+    end;
+attachment_page(_Directory, _After, _Limit) ->
+    {error, <<"invalid_page">>}.
+
+attachment_page_keys(_Directory, [], Acc) -> {ok, lists:reverse(Acc)};
+attachment_page_keys(Directory, [Key | Rest], Acc) ->
+    case attachment_head(Directory, Key) of
+        {ok, {Size, Expires}} -> attachment_page_keys(
+            Directory, Rest, [{Key, Size, Expires} | Acc]);
+        {error, <<"not_found">>} -> {error, <<"attachment_page_changed">>};
+        {error, Reason} -> {error, Reason}
+    end.
+
 attachment_delete(Directory, Key) ->
     delete_if_present(attachment_path(Directory, Key, <<".blob">>)),
     delete_if_present(attachment_path(Directory, Key, <<".expires">>)).
@@ -1431,6 +1463,45 @@ s3_list_metadata(Config, [{Key, _ListedSize} | Rest], Acc) ->
         {ok, {Size, Expires}} ->
             s3_list_metadata(Config, Rest, [{Key, Size, Expires} | Acc]);
         {error, <<"not_found">>} -> s3_list_metadata(Config, Rest, Acc);
+        {error, Reason} -> {error, Reason}
+    end.
+
+s3_page(Config, After, Limit)
+  when is_integer(Limit), Limit > 0, Limit =< 1000 ->
+    StartAfter = case After of
+        none -> <<"/">>;
+        {some, Cursor} -> Cursor
+    end,
+    Query = <<"list-type=2&max-keys=", (integer_to_binary(Limit))/binary,
+              "&start-after=", (s3_query_encode(StartAfter))/binary>>,
+    case s3_request(Config, <<"GET">>, <<>>, Query, [], <<>>) of
+        {ok, Status, _, Body} when Status >= 200, Status < 300 ->
+            Pattern = <<"<Contents>.*?<Key>([^<]+)</Key>.*?<Size>([0-9]+)</Size>.*?</Contents>">>,
+            case re:run(
+                    Body, Pattern,
+                    [global, dotall, {capture, [1, 2], binary}]) of
+                nomatch -> {ok, []};
+                {match, Captures} -> try
+                    Objects = [
+                        {s3_xml_unescape(Key), binary_to_integer(Size)}
+                        || [Key, Size] <- Captures,
+                           not s3_is_staging(s3_xml_unescape(Key))
+                    ],
+                    s3_page_metadata(Config, Objects, [])
+                catch _:_ -> {error, <<"invalid_s3_list_response">>} end;
+                {error, _} -> {error, <<"invalid_s3_list_response">>}
+            end;
+        {ok, Status, _, _} -> s3_status_error(Status);
+        {error, Reason} -> {error, Reason}
+    end;
+s3_page(_Config, _After, _Limit) -> {error, <<"invalid_page">>}.
+
+s3_page_metadata(_Config, [], Acc) -> {ok, lists:reverse(Acc)};
+s3_page_metadata(Config, [{Key, _ListedSize} | Rest], Acc) ->
+    case s3_head(Config, Key) of
+        {ok, {Size, Expires}} ->
+            s3_page_metadata(Config, Rest, [{Key, Size, Expires} | Acc]);
+        {error, <<"not_found">>} -> {error, <<"s3_page_changed">>};
         {error, Reason} -> {error, Reason}
     end.
 

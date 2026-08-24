@@ -68,6 +68,16 @@ type Command {
     Subject(Result(attachment_store.Download, attachment_store.Error)),
   )
   List(Subject(Result(List(attachment_store.Stored), attachment_store.Error)))
+  Page(
+    Option(String),
+    Int,
+    Subject(
+      Result(
+        attachment_store.Page(attachment_store.Stored),
+        attachment_store.Error,
+      ),
+    ),
+  )
   Delete(String, Subject(Result(Nil, attachment_store.Error)))
   Cleanup(Int, Subject(Result(Int, attachment_store.Error)))
   Health(Subject(Result(Nil, attachment_store.Error)))
@@ -111,6 +121,9 @@ pub fn start(
         process.call(subject, 60_000, fn(reply) { Get(key, range, reply) })
       },
       list: fn() { process.call(subject, 60_000, List) },
+      page: fn(after, limit) {
+        process.call(subject, 60_000, fn(reply) { Page(after, limit, reply) })
+      },
       delete: fn(key) {
         process.call(subject, 30_000, fn(reply) { Delete(key, reply) })
       },
@@ -175,6 +188,10 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
     }
     List(reply) -> {
       process.send(reply, list_objects(state.config))
+      actor.continue(state)
+    }
+    Page(after, limit, reply) -> {
+      process.send(reply, page_objects(state.config, after, limit))
       actor.continue(state)
     }
     Delete(key, reply) -> {
@@ -547,6 +564,32 @@ fn list_objects(
   |> result.map_error(map_error)
 }
 
+fn page_objects(
+  config: Config,
+  after: Option(String),
+  limit: Int,
+) -> Result(
+  attachment_store.Page(attachment_store.Stored),
+  attachment_store.Error,
+) {
+  case attachment_store.valid_page(after, limit) {
+    False -> Error(attachment_store.InvalidPage)
+    True ->
+      s3_page(config, after, limit + 1)
+      |> result.map(fn(items) {
+        let stored =
+          list.map(items, fn(item) {
+            attachment_store.Stored(key: item.0, size: item.1, expires: item.2)
+          })
+        attachment_store.Page(
+          items: list.take(stored, limit),
+          has_more: list.length(stored) > limit,
+        )
+      })
+      |> result.map_error(map_error)
+  }
+}
+
 fn cleanup(config: Config, now: Int) -> Result(Int, attachment_store.Error) {
   s3_cleanup(config, now) |> result.map_error(map_error)
 }
@@ -648,6 +691,13 @@ fn s3_delete(config: Config, key: String) -> Result(Nil, String)
 
 @external(erlang, "notify_ffi", "s3_list")
 fn s3_list(config: Config) -> Result(List(#(String, Int, Int)), String)
+
+@external(erlang, "notify_ffi", "s3_page")
+fn s3_page(
+  config: Config,
+  after: Option(String),
+  limit: Int,
+) -> Result(List(#(String, Int, Int)), String)
 
 @external(erlang, "notify_ffi", "s3_cleanup")
 fn s3_cleanup(config: Config, now: Int) -> Result(Int, String)

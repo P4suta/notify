@@ -660,6 +660,34 @@ pub fn postgres_attachment_streaming_and_quota_contract_test() {
       let assert Ok(_) = quota_a.cleanup(unix_seconds() + 3601)
       assert quota_a.finish(orphan) == Error(attachment_store.NotFound)
 
+      let assert Ok(page_blobs) =
+        attachment_postgres.start(
+          configuration,
+          max_file_bytes: 20,
+          max_total_bytes: 100,
+        )
+      let assert Ok(first_page_blob) =
+        page_blobs.put(attachment_store.Upload(<<"page-a":utf8>>, 300))
+      let assert Ok(second_page_blob) =
+        page_blobs.put(attachment_store.Upload(<<"page-b":utf8>>, 301))
+      let assert Ok(third_page_blob) =
+        page_blobs.put(attachment_store.Upload(<<"page-c":utf8>>, 302))
+      let expected_page_blobs =
+        [first_page_blob, second_page_blob, third_page_blob]
+        |> list.sort(fn(left, right) { string.compare(left.key, right.key) })
+      let assert Ok(attachment_store.Page(first_page, True)) =
+        page_blobs.page(None, 2)
+      assert first_page == list.take(expected_page_blobs, 2)
+      let assert Ok(page_cursor) = list.last(first_page)
+      let assert Ok(attachment_store.Page(second_page, False)) =
+        page_blobs.page(Some(page_cursor.key), 2)
+      assert second_page == list.drop(expected_page_blobs, 2)
+      assert page_blobs.page(None, 0) == Error(attachment_store.InvalidPage)
+      assert page_blobs.page(None, 101) == Error(attachment_store.InvalidPage)
+      assert page_blobs.page(Some("invalid"), 2)
+        == Error(attachment_store.InvalidPage)
+      assert page_blobs.cleanup(302) == Ok(3)
+
       drop_test_database(database)
     }
   }

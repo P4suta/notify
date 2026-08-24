@@ -889,6 +889,7 @@ fn attachment_error(error: attachment_store.Error) -> String {
       "quota exceeded (" <> int.to_string(limit) <> " bytes)"
     attachment_store.NotFound -> "object not found"
     attachment_store.InvalidRange -> "invalid byte range"
+    attachment_store.InvalidPage -> "invalid attachment page"
     attachment_store.Unavailable(detail) -> detail
   }
 }
