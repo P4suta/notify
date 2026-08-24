@@ -24,6 +24,7 @@ import notify/webpush as webpush_model
 import notify/webpush/postgres as webpush_postgres
 import postgleam
 import postgleam/config
+import postgleam/decode
 
 type TestDatabase {
   TestDatabase(
@@ -246,9 +247,77 @@ pub fn postgres_adapters_share_their_contract_on_a_real_database_test() {
   case test_database() {
     Error(_) -> Nil
     Ok(database) -> {
-      let TestDatabase(configuration:, ..) = database
+      let TestDatabase(configuration:, admin:, ..) = database
       let assert Ok(adapter_a) = postgres.start(configuration, "node-a")
       let postgres.Adapter(storage: messages, ..) = adapter_a
+      assert adapter_a.pool_size == 4
+      assert messages.health() == Ok(Nil)
+
+      let assert Ok(_) = postgleam.simple_query(admin, "BEGIN")
+      let assert Ok(_) =
+        postgleam.query(admin, "SELECT pg_advisory_xact_lock($1::bigint)", [
+          postgleam.int(postgres.event_commit_lock()),
+        ])
+      let locked_commit = process.new_subject()
+      process.spawn(fn() {
+        process.send(
+          locked_commit,
+          messages.save(fixture("PgLocked01XY", False, 90)),
+        )
+      })
+      assert process.receive(locked_commit, 50) == Error(Nil)
+      let assert Ok(_) = postgleam.simple_query(admin, "ROLLBACK")
+      assert process.receive(locked_commit, 5000)
+        == Ok(Ok(fixture("PgLocked01XY", False, 90)))
+
+      let concurrent_commits = process.new_subject()
+      int.range(from: 1, to: 17, with: Nil, run: fn(_, index) {
+        process.spawn(fn() {
+          let value = fixture(concurrent_id(index), False, 90 + index)
+          process.send(concurrent_commits, messages.save(value))
+        })
+        Nil
+      })
+      let commit_results =
+        int.range(from: 1, to: 17, with: [], run: fn(results, _) {
+          let assert Ok(committed) = process.receive(concurrent_commits, 30_000)
+          [committed, ..results]
+        })
+      assert list.all(commit_results, fn(committed) {
+        case committed {
+          Ok(_) -> True
+          Error(_) -> False
+        }
+      })
+
+      let assert Ok(_) = postgleam.simple_query(admin, "BEGIN")
+      let assert Ok(_) =
+        postgleam.query(admin, "SELECT pg_advisory_xact_lock($1::bigint)", [
+          postgleam.int(postgres.event_commit_lock()),
+        ])
+      let interrupted_commit = process.new_subject()
+      process.spawn(fn() {
+        process.send(
+          interrupted_commit,
+          messages.save(fixture("PgRecover1XY", False, 108)),
+        )
+      })
+      assert process.receive(interrupted_commit, 50) == Error(Nil)
+      let assert Ok(1) =
+        postgleam.query_one(
+          admin,
+          "WITH waiting AS (SELECT DISTINCT pid FROM pg_locks WHERE locktype = 'advisory' AND classid = (($1::bigint >> 32)::bigint)::oid AND objid = (($1::bigint & 4294967295)::bigint)::oid AND granted = FALSE), killed AS (SELECT pg_terminate_backend(pid) AS terminated FROM waiting) SELECT COUNT(*)::bigint FROM killed WHERE terminated",
+          [postgleam.int(postgres.event_commit_lock())],
+          {
+            use count <- decode.element(0, decode.int)
+            decode.success(count)
+          },
+        )
+      let assert Ok(Error(storage.Unavailable(_))) =
+        process.receive(interrupted_commit, 5000)
+      let assert Ok(_) = postgleam.simple_query(admin, "ROLLBACK")
+      let recovered = fixture("PgRecover1XY", False, 108)
+      assert messages.save(recovered) == Ok(recovered)
       assert messages.health() == Ok(Nil)
 
       let first = fixture("PgStore001XY", False, 100)
@@ -580,6 +649,10 @@ fn page_fixture(index: Int) -> message.Message {
 
 fn page_id(index: Int) -> String {
   "P" <> string.pad_start(int.to_string(index), to: 11, with: "0")
+}
+
+fn concurrent_id(index: Int) -> String {
+  "C" <> string.pad_start(int.to_string(index), to: 11, with: "0")
 }
 
 @external(erlang, "notify_ffi", "getenv")

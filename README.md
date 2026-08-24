@@ -209,6 +209,16 @@ its event in one transaction. These paths have real-PostgreSQL contract
 coverage; multi-node outage and long-duration soak coverage remain open. SQLite
 uses WAL plus a per-database live-process lock and is strictly single-node.
 
+The PostgreSQL message adapter uses a bounded four-worker round-robin connection
+pool plus a separate dedicated LISTEN connection. Reads and cursor operations
+can use different workers. Transactions that append events take one database
+advisory transaction lock before allocating message/event sequence values, so
+concurrent commits cannot expose a higher cursor while a lower event remains
+uncommitted. A failed operation is returned to its caller without an ambiguous
+automatic write retry; that worker replaces its connection for subsequent
+operations. The fixed pool and forced-backend-termination recovery have
+real-PostgreSQL tests, but the target throughput is still unverified.
+
 Within each node, the live broker indexes subscription IDs by topic and keeps
 credit state by subscription ID. A publish visits only registrations for its
 topic instead of scanning every connected subscriber. Duplicate topics in one

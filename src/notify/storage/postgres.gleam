@@ -24,11 +24,24 @@ pub type Adapter {
     commit: storage.AtomicCommit,
     fetch_events: fn(String, Int) -> Result(List(ClusterEvent), storage.Error),
     ack_events: fn(String, Int) -> Result(Nil, storage.Error),
+    pool_size: Int,
   )
 }
 
 type State {
-  State(connection: postgleam.Connection, node_id: String)
+  State(config: Config, connection: postgleam.Connection, node_id: String)
+}
+
+type Worker {
+  Worker(subject: Subject(Command))
+}
+
+type PoolState {
+  PoolState(workers: List(Worker), remaining: List(Worker))
+}
+
+type PoolCommand {
+  Checkout(Subject(Worker))
 }
 
 type Command {
@@ -47,6 +60,15 @@ type Command {
   Health(Subject(Result(Nil, storage.Error)))
   FetchEvents(String, Int, Subject(Result(List(ClusterEvent), storage.Error)))
   AckEvents(String, Int, Subject(Result(Nil, storage.Error)))
+  Shutdown(Subject(Nil))
+}
+
+const default_pool_size = 4
+
+const event_commit_lock_key = 7_413_706_844
+
+pub fn event_commit_lock() -> Int {
+  event_commit_lock_key
 }
 
 const migration = "
@@ -169,19 +191,80 @@ pub fn start(
   config: Config,
   node_id: String,
 ) -> Result(Adapter, storage.Error) {
-  use connection <- result.try(
-    postgleam.connect(config) |> result.map_error(map_error),
-  )
-  case migrate(connection) {
+  start_with_pool_size(config, node_id, default_pool_size)
+}
+
+pub fn start_with_pool_size(
+  config: Config,
+  node_id: String,
+  size: Int,
+) -> Result(Adapter, storage.Error) {
+  use connections <- result.try(connect_many(config, max(1, size), []))
+  let assert [first, ..] = connections
+  case migrate(first) {
     Error(error) -> {
-      postgleam.disconnect(connection)
+      disconnect_all(connections)
       Error(error)
     }
-    Ok(_) -> start_actor(State(connection:, node_id:))
+    Ok(_) ->
+      case start_workers(config, node_id, connections, []) {
+        Error(error) -> Error(error)
+        Ok(workers) ->
+          case start_pool(workers) {
+            Error(error) -> {
+              shutdown_workers(workers)
+              Error(error)
+            }
+            Ok(pool) -> Ok(adapter(pool, workers))
+          }
+      }
   }
 }
 
-fn start_actor(state: State) -> Result(Adapter, storage.Error) {
+fn connect_many(
+  config: Config,
+  remaining: Int,
+  connected: List(postgleam.Connection),
+) -> Result(List(postgleam.Connection), storage.Error) {
+  case remaining {
+    0 -> Ok(list.reverse(connected))
+    _ ->
+      case postgleam.connect(config) {
+        Ok(connection) ->
+          connect_many(config, remaining - 1, [connection, ..connected])
+        Error(error) -> {
+          disconnect_all(connected)
+          Error(map_error(error))
+        }
+      }
+  }
+}
+
+fn disconnect_all(connections: List(postgleam.Connection)) -> Nil {
+  list.each(connections, postgleam.disconnect)
+}
+
+fn start_workers(
+  config: Config,
+  node_id: String,
+  connections: List(postgleam.Connection),
+  started: List(Worker),
+) -> Result(List(Worker), storage.Error) {
+  case connections {
+    [] -> Ok(list.reverse(started))
+    [connection, ..rest] ->
+      case start_worker(State(config:, connection:, node_id:)) {
+        Ok(worker) -> start_workers(config, node_id, rest, [worker, ..started])
+        Error(error) -> {
+          shutdown_workers(started)
+          disconnect_all([connection, ..rest])
+          Error(error)
+        }
+      }
+  }
+}
+
+fn start_worker(state: State) -> Result(Worker, storage.Error) {
   use started <- result.try(
     actor.new(state)
     |> actor.on_message(handle)
@@ -190,50 +273,95 @@ fn start_actor(state: State) -> Result(Adapter, storage.Error) {
       storage.Unavailable("PostgreSQL storage actor failed to start")
     }),
   )
-  let subject = started.data
+  Ok(Worker(started.data))
+}
+
+fn start_pool(
+  workers: List(Worker),
+) -> Result(Subject(PoolCommand), storage.Error) {
+  actor.new(PoolState(workers:, remaining: workers))
+  |> actor.on_message(handle_pool)
+  |> actor.start
+  |> result.map(fn(started) { started.data })
+  |> result.map_error(fn(_) {
+    storage.Unavailable("PostgreSQL storage pool failed to start")
+  })
+}
+
+fn handle_pool(
+  state: PoolState,
+  command: PoolCommand,
+) -> actor.Next(PoolState, PoolCommand) {
+  let PoolState(workers:, remaining:) = state
+  case command, remaining {
+    Checkout(reply), [worker, ..rest] -> {
+      process.send(reply, worker)
+      actor.continue(
+        PoolState(workers:, remaining: case rest {
+          [] -> workers
+          _ -> rest
+        }),
+      )
+    }
+    Checkout(_), [] -> actor.continue(PoolState(..state, remaining: workers))
+  }
+}
+
+fn adapter(pool: Subject(PoolCommand), workers: List(Worker)) -> Adapter {
   let persistent =
     storage.Storage(
-      migrate: fn() { process.call(subject, 30_000, Migrate) },
-      save: fn(message) {
-        process.call(subject, 30_000, fn(reply) { Save(message, reply) })
-      },
-      query: fn(query) {
-        process.call(subject, 30_000, fn(reply) { RunQuery(query, reply) })
-      },
+      migrate: fn() { call(pool, Migrate) },
+      save: fn(message) { call(pool, fn(reply) { Save(message, reply) }) },
+      query: fn(query) { call(pool, fn(reply) { RunQuery(query, reply) }) },
       has_attachment: fn(topic, key) {
-        process.call(subject, 30_000, fn(reply) {
-          HasAttachment(topic, key, reply)
-        })
+        call(pool, fn(reply) { HasAttachment(topic, key, reply) })
       },
       release_due: fn(now, limit) {
-        process.call(subject, 30_000, fn(reply) {
-          ReleaseDue(now, limit, reply)
-        })
+        call(pool, fn(reply) { ReleaseDue(now, limit, reply) })
       },
       cleanup_expired: fn(now) {
-        process.call(subject, 30_000, fn(reply) { CleanupExpired(now, reply) })
+        call(pool, fn(reply) { CleanupExpired(now, reply) })
       },
-      stats: fn() { process.call(subject, 30_000, Stats) },
-      health: fn() { process.call(subject, 30_000, Health) },
+      stats: fn() { call(pool, Stats) },
+      health: fn() { health_all(workers) },
     )
-  Ok(
-    Adapter(
-      storage: persistent,
-      commit: storage.AtomicCommit(fn(message, jobs) {
-        process.call(subject, 30_000, fn(reply) { Commit(message, jobs, reply) })
-      }),
-      fetch_events: fn(node_id, limit) {
-        process.call(subject, 30_000, fn(reply) {
-          FetchEvents(node_id, limit, reply)
-        })
-      },
-      ack_events: fn(node_id, sequence) {
-        process.call(subject, 30_000, fn(reply) {
-          AckEvents(node_id, sequence, reply)
-        })
-      },
-    ),
+  Adapter(
+    storage: persistent,
+    commit: storage.AtomicCommit(fn(message, jobs) {
+      call(pool, fn(reply) { Commit(message, jobs, reply) })
+    }),
+    fetch_events: fn(node_id, limit) {
+      call(pool, fn(reply) { FetchEvents(node_id, limit, reply) })
+    },
+    ack_events: fn(node_id, sequence) {
+      call(pool, fn(reply) { AckEvents(node_id, sequence, reply) })
+    },
+    pool_size: list.length(workers),
   )
+}
+
+fn call(
+  pool: Subject(PoolCommand),
+  command: fn(Subject(reply)) -> Command,
+) -> reply {
+  let worker = process.call(pool, 30_000, Checkout)
+  call_worker(worker, command)
+}
+
+fn call_worker(
+  worker: Worker,
+  command: fn(Subject(reply)) -> Command,
+) -> reply {
+  let Worker(subject) = worker
+  process.call(subject, 30_000, command)
+}
+
+fn health_all(workers: List(Worker)) -> Result(Nil, storage.Error) {
+  list.try_each(workers, fn(worker) { call_worker(worker, Health) })
+}
+
+fn shutdown_workers(workers: List(Worker)) -> Nil {
+  list.each(workers, fn(worker) { call_worker(worker, Shutdown) })
 }
 
 fn handle(state: State, command: Command) -> actor.Next(State, Command) {
@@ -255,16 +383,35 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
       respond(state, reply, fetch_events(state.connection, node_id, limit))
     AckEvents(node_id, sequence, reply) ->
       respond(state, reply, ack_events(state.connection, node_id, sequence))
+    Shutdown(reply) -> {
+      postgleam.disconnect(state.connection)
+      process.send(reply, Nil)
+      actor.stop()
+    }
   }
 }
 
 fn respond(
   state: State,
-  reply: Subject(a),
-  value: a,
+  reply: Subject(Result(a, storage.Error)),
+  value: Result(a, storage.Error),
 ) -> actor.Next(State, Command) {
   process.send(reply, value)
-  actor.continue(state)
+  actor.continue(recover_connection(state, value))
+}
+
+fn recover_connection(state: State, value: Result(a, storage.Error)) -> State {
+  case value {
+    Error(storage.Unavailable(_)) ->
+      case postgleam.connect(state.config) {
+        Error(_) -> state
+        Ok(connection) -> {
+          postgleam.disconnect(state.connection)
+          State(..state, connection: connection)
+        }
+      }
+    _ -> state
+  }
 }
 
 fn migrate(connection: postgleam.Connection) -> Result(Nil, storage.Error) {
@@ -291,6 +438,7 @@ fn commit(
 ) -> Result(Message, storage.Error) {
   let payload = message_json.encode_storage(message) |> json.to_string
   postgleam.transaction(state.connection, fn(tx) {
+    use _ <- result.try(lock_event_commit(tx))
     use _ <- result.try(
       postgleam.query(
         tx,
@@ -312,6 +460,15 @@ fn commit(
     Ok(message)
   })
   |> result.map_error(map_error)
+}
+
+fn lock_event_commit(
+  connection: postgleam.Connection,
+) -> Result(Nil, pg_error.Error) {
+  postgleam.query(connection, "SELECT pg_advisory_xact_lock($1::bigint)", [
+    postgleam.int(event_commit_lock_key),
+  ])
+  |> result.map(fn(_) { Nil })
 }
 
 fn insert_delivery_jobs(
@@ -515,6 +672,7 @@ fn release_due(
   limit: Int,
 ) -> Result(List(Message), storage.Error) {
   postgleam.transaction(state.connection, fn(tx) {
+    use _ <- result.try(lock_event_commit(tx))
     use response <- result.try(
       postgleam.query_with(
         tx,

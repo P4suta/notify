@@ -48,6 +48,7 @@ pub fn durable_cluster_drain_skips_local_and_scheduled_events_then_acks_test() {
         process.send(acknowledgements, #(node, sequence))
         Ok(Nil)
       },
+      pool_size: 1,
     )
   assert postgres_bus.drain_once(adapter, "node-a", fn(message) {
       process.send(deliveries, message.id)
@@ -76,6 +77,7 @@ pub fn dispatch_failure_leaves_cursor_unacknowledged_for_retry_test() {
         process.send(acknowledgements, #(node, sequence))
         Ok(Nil)
       },
+      pool_size: 1,
     )
   let dispatch_error = storage.Unavailable("broker dispatch rejected event")
 
@@ -106,6 +108,7 @@ pub fn acknowledgement_failure_replays_the_batch_at_least_once_test() {
       commit: storage.AtomicCommit(fn(message, _) { store.save(message) }),
       fetch_events: fn(_, _) { Ok([event]) },
       ack_events: fn(_, _) { Error(acknowledgement_error) },
+      pool_size: 1,
     )
   let dispatch = fn(notification: message.Message) {
     process.send(deliveries, notification.id)

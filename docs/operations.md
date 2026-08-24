@@ -200,15 +200,32 @@ clients de-duplicate with the 12-character message ID. HTTP publish still
 returns after the durable commit and uses asynchronous local fan-out, keeping
 subscriber work outside publish commit latency.
 
+Message persistence has four round-robin worker connections per node. The
+LISTEN loop owns a separate connection and never borrows a query worker. Health
+checks cover all four workers. After an unavailable operation, the affected
+worker attempts to establish a replacement connection for later calls; the
+failed call is still returned as an error and an ambiguous write is never
+silently retried.
+
+Every transaction that appends to `notify_event_log`, including scheduled
+release, first takes the same PostgreSQL advisory transaction lock. Message and
+event sequence allocation therefore follows commit order even though reads and
+unrelated operations use a pool. Without this barrier, a cursor could observe
+and acknowledge a higher committed sequence while a lower sequence was still
+uncommitted. The lock intentionally serializes event-producing transactions;
+the four-worker pool does not itself establish the publish-throughput target.
+
 Cleanup first removes seven-day-stale cursors, then uses the minimum remaining
 cursor as a watermark. It deletes only event rows at or below that watermark
 whose message row no longer exists.
 
 The current contract exercises paging, cursor resume, dispatch-before-ACK,
-dispatch failure, ACK failure and at-least-once batch replay, scheduled release,
-and compaction; persistence cases also run against real PostgreSQL. Listener
-disconnect, multi-node crash, lease expiry, duplicate wake-up, and prolonged
-outage tests remain required before production certification.
+dispatch failure, ACK failure and at-least-once batch replay, concurrent pool
+commits, event-lock blocking, one forced backend termination and connection
+replacement, scheduled release, and compaction; persistence cases run against
+real PostgreSQL. Listener disconnect, multi-node crash, lease expiry, duplicate
+wake-up, and prolonged outage tests remain required before production
+certification.
 
 ## Durable delivery recovery
 
