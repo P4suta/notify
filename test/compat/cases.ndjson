@@ -16,6 +16,8 @@
 {"name":"latest_poll","method":"GET","path":"/__TOPIC__/json?poll=1&since=latest","body":"","content_type":"","normalizer":"ndjson"}
 {"name":"invalid_since","method":"GET","path":"/__TOPIC__/json?poll=1&since=INVALID","body":"","content_type":"","normalizer":"error"}
 {"name":"invalid_priority","method":"POST","path":"/__TOPIC___bad_priority","body":"bad","content_type":"text/plain","headers":{"X-Priority":"impossible"},"normalizer":"error"}
+{"name":"rfc_9218_priority_falls_back_to_query","method":"POST","path":"/__TOPIC___rfc_priority?priority=high","body":"browser priority","content_type":"text/plain","headers":{"Priority":"u=4, i"},"normalizer":"message"}
+{"name":"rfc_9218_shape_is_not_ignored_for_x_priority","method":"POST","path":"/__TOPIC___rfc_x_priority","body":"bad","content_type":"text/plain","headers":{"X-Priority":"u=4"},"normalizer":"error"}
 {"name":"invalid_json","method":"POST","path":"/","body":"{not-json","content_type":"application/json","normalizer":"error"}
 {"name":"delay_unparseable","method":"POST","path":"/__TOPIC___delay_parse","body":"later","content_type":"text/plain","headers":{"X-Delay":"eventually"},"normalizer":"error"}
 {"name":"delay_too_short","method":"POST","path":"/__TOPIC___delay_short","body":"later","content_type":"text/plain","headers":{"X-Delay":"9s"},"normalizer":"error"}

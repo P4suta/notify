@@ -360,6 +360,54 @@ pub fn invalid_header_priority_is_rejected_without_persisting_test() {
   assert body(poll) == ""
 }
 
+pub fn rfc_9218_priority_header_is_ignored_like_ntfy_v2_27_test() {
+  let runtime = test_runtime()
+  let publish =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/alerts")
+    |> request.set_query([#("priority", "high")])
+    |> request.set_header("priority", "u=4, i")
+    |> request.set_body(<<"browser request":utf8>>)
+    |> router.handle(runtime)
+  assert publish.status == 200
+  let assert Ok(value) = json.parse(body(publish), message_json.decoder())
+  assert value.priority == message.High
+
+  let poll =
+    request.new()
+    |> request.set_method(http.Get)
+    |> request.set_path("/alerts/json")
+    |> request.set_query([#("poll", "1")])
+    |> request.set_header("priority", "u=9")
+    |> request.set_body(<<>>)
+    |> router.handle(runtime)
+  assert poll.status == 200
+  assert string.contains(body(poll), "browser request")
+}
+
+pub fn rfc_9218_shape_is_only_ignored_for_plain_priority_header_test() {
+  let runtime = test_runtime()
+  let query =
+    request.new()
+    |> request.set_method(http.Get)
+    |> request.set_path("/alerts/json")
+    |> request.set_query([#("poll", "1"), #("priority", "u=4")])
+    |> request.set_body(<<>>)
+    |> router.handle(runtime)
+  assert query.status == 400
+
+  let x_priority =
+    request.new()
+    |> request.set_method(http.Get)
+    |> request.set_path("/alerts/json")
+    |> request.set_query([#("poll", "1")])
+    |> request.set_header("x-priority", "u=4")
+    |> request.set_body(<<>>)
+    |> router.handle(runtime)
+  assert x_priority.status == 400
+}
+
 pub fn delayed_message_cannot_disable_cache_test() {
   let runtime = test_runtime()
   let publish =

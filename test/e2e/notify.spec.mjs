@@ -9,50 +9,73 @@ const topic = "browser-e2e";
 
 test("setup, live publishing, administration, access, Web Push, i18n, and responsive keyboard flow", async ({
   page,
-  context
+  context,
+  browserName
 }) => {
   const setupUrl = process.env.NOTIFY_E2E_SETUP_URL;
+  const baseUrl = process.env.NOTIFY_E2E_BASE_URL || "https://localhost:18443";
   expect(setupUrl, "the runner must provide the one-time setup URL").toBeTruthy();
 
-  await context.grantPermissions(["notifications"]);
-  await page.addInitScript(() => {
-    let subscription = null;
-    const manager = {
-      async getSubscription() {
-        return subscription;
-      },
-      async subscribe() {
-        subscription = {
-          endpoint:
-            "https://updates.push.services.mozilla.com/wpush/v2/notify-browser-e2e",
-          toJSON() {
-            return {
-              endpoint: this.endpoint,
-              keys: {
-                auth: "kSC3T8aN1JCQxxPdrFLrZg",
-                p256dh:
-                  "BMKKbxdUU_xLS7G1Wh5AN8PvWOjCzkCuKZYb8apcqYrDxjOF_2piggBnoJLQYx9IeSD70fNuwawI3e9Y8m3S3PE"
-              }
-            };
-          },
-          async unsubscribe() {
-            subscription = null;
-            return true;
-          }
-        };
-        return subscription;
-      }
-    };
-
-    Object.defineProperty(Notification, "requestPermission", {
-      configurable: true,
-      value: async () => "granted"
-    });
-    Object.defineProperty(ServiceWorkerRegistration.prototype, "pushManager", {
-      configurable: true,
-      get: () => manager
-    });
+  const manifestResponse = await page.request.get(`${baseUrl}/manifest.webmanifest`);
+  expect(manifestResponse.status()).toBe(200);
+  const manifest = await manifestResponse.json();
+  expect(manifest).toMatchObject({
+    id: "/",
+    scope: "/",
+    start_url: "/",
+    display: "standalone"
   });
+  expect(manifest.icons).toEqual(expect.arrayContaining([
+    expect.objectContaining({ src: "/icon-192.png", sizes: "192x192" }),
+    expect.objectContaining({ src: "/icon-512.png", sizes: "512x512" })
+  ]));
+  for (const icon of ["icon-192.png", "icon-512.png"]) {
+    const response = await page.request.get(`${baseUrl}/${icon}`);
+    expect(response.status()).toBe(200);
+    expect(response.headers()["content-type"]).toBe("image/png");
+  }
+
+  if (browserName === "chromium") {
+    await context.grantPermissions(["notifications"]);
+    await page.addInitScript(() => {
+      let subscription = null;
+      const manager = {
+        async getSubscription() {
+          return subscription;
+        },
+        async subscribe() {
+          subscription = {
+            endpoint:
+              "https://updates.push.services.mozilla.com/wpush/v2/notify-browser-e2e",
+            toJSON() {
+              return {
+                endpoint: this.endpoint,
+                keys: {
+                  auth: "kSC3T8aN1JCQxxPdrFLrZg",
+                  p256dh:
+                    "BMKKbxdUU_xLS7G1Wh5AN8PvWOjCzkCuKZYb8apcqYrDxjOF_2piggBnoJLQYx9IeSD70fNuwawI3e9Y8m3S3PE"
+                }
+              };
+            },
+            async unsubscribe() {
+              subscription = null;
+              return true;
+            }
+          };
+          return subscription;
+        }
+      };
+
+      Object.defineProperty(Notification, "requestPermission", {
+        configurable: true,
+        value: async () => "granted"
+      });
+      Object.defineProperty(ServiceWorkerRegistration.prototype, "pushManager", {
+        configurable: true,
+        get: () => manager
+      });
+    });
+  }
 
   await page.goto(setupUrl);
   await expect(page.getByRole("heading", { name: "Create the first administrator" })).toBeVisible();
@@ -130,7 +153,8 @@ test("setup, live publishing, administration, access, Web Push, i18n, and respon
   await expect(administration.locator(".issued-secret")).toBeHidden();
 
   const blockedClient = await requestFactory.newContext({
-    baseURL: process.env.NOTIFY_E2E_BASE_URL || "http://localhost:18082",
+    baseURL: baseUrl,
+    ignoreHTTPSErrors: true,
     extraHTTPHeaders: {
       authorization: `Basic ${Buffer.from(`${blockedUser}:${blockedPassword}`).toString("base64")}`
     }
@@ -145,25 +169,27 @@ test("setup, live publishing, administration, access, Web Push, i18n, and respon
   await expect(attachments.locator("li")).toContainText("bytes");
   await administration.getByRole("button", { name: "Close" }).click();
 
-  const enablePush = page.getByRole("button", { name: "Enable notifications" });
-  await expect(enablePush).toBeVisible();
-  const [registered] = await Promise.all([
-    page.waitForResponse(
-      (response) =>
-        response.url().endsWith("/v1/webpush") && response.request().method() === "POST"
-    ),
-    enablePush.click()
-  ]);
-  expect(registered.status()).toBe(200);
-  await expect(page.getByRole("button", { name: "Disable notifications" })).toBeVisible();
-  const [removed] = await Promise.all([
-    page.waitForResponse(
-      (response) =>
-        response.url().endsWith("/v1/webpush") && response.request().method() === "DELETE"
-    ),
-    page.getByRole("button", { name: "Disable notifications" }).click()
-  ]);
-  expect(removed.status()).toBe(200);
+  if (browserName === "chromium") {
+    const enablePush = page.getByRole("button", { name: "Enable notifications" });
+    await expect(enablePush).toBeVisible();
+    const [registered] = await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.url().endsWith("/v1/webpush") && response.request().method() === "POST"
+      ),
+      enablePush.click()
+    ]);
+    expect(registered.status()).toBe(200);
+    await expect(page.getByRole("button", { name: "Disable notifications" })).toBeVisible();
+    const [removed] = await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          response.url().endsWith("/v1/webpush") && response.request().method() === "DELETE"
+      ),
+      page.getByRole("button", { name: "Disable notifications" }).click()
+    ]);
+    expect(removed.status()).toBe(200);
+  }
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(page.getByRole("heading", { name: "Timeline" })).toBeVisible();
@@ -174,4 +200,20 @@ test("setup, live publishing, administration, access, Web Push, i18n, and respon
     .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
     .analyze();
   expect(accessibility.violations).toEqual([]);
+
+  if (browserName === "chromium") {
+    await page.evaluate(async () => navigator.serviceWorker.ready);
+    await page.reload({ waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("heading", { name: "Timeline" })).toBeVisible();
+    expect(await page.evaluate(() => navigator.serviceWorker.controller !== null)).toBe(true);
+
+    await context.setOffline(true);
+    try {
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await expect(page.getByRole("heading", { name: "Timeline" })).toBeVisible();
+      await expect(page.getByText("Offline", { exact: true })).toBeVisible();
+    } finally {
+      await context.setOffline(false);
+    }
+  }
 });

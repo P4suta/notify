@@ -90,6 +90,9 @@ fn handle_protocol(
     Get, ["styles.css"] -> public_asset("styles.css", "text/css; charset=utf-8")
     Get, ["manifest.webmanifest"] ->
       public_asset("manifest.webmanifest", "application/manifest+json")
+    Get, ["icon.svg"] -> public_asset("icon.svg", "image/svg+xml")
+    Get, ["icon-192.png"] -> public_asset("icon-192.png", "image/png")
+    Get, ["icon-512.png"] -> public_asset("icon-512.png", "image/png")
     Get, ["api", "openapi.json"] ->
       public_asset("openapi.json", "application/json; charset=utf-8")
     Get, ["sw.js"] -> public_asset("sw.js", "text/javascript; charset=utf-8")

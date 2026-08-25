@@ -5,12 +5,20 @@ import notify/http/rate_policy
 import notify/rate_limit
 
 pub fn operational_endpoints_do_not_consume_rate_credit_test() {
-  let health =
+  let operational_request = fn(path) {
     request.new()
     |> request.set_method(http.Get)
-    |> request.set_path("/healthz")
+    |> request.set_path(path)
     |> request.set_body(<<>>)
-  assert rate_policy.preflight(health, 16_777_216) == []
+  }
+  assert rate_policy.preflight(operational_request("/healthz"), 16_777_216)
+    == []
+  assert rate_policy.preflight(operational_request("/icon.svg"), 16_777_216)
+    == []
+  assert rate_policy.preflight(operational_request("/icon-192.png"), 16_777_216)
+    == []
+  assert rate_policy.preflight(operational_request("/icon-512.png"), 16_777_216)
+    == []
 }
 
 pub fn subscriptions_and_publications_use_independent_buckets_test() {

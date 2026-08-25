@@ -256,7 +256,8 @@ certification; the exact evidence is recorded in
 - PWA: Gleam/Lustre MVU interface, English/Japanese copy, live timeline,
   publishing, attachments, Web Push, user/token/ACL mutations, delivery failure
   and attachment inventory, keyboard controls, responsive dark/light
-  presentation, and an offline shell.
+  presentation, an offline shell, and local 192/512-pixel plus scalable install
+  icons with no external asset dependency.
 
 Raw bearer values are returned exactly once when created (including account
 login/token compatibility routes) and only hashes are persisted. Account and
@@ -327,16 +328,26 @@ The root suite also parses the served OpenAPI 3.1 document, requires unique
 stable IDs and response metadata for all 68 operations, and executes every
 documented method/path against the in-process body or live WebSocket router.
 
-The current Chromium Playwright flow covers first-run setup, login, live publish,
-attachments, ACL denial, one-time token display, Web Push registration,
-English/Japanese switching, keyboard operation, mobile layout, and WCAG 2.2 AA
-automated rules. Firefox, WebKit, install/offline lifecycle, screen-reader, and
-manual WCAG audits are still pending. The test runs only against an isolated
-local Compose project:
+The pull-request Playwright gate runs Chromium desktop. Pushes to `main` and
+manual runs add Chromium mobile plus Firefox and WebKit in both desktop and
+mobile viewports. Every browser covers first-run setup, Secure-cookie login,
+live publish, attachments, ACL denial, one-time token display,
+English/Japanese switching, keyboard operation, responsive layout, and WCAG
+2.2 AA automated rules. Chromium additionally covers Web Push
+registration/removal, Service Worker control, and an offline reload of a topic
+query URL. A separate contract verifies the install manifest, 192/512-pixel
+PNG dimensions, scalable icon, precache list, and navigation fallback. Actual
+OS install-prompt/installed-mode behavior, screen-reader review, and manual
+WCAG audits remain open.
+
+The browser suite runs only against an isolated local Compose project through
+an ephemeral loopback TLS proxy, so the real `Secure; HttpOnly; SameSite=Strict`
+session cookie is exercised without weakening server policy:
 
 ```sh
 npm ci --prefix test/e2e
 test/e2e/run.sh
+NOTIFY_E2E_BROWSER=firefox NOTIFY_E2E_DEVICE=mobile test/e2e/run.sh
 ```
 
 With the SQLite Compose example running, `test/smoke/admin_session.sh` verifies

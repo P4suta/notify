@@ -172,6 +172,10 @@ cookies, query strings, and request bodies are not included in request logs.
 Human-format fields are quoted and escape quotes, backslashes, and ASCII
 control characters; JSON format uses structural string encoding.
 
+The browser acceptance suite terminates ephemeral loopback TLS in a test-only
+Node proxy. This lets Chromium, Firefox, and WebKit exercise the real Secure
+cookie policy; the server has no insecure-cookie test switch.
+
 ## Not yet certified
 
 The following are acceptance targets, not current benchmark results:
