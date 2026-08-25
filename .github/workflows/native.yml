@@ -59,10 +59,7 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
           rebar3-version: "3"
       - name: Install checksum-verified Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          cache-key: notify-native
+        run: packaging/native/install_zig.sh "$ZIG_VERSION"
       - name: Install exact MixGleam archive
         run: mix archive.install hex mix_gleam 0.6.2 --force
       - name: Build locked host-native executable
@@ -87,10 +84,7 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
           rebar3-version: "3"
       - name: Install checksum-verified Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          cache-key: notify-native-windows
+        run: packaging/native/install_zig.sh "$ZIG_VERSION"
       - name: Verify Windows cross-build tools
         run: |
           command -v 7z

@@ -48,6 +48,7 @@ jobs:
       - name: Validate scripts, JavaScript, and OpenAPI
         run: |
           test/syntax_check.sh
+          test/native_zig_install_test.sh
           node --test test/pwa_contract_test.mjs test/cluster_soak_contract_test.mjs
           jq -e . priv/public/openapi.json >/dev/null
 

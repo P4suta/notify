@@ -318,6 +318,7 @@ Web Push endpoints, and mobile relay.
 gleam format --check src test packages/notify_core/src packages/notify_core/test
 test/lint.sh
 test/security_lint.sh
+test/native_zig_install_test.sh
 python3 test/check_licenses.py --root .
 gleam test
 (cd packages/notify_core && gleam test)
@@ -340,6 +341,11 @@ required hashes. Generated dependency/build trees are excluded from the
 working-tree Gitleaks scan; source, configuration, fixtures, and workflows
 remain in scope. Dependabot applies a seven-day cooldown to routine version
 updates; Dependabot security updates are not delayed by that setting.
+
+Native CI downloads Zig 0.15.2 directly from `ziglang.org`, verifies the
+official per-host SHA-256 before extraction, and never publishes the resulting
+executables. `test/native_zig_install_test.sh` proves unsupported versions and
+checksum-mismatched archives are rejected before the runner path is changed.
 
 The `Supply-chain lint / Static supply-chain policy`,
 `Supply-chain security / Vulnerability, license, and SBOM`, and CodeQL jobs are
