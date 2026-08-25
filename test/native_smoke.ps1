@@ -81,7 +81,6 @@ function Invoke-ErlangNifProbe {
     try {
         $PSNativeCommandUseErrorActionPreference = $false
         $probeOutput = @(& $ertsExecutables[0].FullName `
-            -root $releaseRoot.FullName `
             -boot $bootPath `
             -boot_var RELEASE_LIB $releaseLibrary `
             -noshell `
