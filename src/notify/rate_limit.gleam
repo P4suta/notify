@@ -238,37 +238,171 @@ LANGUAGE plpgsql
 AS $notify_rate_limit_requests$
 DECLARE
   requested_batch JSONB;
+  charge JSONB;
   requested_index BIGINT;
   requested_client_key TEXT;
   requested_checked_at BIGINT;
+  requested_bucket_key TEXT;
+  token_capacity BIGINT;
+  requested_cost BIGINT;
+  maximum_tokens BIGINT;
+  effective_now BIGINT;
+  available_tokens BIGINT;
+  allowed BOOLEAN;
+  state_key TEXT;
+  state_index INTEGER;
+  state_keys TEXT[] := ARRAY[]::TEXT[];
+  state_bucket_keys TEXT[] := ARRAY[]::TEXT[];
+  state_client_keys TEXT[] := ARRAY[]::TEXT[];
+  state_tokens BIGINT[] := ARRAY[]::BIGINT[];
+  state_updated_at BIGINT[] := ARRAY[]::BIGINT[];
+  locked_bucket_key TEXT;
+  locked_client_key TEXT;
+  locked_tokens BIGINT;
+  locked_updated_at BIGINT;
 BEGIN
+  -- Reserve and lock every distinct bucket once, in a stable order. The
+  -- actor already preserves request order, so the calculations below retain
+  -- exact token-bucket semantics while avoiding one row UPDATE per charge.
+  INSERT INTO notify_token_buckets(
+    bucket_key, client_key, tokens_scaled, updated_at
+  )
+  SELECT
+    initial.bucket_key,
+    initial.client_key,
+    initial.maximum_tokens,
+    initial.checked_at
+  FROM (
+    SELECT DISTINCT ON (
+      charge.value ->> 'bucket_key',
+      batch.value ->> 'client_key'
+    )
+      charge.value ->> 'bucket_key' AS bucket_key,
+      batch.value ->> 'client_key' AS client_key,
+      (charge.value ->> 'capacity')::BIGINT * token_window
+        AS maximum_tokens,
+      (batch.value ->> 'checked_at')::BIGINT AS checked_at
+    FROM jsonb_array_elements(requested_batches) WITH ORDINALITY
+      AS batch(value, position)
+    CROSS JOIN LATERAL
+      jsonb_array_elements(batch.value -> 'charges') WITH ORDINALITY
+      AS charge(value, position)
+    ORDER BY
+      charge.value ->> 'bucket_key',
+      batch.value ->> 'client_key',
+      batch.position,
+      charge.position
+  ) AS initial
+  ON CONFLICT(bucket_key, client_key) DO NOTHING;
+
+  FOR
+    locked_bucket_key,
+    locked_client_key,
+    locked_tokens,
+    locked_updated_at
+  IN
+    WITH requested AS (
+      SELECT DISTINCT
+        charge.value ->> 'bucket_key' AS bucket_key,
+        batch.value ->> 'client_key' AS client_key
+      FROM jsonb_array_elements(requested_batches) AS batch(value)
+      CROSS JOIN LATERAL
+        jsonb_array_elements(batch.value -> 'charges') AS charge(value)
+    )
+    SELECT
+      bucket.bucket_key,
+      bucket.client_key,
+      bucket.tokens_scaled,
+      bucket.updated_at
+    FROM notify_token_buckets AS bucket
+    JOIN requested USING(bucket_key, client_key)
+    ORDER BY bucket.bucket_key, bucket.client_key
+    FOR UPDATE OF bucket
+  LOOP
+    state_keys := array_append(
+      state_keys,
+      length(locked_bucket_key)::TEXT || ':' || locked_bucket_key
+        || length(locked_client_key)::TEXT || ':' || locked_client_key
+    );
+    state_bucket_keys := array_append(state_bucket_keys, locked_bucket_key);
+    state_client_keys := array_append(state_client_keys, locked_client_key);
+    state_tokens := array_append(state_tokens, locked_tokens);
+    state_updated_at := array_append(state_updated_at, locked_updated_at);
+  END LOOP;
+
   FOR requested_batch, requested_index IN
     SELECT value, ordinality::BIGINT
     FROM jsonb_array_elements(requested_batches) WITH ORDINALITY
   LOOP
     requested_client_key := requested_batch ->> 'client_key';
     requested_checked_at := (requested_batch ->> 'checked_at')::BIGINT;
-    RETURN QUERY
-    SELECT
-      requested_index,
-      charged.charged_bucket_key,
-      charged.remaining_tokens_scaled,
-      charged.effective_checked_at,
-      charged.charge_allowed
-    FROM notify_charge_token_buckets(
-      requested_batch -> 'charges',
-      requested_client_key,
-      requested_checked_at,
-      token_window
-    ) AS charged;
+    FOR charge IN
+      SELECT value FROM jsonb_array_elements(requested_batch -> 'charges')
+    LOOP
+      requested_bucket_key := charge ->> 'bucket_key';
+      token_capacity := (charge ->> 'capacity')::BIGINT;
+      requested_cost := (charge ->> 'cost')::BIGINT;
+      maximum_tokens := token_capacity * token_window;
+      state_key := length(requested_bucket_key)::TEXT || ':'
+        || requested_bucket_key || length(requested_client_key)::TEXT || ':'
+        || requested_client_key;
+      state_index := array_position(state_keys, state_key);
+
+      IF state_index IS NULL THEN
+        RAISE EXCEPTION 'rate-limit bucket state is missing';
+      END IF;
+
+      effective_now := GREATEST(
+        requested_checked_at,
+        state_updated_at[state_index]
+      );
+      IF effective_now - state_updated_at[state_index] >= token_window THEN
+        available_tokens := maximum_tokens;
+      ELSE
+        available_tokens := LEAST(
+          maximum_tokens,
+          state_tokens[state_index] + LEAST(
+            maximum_tokens - state_tokens[state_index],
+            (effective_now - state_updated_at[state_index]) * token_capacity
+          )
+        );
+      END IF;
+      allowed := requested_cost <= token_capacity
+        AND available_tokens >= requested_cost * token_window;
+      IF allowed THEN
+        available_tokens := available_tokens - requested_cost * token_window;
+      END IF;
+
+      state_tokens[state_index] := available_tokens;
+      state_updated_at[state_index] := effective_now;
+      RETURN QUERY SELECT
+        requested_index,
+        requested_bucket_key,
+        available_tokens,
+        effective_now,
+        allowed;
+      EXIT WHEN NOT allowed;
+    END LOOP;
   END LOOP;
+
+  IF array_length(state_keys, 1) IS NOT NULL THEN
+    FOR state_index IN 1..array_length(state_keys, 1)
+    LOOP
+      UPDATE notify_token_buckets AS bucket
+      SET
+        tokens_scaled = state_tokens[state_index],
+        updated_at = state_updated_at[state_index]
+      WHERE bucket.bucket_key = state_bucket_keys[state_index]
+        AND bucket.client_key = state_client_keys[state_index];
+    END LOOP;
+  END IF;
 END;
 $notify_rate_limit_requests$;
 "
 
 const postgres_batch_size = 64
 
-const postgres_batch_wait_milliseconds = 1
+const postgres_batch_wait_milliseconds = 16
 
 pub fn memory(
   requests requests: Int,

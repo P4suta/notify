@@ -116,7 +116,9 @@ attempts (60), authentication failures (10), attachment transfer MiB (120),
 and attachment upload attempts (20). Configure them under `[rate_limit]`, with
 the corresponding `NOTIFY_RATE_LIMIT_*` variables, or with the documented CLI
 flags. In active-active mode PostgreSQL updates each bucket transactionally
-across nodes; limiter storage failure fails closed with HTTP 503.
+across nodes. Concurrent checks are evaluated in arrival order while each
+distinct client/bucket row is locked and written once per bounded batch;
+limiter storage failure fails closed with HTTP 503.
 
 HTTP security and administration changes use an append-only audit log in the
 same SQLite or PostgreSQL backend. A mutation is not run unless its `attempted`
