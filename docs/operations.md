@@ -210,8 +210,11 @@ unsupported schema:
 4. For a fresh reset, move the unsupported file aside and point Notify at a new
    path. Do not overwrite or delete the only copy.
 
-The importer opens sources read-only. Destination promotion and attachment
-rollback guarantees are covered separately by the migration contract suite.
+The importer opens sources read-only. Transactional destination apply and
+attachment rollback guarantees are covered separately by the migration
+contract suite. That suite applies every cache schema 9–15 and auth schema 1–9,
+checks source SHA-256 invariance, and rejects the immediately adjacent
+unsupported versions without creating a destination.
 
 ## Cluster event-log safety
 

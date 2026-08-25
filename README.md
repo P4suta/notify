@@ -179,6 +179,13 @@ first successful login. The lock-file's Argus 1.0.4/Jargon 1.1.0 pair emits
 the PHC version field `v=13`; that exact dependency output is pinned so a
 future correction requires an explicit migration review.
 
+The migration suite applies independent version-shaped fixtures for every
+supported cache schema (9–15) and auth schema (1–9), checks the imported
+message/user/token/ACL semantics, and verifies each source SHA-256 is unchanged.
+It also rejects cache 8/16 and auth 0/10 before creating a destination. The
+combined current-schema fixture separately covers dry-run, Web Push, local
+attachments, idempotency, and attachment rollback after a database conflict.
+
 ## PostgreSQL active-active example
 
 ```sh

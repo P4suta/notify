@@ -41,6 +41,22 @@ The 62-case differential corpus is deliberately bounded. Passing it
 demonstrates only the rows marked **Differential**, not general ntfy
 compatibility.
 
+## Offline migration contract
+
+`notify migrate ntfy` has apply fixtures for every accepted ntfy SQLite cache
+schema 9–15 and auth schema 1–9. These fixtures exercise the four cache column
+layouts and the legacy/current auth split using only the fields consumed by the
+independent importer. Each version verifies imported message or identity/ACL
+semantics and an unchanged source SHA-256. Versions immediately outside the
+documented ranges are rejected before a destination is created.
+
+The combined current-schema fixture additionally covers dry-run, Web Push,
+content-addressed local attachments, idempotent repeated execution,
+transactional database apply, and removal of newly copied attachment objects
+after a conflicting database apply. The fixtures establish the documented
+SQLite import boundary; they do not claim support for ntfy PostgreSQL databases
+or for schema versions outside those ranges.
+
 ## Intentional differences
 
 - Raw bearer tokens are shown once and only their hashes are persisted. Token

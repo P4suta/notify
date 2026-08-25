@@ -1,5 +1,6 @@
 import gleam/bit_array
 import gleam/dynamic/decode
+import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
@@ -19,6 +20,8 @@ import notify/webpush/sqlite as webpush_sqlite
 import sqlight
 
 const bcrypt_fixture = "$2a$10$YLiO8U21sX1uhZamTLJXHuxgVC0Z/GKISibrKCLohPgtG7yIxSk4C"
+
+const token_fixture = "tk_abcdefghijklmnopqrstuvwxyz123"
 
 fn create_cache(path: String, invalid_topic: Bool) {
   let assert Ok(connection) = sqlight.open(path)
@@ -42,24 +45,82 @@ fn create_cache(path: String, invalid_topic: Bool) {
 }
 
 fn create_auth(path: String) {
+  create_auth_version(path, 9)
+}
+
+// Version-shaped fixtures declare only the public SQLite fields consumed by
+// the independent importer; they do not embed ntfy's complete schema.
+fn create_auth_version(path: String, version: Int) {
   let assert Ok(connection) = sqlight.open(path)
-  let assert Ok(_) =
-    sqlight.exec(
-      "CREATE TABLE user (id TEXT PRIMARY KEY, user TEXT NOT NULL, pass TEXT NOT NULL, role TEXT NOT NULL, created INT NOT NULL, deleted INT); CREATE TABLE user_access (user_id TEXT NOT NULL, topic TEXT NOT NULL, read INT NOT NULL, write INT NOT NULL, PRIMARY KEY(user_id, topic)); CREATE TABLE user_token (user_id TEXT NOT NULL, token TEXT NOT NULL, label TEXT NOT NULL, last_access INT NOT NULL, last_origin TEXT NOT NULL, expires INT NOT NULL, provisioned INT NOT NULL, PRIMARY KEY(user_id, token)); CREATE TABLE schemaVersion (id INT PRIMARY KEY, version INT NOT NULL); INSERT INTO schemaVersion VALUES (1, 9);",
-      connection,
-    )
-  let assert Ok(_) =
-    sqlight.query(
-      "INSERT INTO user(id, user, pass, role, created, deleted) VALUES ('u_phil', 'phil', ?, 'admin', 1690000000, NULL), ('u_everyone', '*', '', 'anonymous', 1690000000, NULL)",
-      on: connection,
-      with: [sqlight.text(bcrypt_fixture)],
-      expecting: decode.dynamic,
-    )
-  let assert Ok(_) =
-    sqlight.exec(
-      "INSERT INTO user_access(user_id, topic, read, write) VALUES ('u_phil', 'alerts', 1, 1), ('u_everyone', 'public%', 1, 0); INSERT INTO user_token(user_id, token, label, last_access, last_origin, expires, provisioned) VALUES ('u_phil', 'tk_fixturetoken', 'phone', 1690000001, '', 1800000000, 0);",
-      connection,
-    )
+  case version {
+    1 -> {
+      let assert Ok(_) =
+        sqlight.exec(
+          "CREATE TABLE user (user TEXT NOT NULL PRIMARY KEY, pass TEXT NOT NULL, role TEXT NOT NULL); CREATE TABLE access (user TEXT NOT NULL, topic TEXT NOT NULL, read INT NOT NULL, write INT NOT NULL, PRIMARY KEY(topic, user)); CREATE TABLE schemaVersion (id INT PRIMARY KEY, version INT NOT NULL); INSERT INTO schemaVersion VALUES (1, 1);",
+          connection,
+        )
+      let assert Ok(_) =
+        sqlight.query(
+          "INSERT INTO user(user, pass, role) VALUES ('phil', ?, 'admin'), ('*', '', 'anonymous')",
+          on: connection,
+          with: [sqlight.text(bcrypt_fixture)],
+          expecting: decode.dynamic,
+        )
+      let assert Ok(_) =
+        sqlight.exec(
+          "INSERT INTO access(user, topic, read, write) VALUES ('phil', 'alerts', 1, 1), ('*', 'public%', 1, 0);",
+          connection,
+        )
+      Nil
+    }
+    version if version >= 2 && version <= 9 -> {
+      let provisioned_column = case version >= 6 {
+        True -> ", provisioned INT NOT NULL"
+        False -> ""
+      }
+      let assert Ok(_) =
+        sqlight.exec(
+          "CREATE TABLE user (id TEXT PRIMARY KEY, user TEXT NOT NULL, pass TEXT NOT NULL, role TEXT NOT NULL, created INT NOT NULL, deleted INT); CREATE TABLE user_access (user_id TEXT NOT NULL, topic TEXT NOT NULL, read INT NOT NULL, write INT NOT NULL, PRIMARY KEY(user_id, topic)); CREATE TABLE user_token (user_id TEXT NOT NULL, token TEXT NOT NULL, label TEXT NOT NULL, last_access INT NOT NULL, last_origin TEXT NOT NULL, expires INT NOT NULL"
+            <> provisioned_column
+            <> ", PRIMARY KEY(user_id, token)); CREATE TABLE schemaVersion (id INT PRIMARY KEY, version INT NOT NULL);",
+          connection,
+        )
+      let assert Ok(_) =
+        sqlight.query(
+          "INSERT INTO schemaVersion VALUES (1, ?)",
+          on: connection,
+          with: [sqlight.int(version)],
+          expecting: decode.dynamic,
+        )
+      let assert Ok(_) =
+        sqlight.query(
+          "INSERT INTO user(id, user, pass, role, created, deleted) VALUES ('u_phil', 'phil', ?, 'admin', 1690000000, NULL), ('u_everyone', '*', '', 'anonymous', 1690000000, NULL)",
+          on: connection,
+          with: [sqlight.text(bcrypt_fixture)],
+          expecting: decode.dynamic,
+        )
+      let token_query = case version >= 6 {
+        True ->
+          "INSERT INTO user_token(user_id, token, label, last_access, last_origin, expires, provisioned) VALUES ('u_phil', ?, 'phone', 1690000001, '', 1800000000, 0)"
+        False ->
+          "INSERT INTO user_token(user_id, token, label, last_access, last_origin, expires) VALUES ('u_phil', ?, 'phone', 1690000001, '', 1800000000)"
+      }
+      let assert Ok(_) =
+        sqlight.exec(
+          "INSERT INTO user_access(user_id, topic, read, write) VALUES ('u_phil', 'alerts', 1, 1), ('u_everyone', 'public%', 1, 0);",
+          connection,
+        )
+      let assert Ok(_) =
+        sqlight.query(
+          token_query,
+          on: connection,
+          with: [sqlight.text(token_fixture)],
+          expecting: decode.dynamic,
+        )
+      Nil
+    }
+    _ -> panic as "unsupported auth fixture version"
+  }
   assert sqlight.close(connection) == Ok(Nil)
 }
 
@@ -79,6 +140,77 @@ fn create_v9_cache(path: String) {
     sqlight.exec(
       "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, mid TEXT NOT NULL, time INT NOT NULL, topic TEXT NOT NULL, message TEXT NOT NULL, title TEXT NOT NULL, priority INT NOT NULL, tags TEXT NOT NULL, click TEXT NOT NULL, attachment_name TEXT NOT NULL, attachment_type TEXT NOT NULL, attachment_size INT NOT NULL, attachment_expires INT NOT NULL, attachment_url TEXT NOT NULL, sender TEXT NOT NULL, encoding TEXT NOT NULL, published INT NOT NULL, actions TEXT NOT NULL, icon TEXT NOT NULL); CREATE TABLE schemaVersion (id INT PRIMARY KEY, version INT NOT NULL); INSERT INTO schemaVersion VALUES (1, 9); INSERT INTO messages(mid, time, topic, message, title, priority, tags, click, attachment_name, attachment_type, attachment_size, attachment_expires, attachment_url, sender, encoding, published, actions, icon) VALUES ('OldCache09XY', 1000, 'legacy', 'old schema', '', 3, '', '', '', '', 0, 0, '', '', '', 1, '', '');",
       connection,
+    )
+  assert sqlight.close(connection) == Ok(Nil)
+}
+
+// Cache layouts changed at 10, 12, and 14. Keep each importer query boundary
+// explicit without copying ntfy's migration implementation.
+fn create_cache_version(path: String, version: Int) {
+  let assert Ok(connection) = sqlight.open(path)
+  let added_columns = case version {
+    9 -> ""
+    10 | 11 ->
+      ", user TEXT NOT NULL, attachment_deleted INT NOT NULL, expires INT NOT NULL"
+    12 | 13 ->
+      ", user TEXT NOT NULL, attachment_deleted INT NOT NULL, expires INT NOT NULL, content_type TEXT NOT NULL"
+    14 | 15 ->
+      ", user TEXT NOT NULL, attachment_deleted INT NOT NULL, expires INT NOT NULL, content_type TEXT NOT NULL, sequence_id TEXT NOT NULL, event TEXT NOT NULL"
+    _ -> panic as "unsupported cache fixture version"
+  }
+  let assert Ok(_) =
+    sqlight.exec(
+      "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, mid TEXT NOT NULL, time INT NOT NULL, topic TEXT NOT NULL, message TEXT NOT NULL, title TEXT NOT NULL, priority INT NOT NULL, tags TEXT NOT NULL, click TEXT NOT NULL, attachment_name TEXT NOT NULL, attachment_type TEXT NOT NULL, attachment_size INT NOT NULL, attachment_expires INT NOT NULL, attachment_url TEXT NOT NULL, sender TEXT NOT NULL, encoding TEXT NOT NULL, published INT NOT NULL, actions TEXT NOT NULL, icon TEXT NOT NULL"
+        <> added_columns
+        <> "); CREATE TABLE schemaVersion (id INT PRIMARY KEY, version INT NOT NULL);",
+      connection,
+    )
+  let assert Ok(_) =
+    sqlight.query(
+      "INSERT INTO schemaVersion VALUES (1, ?)",
+      on: connection,
+      with: [sqlight.int(version)],
+      expecting: decode.dynamic,
+    )
+  let message_id =
+    "Schema" <> string.pad_start(int.to_string(version), to: 6, with: "0")
+  let insert_query = case version {
+    9 ->
+      "INSERT INTO messages(mid, time, topic, message, title, priority, tags, click, attachment_name, attachment_type, attachment_size, attachment_expires, attachment_url, sender, encoding, published, actions, icon) VALUES (?, 1000, 'schema', ?, '', 3, '', '', '', '', 0, 0, '', '', '', 1, '', '')"
+    10 | 11 ->
+      "INSERT INTO messages(mid, time, topic, message, title, priority, tags, click, attachment_name, attachment_type, attachment_size, attachment_expires, attachment_url, sender, encoding, published, actions, icon, user, attachment_deleted, expires) VALUES (?, 1000, 'schema', ?, '', 3, '', '', '', '', 0, 0, '', '', '', 1, '', '', '', 0, 2000)"
+    12 | 13 ->
+      "INSERT INTO messages(mid, time, topic, message, title, priority, tags, click, attachment_name, attachment_type, attachment_size, attachment_expires, attachment_url, sender, encoding, published, actions, icon, user, attachment_deleted, expires, content_type) VALUES (?, 1000, 'schema', ?, '', 3, '', '', '', '', 0, 0, '', '', '', 1, '', '', '', 0, 2000, 'text/markdown')"
+    14 | 15 ->
+      "INSERT INTO messages(mid, time, topic, message, title, priority, tags, click, attachment_name, attachment_type, attachment_size, attachment_expires, attachment_url, sender, encoding, published, actions, icon, user, attachment_deleted, expires, content_type, sequence_id, event) VALUES (?, 1000, 'schema', ?, '', 3, '', '', '', '', 0, 0, '', '', '', 1, '', '', '', 0, 2000, 'text/markdown', 'migration-sequence', 'message')"
+    _ -> panic as "unsupported cache fixture version"
+  }
+  let assert Ok(_) =
+    sqlight.query(
+      insert_query,
+      on: connection,
+      with: [
+        sqlight.text(message_id),
+        sqlight.text("cache schema " <> int.to_string(version)),
+      ],
+      expecting: decode.dynamic,
+    )
+  assert sqlight.close(connection) == Ok(Nil)
+}
+
+fn create_schema_version_only(path: String, version: Int) {
+  let assert Ok(connection) = sqlight.open(path)
+  let assert Ok(_) =
+    sqlight.exec(
+      "CREATE TABLE schemaVersion (id INT PRIMARY KEY, version INT NOT NULL);",
+      connection,
+    )
+  let assert Ok(_) =
+    sqlight.query(
+      "INSERT INTO schemaVersion VALUES (1, ?)",
+      on: connection,
+      with: [sqlight.int(version)],
+      expecting: decode.dynamic,
     )
   assert sqlight.close(connection) == Ok(Nil)
 }
@@ -119,6 +251,34 @@ fn options(
     cache_duration_seconds: 43_200,
     now: 1_700_000_100,
     dry_run:,
+  )
+}
+
+fn cache_migration_options(
+  source: String,
+  destination: String,
+) -> ntfy.Options {
+  ntfy.Options(
+    cache_file: Some(source),
+    auth_file: None,
+    webpush_file: None,
+    attachment_directory: None,
+    destination_file: destination,
+    destination_attachments: None,
+    base_url: "https://notify.example.test",
+    default_access: acl.ReadWrite,
+    cache_duration_seconds: 600,
+    now: 2000,
+    dry_run: False,
+  )
+}
+
+fn auth_migration_options(source: String, destination: String) -> ntfy.Options {
+  ntfy.Options(
+    ..cache_migration_options(source, destination),
+    cache_file: None,
+    auth_file: Some(source),
+    default_access: acl.Deny,
   )
 }
 
@@ -264,6 +424,117 @@ pub fn ntfy_v9_cache_backfills_expiry_using_configured_retention_test() {
     ))
   assert imported.expires == Some(1600)
   assert imported.sequence_id == None
+}
+
+pub fn every_supported_ntfy_cache_schema_is_applied_without_mutating_source_test() {
+  let assert Ok(directory) = filesystem.temporary_directory()
+  list.each([9, 10, 11, 12, 13, 14, 15], fn(version) {
+    let suffix = int.to_string(version)
+    let source = directory <> "/cache-v" <> suffix <> ".db"
+    let destination = directory <> "/notify-cache-v" <> suffix <> ".db"
+    create_cache_version(source, version)
+    let assert Ok(before) = ntfy.source_digests([source])
+
+    let assert Ok(report) =
+      ntfy.run(cache_migration_options(source, destination))
+    assert report.messages == ntfy.Counts(scanned: 1, migrated: 1, skipped: 0)
+    assert ntfy.source_digests([source]) == Ok(before)
+
+    let assert Ok(store) = sqlite.start(destination)
+    let assert Ok(schema_topic) = topic.parse("schema")
+    let assert Ok([imported]) =
+      store.query(storage.Query(
+        topics: [schema_topic],
+        since: storage.All,
+        include_scheduled: True,
+        criteria: filter.none(),
+      ))
+    assert imported.id == "Schema" <> string.pad_start(suffix, to: 6, with: "0")
+    assert imported.message == "cache schema " <> suffix
+    assert imported.expires
+      == case version {
+        9 -> Some(1600)
+        _ -> Some(2000)
+      }
+    assert imported.markdown == version >= 12
+    assert imported.sequence_id
+      == case version >= 14 {
+        True -> Some("migration-sequence")
+        False -> None
+      }
+  })
+}
+
+pub fn every_supported_ntfy_auth_schema_is_applied_without_mutating_source_test() {
+  let assert Ok(directory) = filesystem.temporary_directory()
+  list.each([1, 2, 3, 4, 5, 6, 7, 8, 9], fn(version) {
+    let suffix = int.to_string(version)
+    let source = directory <> "/auth-v" <> suffix <> ".db"
+    let destination = directory <> "/notify-auth-v" <> suffix <> ".db"
+    create_auth_version(source, version)
+    let assert Ok(before) = ntfy.source_digests([source])
+
+    let assert Ok(report) =
+      ntfy.run(auth_migration_options(source, destination))
+    assert report.users == ntfy.Counts(scanned: 1, migrated: 1, skipped: 0)
+    assert report.acl_rules == ntfy.Counts(scanned: 2, migrated: 2, skipped: 0)
+    assert report.tokens
+      == case version {
+        1 -> ntfy.Counts(scanned: 0, migrated: 0, skipped: 0)
+        _ -> ntfy.Counts(scanned: 1, migrated: 1, skipped: 0)
+      }
+    assert ntfy.source_digests([source]) == Ok(before)
+
+    let assert Ok(identity) = identity_sqlite.open_store(destination)
+    let assert Ok(control) = access.managed(identity)
+    let assert Ok([user]) = access.list_users(control)
+    assert user.username == "phil"
+    let assert Ok(rules) = access.list_grants(control, None)
+    assert list.any(rules, fn(rule) {
+      rule.username == "phil"
+      && rule.topic_pattern == "alerts"
+      && rule.permission == acl.ReadWrite
+    })
+    assert list.any(rules, fn(rule) {
+      rule.username == "*"
+      && rule.topic_pattern == "public*"
+      && rule.permission == acl.ReadOnly
+    })
+    let assert Ok(tokens) = access.list_tokens(control, "phil")
+    assert list.length(tokens)
+      == case version {
+        1 -> 0
+        _ -> 1
+      }
+  })
+}
+
+pub fn ntfy_migration_rejects_schema_versions_outside_the_documented_matrix_test() {
+  let assert Ok(directory) = filesystem.temporary_directory()
+  list.each([8, 16], fn(version) {
+    let suffix = int.to_string(version)
+    let source = directory <> "/unsupported-cache-v" <> suffix <> ".db"
+    let destination =
+      directory <> "/unsupported-cache-target-v" <> suffix <> ".db"
+    create_schema_version_only(source, version)
+    let assert Ok(before) = ntfy.source_digests([source])
+    assert ntfy.run(cache_migration_options(source, destination))
+      == Error(ntfy.UnsupportedSchema("cache", version))
+    assert ntfy.source_digests([source]) == Ok(before)
+    assert ntfy.path_exists(destination) == False
+  })
+  list.each([0, 10], fn(version) {
+    let suffix = int.to_string(version)
+    let source = directory <> "/unsupported-auth-v" <> suffix <> ".db"
+    let destination =
+      directory <> "/unsupported-auth-target-v" <> suffix <> ".db"
+    create_schema_version_only(source, version)
+    let assert Ok(before) = ntfy.source_digests([source])
+    assert ntfy.run(auth_migration_options(source, destination))
+      == Error(ntfy.UnsupportedSchema("auth", version))
+    assert ntfy.source_digests([source]) == Ok(before)
+    assert ntfy.path_exists(destination) == False
+  })
 }
 
 pub fn local_ntfy_attachments_are_content_addressed_and_rolled_back_on_db_failure_test() {
