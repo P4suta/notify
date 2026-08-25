@@ -37,6 +37,47 @@ function Invoke-Notify {
     return $output
 }
 
+function Invoke-ErlangNifProbe {
+    param(
+        [string]$Application,
+        [string]$LibraryName,
+        [string]$Expression
+    )
+
+    $ertsExecutables = @(Get-ChildItem -LiteralPath $env:NOTIFY_INSTALL_DIR `
+        -Recurse -File -Filter "erl.exe")
+    if ($ertsExecutables.Count -ne 1) {
+        throw "native install did not contain exactly one erl.exe"
+    }
+    $libraryRoot = Join-Path $env:NOTIFY_INSTALL_DIR "lib"
+    $applicationDirectories = @(Get-ChildItem -LiteralPath $libraryRoot `
+        -Directory -Filter "$Application-*")
+    if ($applicationDirectories.Count -ne 1) {
+        throw "native install did not contain exactly one $Application application"
+    }
+    $nifPath = Join-Path $applicationDirectories[0].FullName "priv/$LibraryName"
+    if (-not (Test-Path -LiteralPath $nifPath -PathType Leaf)) {
+        throw "native install omitted $LibraryName"
+    }
+
+    $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+    try {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $probeOutput = @(& $ertsExecutables[0].FullName `
+            -noshell `
+            -pa (Join-Path $applicationDirectories[0].FullName "ebin") `
+            -eval $Expression 2>&1 | ForEach-Object { "$_" })
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+    }
+    if ($exitCode -ne 0) {
+        $redacted = ($probeOutput -join "`n") -replace 'tk_[A-Za-z0-9]{29}', '<redacted>'
+        throw "$Application NIF probe failed`n$redacted"
+    }
+}
+
 function Start-NotifyServer {
     $script:serverLog = Join-Path $script:smokeDirectory "server.log"
     $script:serverError = Join-Path $script:smokeDirectory "server-error.log"
@@ -92,10 +133,27 @@ try {
     $env:NOTIFY_ATTACHMENT_BACKEND = "filesystem"
     $env:NOTIFY_ATTACHMENT_DIRECTORY = Join-Path $smokeDirectory "attachments"
     $env:NOTIFY_PASSWORD = $password
+    $env:ERL_CRASH_DUMP = Join-Path $smokeDirectory "erl_crash.dump"
 
     $help = Invoke-Notify @("help")
     if (($help -join "`n") -notmatch "Usage: notify <command> \[options\]") {
         throw "native help contract is missing"
+    }
+    Invoke-ErlangNifProbe `
+        -Application "esqlite" `
+        -LibraryName "esqlite3_nif.dll" `
+        -Expression 'case esqlite3:open(":memory:") of {ok, Connection} -> ok = esqlite3:close(Connection), halt(0); Other -> io:format("~p~n", [Other]), halt(2) end.'
+    Invoke-ErlangNifProbe `
+        -Application "jargon" `
+        -LibraryName "jargon.dll" `
+        -Expression 'case jargon:hash(<<"native-smoke-password">>, <<"0123456789abcdef0123456789abcdef">>, argon2id, 1, 1024, 1, 16) of {ok, _, _} -> halt(0); Other -> io:format("~p~n", [Other]), halt(2) end.'
+    Invoke-ErlangNifProbe `
+        -Application "bcrypt" `
+        -LibraryName "bcrypt_nif.dll" `
+        -Expression 'try _ = bcrypt_nif:create_ctx(), halt(0) catch Class:Reason:Stack -> io:format("~p:~p~n~p~n", [Class, Reason, Stack]), halt(2) end.'
+    $doctor = Invoke-Notify @("doctor")
+    if (($doctor -join "`n") -notmatch "PASS doctor: all required dependencies are healthy") {
+        throw "native doctor did not report healthy dependencies"
     }
     $setup = Invoke-Notify @("setup", "--username", $username, "--anonymous-access", "deny")
     if (($setup -join "`n") -notmatch "setup complete; administrator admin created") {
@@ -131,6 +189,13 @@ try {
     Stop-NotifyServerForRecovery
 
     Write-Output "Windows native setup, publish/poll, and forced-stop recovery smoke passed"
+}
+catch {
+    if (Test-Path -LiteralPath $env:ERL_CRASH_DUMP -PathType Leaf) {
+        Write-Output "Erlang crash dump tail:"
+        Get-Content -LiteralPath $env:ERL_CRASH_DUMP -Tail 120
+    }
+    throw
 }
 finally {
     Stop-NotifyServerForRecovery
