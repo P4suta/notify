@@ -35,6 +35,7 @@ import notify/identity
 import notify/identity/postgres as identity_postgres
 import notify/identity/sqlite as identity_sqlite
 import notify/log as notify_log
+import notify/network
 import notify/proxy
 import notify/rate_limit
 import notify/runtime
@@ -82,6 +83,7 @@ type Persistence {
 }
 
 pub fn start(config: Config) -> Result(Started, Error) {
+  network.configure_tcp_clients()
   let previously_trapping_exits = set_trap_exits(True)
   let existing_processes = linked_processes()
   let outcome = case start_sqlite_process_lock(config) {
@@ -133,7 +135,6 @@ fn start_after_lock(
       ids: runtime.secure_ids(),
       retention_seconds: config.retention_seconds,
     )
-    |> runtime.with_broadcast(bus.broadcast)
     |> runtime.with_access(access_control)
     |> runtime.with_attachments(
       attachment_files,
@@ -149,6 +150,10 @@ fn start_after_lock(
     |> runtime.with_rate_limiter(limiter)
     |> runtime.with_audit(audit_store)
     |> runtime.with_template_directory(config.template_directory)
+  let runtime = case config.cluster_enabled {
+    True -> runtime
+    False -> runtime.with_broadcast(runtime, bus.broadcast)
+  }
   let runtime = case config.cluster_enabled, postgres_adapter {
     True, Some(adapter) ->
       runtime.with_cluster_health(runtime, adapter.cluster_health)

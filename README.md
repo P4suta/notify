@@ -207,8 +207,9 @@ single URL, after which reuse is rejected across the cluster.
 The durable PostgreSQL event log is authoritative. LISTEN/NOTIFY only wakes
 nodes; each node resumes from its stored cursor after lost notifications or a
 restart. A node advances its cursor only after the broker has synchronously
-applied every remote event in sequence; a dispatch or cursor-write failure
-leaves the batch available for at-least-once retry. Cursor heartbeats protect
+applied every non-scheduled event, including its own origin, in sequence; a
+dispatch or cursor-write failure leaves the batch available for at-least-once
+retry. Cursor heartbeats protect
 active readers, cursors stale for seven days are removed, and compaction deletes
 only acknowledged event rows whose message has already expired. Scheduled
 publication uses `FOR UPDATE SKIP LOCKED` and commits the released message plus
@@ -216,9 +217,10 @@ its event in one transaction. These paths have real-PostgreSQL contract
 coverage. The contract also terminates the dedicated LISTEN backend, commits an
 event while it is disconnected, requires a new listener PID to catch up from
 the log, and proves duplicate wake-ups do not duplicate delivery. A separate
-three-node data-plane contract stops one bus actor, commits on both surviving
-origins, and requires the restarted node to resume both events in sequence from
-its durable cursor. A weekly/manual full-container contract additionally
+three-node data-plane contract requires every node to consume both local- and
+remote-origin events in the same durable order, stops one bus actor, commits on
+both surviving origins, and requires the restarted node to resume both events
+in sequence from its durable cursor. A weekly/manual full-container contract additionally
 SIGKILLs one of three nodes, publishes through both survivors, restarts the
 failed node, and verifies ordered replay plus message-ID live resume.
 Simultaneous multi-node outage and long-duration soak coverage remain open.
@@ -230,8 +232,11 @@ pool plus a separate dedicated LISTEN connection. Reads and cursor operations
 can use different workers. Transactions that append events take one database
 advisory transaction lock before allocating message/event sequence values, so
 concurrent commits cannot expose a higher cursor while a lower event remains
-uncommitted. A failed operation is returned to its caller without an ambiguous
-automatic write retry; that worker replaces its connection for subsequent
+uncommitted. Notify enables `TCP_NODELAY` for outbound Erlang client sockets
+before opening the pool, while preserving other configured connect defaults;
+this avoids delayed-ACK stalls across PostgreSQL protocol round trips. A failed
+operation is returned to its caller without an ambiguous automatic write retry;
+that worker replaces its connection for subsequent
 operations. The fixed pool and forced-backend-termination recovery have
 real-PostgreSQL tests, but the target throughput is still unverified.
 

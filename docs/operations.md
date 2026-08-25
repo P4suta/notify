@@ -227,18 +227,23 @@ unsupported versions without creating a destination.
 
 `LISTEN/NOTIFY` is only a wake-up signal; the PostgreSQL event log is the source
 of truth. A node reads after its durable cursor and acknowledges only after the
-batch has been processed. Remote, non-scheduled events pass through a synchronous
-broker dispatch barrier in sequence. If any dispatch fails, the cursor is not
+batch has been processed. Every non-scheduled event, including events created
+by the current node, passes through a synchronous broker dispatch barrier in
+sequence. If any dispatch fails, the cursor is not
 written; if the cursor write itself fails, the complete fetched batch remains
 eligible for replay. Either recovery path may redeliver an earlier message, so
-clients de-duplicate with the 12-character message ID. HTTP publish still
-returns after the durable commit and uses asynchronous local fan-out, keeping
-subscriber work outside publish commit latency.
+clients de-duplicate with the 12-character message ID. HTTP publish returns
+after the durable commit; in cluster mode it never fans out directly. The
+per-node event dispatcher is the single live-delivery path for both local and
+remote origins, keeping subscriber work outside publish commit latency.
 
 Message persistence has four round-robin worker connections per node. The
 LISTEN loop owns a separate connection and never borrows a query worker. Health
-checks cover all four workers. After an unavailable operation, the affected
-worker attempts to establish a replacement connection for later calls; the
+checks cover all four workers. Before these clients connect, Notify enables
+`TCP_NODELAY` through Erlang's documented default connect options and retains
+all unrelated defaults. This prevents Nagle/delayed-ACK pauses from multiplying
+the PostgreSQL wire protocol's request/response round trips. After an unavailable
+operation, the affected worker attempts to establish a replacement connection for later calls; the
 failed call is still returned as an error and an ambiguous write is never
 silently retried.
 
@@ -260,8 +265,9 @@ commits, event-lock blocking, one forced backend termination and connection
 replacement, scheduled release, and compaction. It also terminates the dedicated
 LISTEN backend, commits during the disconnect, waits for a different backend PID
 to reconnect and catch up from the event log, and injects duplicate wake-ups
-without duplicate delivery. A three-node case verifies ordered cross-origin
-fan-out, stops one bus actor after its cursor is durable, commits on both
+without duplicate delivery. A three-node case verifies that all nodes consume
+local- and remote-origin events in the same sequence, stops one bus actor after
+its cursor is durable, commits on both
 surviving origins, and restarts the same node identity to catch up both events
 in sequence. These persistence cases run against real PostgreSQL in the
 pull-request gate. The weekly/manual container contract starts three complete

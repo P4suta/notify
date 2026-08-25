@@ -31,7 +31,7 @@ fn fixture(id: String, scheduled: Bool) -> message.Message {
   )
 }
 
-pub fn durable_cluster_drain_skips_local_and_scheduled_events_then_acks_test() {
+pub fn durable_cluster_drain_dispatches_local_and_remote_events_in_sequence_test() {
   let assert Ok(store) = memory.start()
   let acknowledgements = process.new_subject()
   let deliveries = process.new_subject()
@@ -57,6 +57,7 @@ pub fn durable_cluster_drain_skips_local_and_scheduled_events_then_acks_test() {
       Ok(Nil)
     })
     == Ok(3)
+  assert process.receive(deliveries, 100) == Ok("Cluster001")
   assert process.receive(deliveries, 100) == Ok("Cluster003")
   assert process.receive(deliveries, 10) == Error(Nil)
   assert process.receive(acknowledgements, 100) == Ok(#("node-a", 3))

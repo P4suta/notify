@@ -5,6 +5,7 @@
 -compile({no_auto_import,[atom_to_binary/1]}).
 
 -export([argv/0, getenv/1, read_file/1, ensure_parent/1, unix_seconds/0,
+         configure_tcp_clients/0, tcp_nodelay_enabled/0,
          monotonic_milliseconds/0, random_id/0,
          random_token_entropy/0, sha256_hex/1, sha256_hex_bytes/1,
          sha256_init/0, sha256_update/2, sha256_final_hex/1,
@@ -40,6 +41,22 @@ argv() ->
         undefined -> init:get_plain_arguments()
     end,
     [unicode:characters_to_binary(Arg) || Arg <- Arguments].
+
+configure_tcp_clients() ->
+    Existing = case application:get_env(kernel, inet_default_connect_options) of
+        {ok, Options} when is_list(Options) -> Options;
+        _ -> []
+    end,
+    Updated = lists:keystore(nodelay, 1, Existing, {nodelay, true}),
+    ok = application:set_env(kernel, inet_default_connect_options, Updated),
+    nil.
+
+tcp_nodelay_enabled() ->
+    case application:get_env(kernel, inet_default_connect_options) of
+        {ok, Options} when is_list(Options) ->
+            proplists:get_value(nodelay, Options, false) =:= true;
+        _ -> false
+    end.
 
 nil_value() -> nil.
 

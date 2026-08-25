@@ -70,8 +70,7 @@ fn listen_loop(
   dispatch: fn(Message) -> Result(Nil, storage.Error),
 ) -> Nil {
   let _ = drain_all(adapter, node_id, dispatch)
-  process.sleep(reconnect_milliseconds)
-  case notifications.receive_notifications(state, 5000) {
+  case notifications.receive_notifications(state, reconnect_milliseconds) {
     Error(_) -> {
       connection.disconnect(state)
       connect_loop(config, adapter, node_id, dispatch)
@@ -104,7 +103,7 @@ pub fn drain_once(
   use events <- result.try(fetch_events(node_id, batch_size))
   use _ <- result.try(
     list.try_each(events, fn(event) {
-      case event.origin_node != node_id && !event.message.scheduled {
+      case !event.message.scheduled {
         True -> dispatch(event.message)
         False -> Ok(Nil)
       }

@@ -696,10 +696,12 @@ pub fn postgres_three_node_bus_catches_up_after_actor_restart_test() {
         fixture_on_topic("PgNode002CXY", False, 501, "postgres-three-node")
       assert messages_a.save(first) == Ok(first)
       assert messages_c.save(second) == Ok(second)
+      assert process.receive(deliveries_a, 10_000) == Ok(first.id)
       assert process.receive(deliveries_a, 10_000) == Ok(second.id)
       assert process.receive(deliveries_b, 10_000) == Ok(first.id)
       assert process.receive(deliveries_b, 10_000) == Ok(second.id)
       assert process.receive(deliveries_c, 10_000) == Ok(first.id)
+      assert process.receive(deliveries_c, 10_000) == Ok(second.id)
       assert process.receive(deliveries_a, 500) == Error(Nil)
       assert process.receive(deliveries_b, 500) == Error(Nil)
       assert process.receive(deliveries_c, 500) == Error(Nil)
@@ -713,8 +715,10 @@ pub fn postgres_three_node_bus_catches_up_after_actor_restart_test() {
         fixture_on_topic("PgNode004CXY", False, 503, "postgres-three-node")
       assert messages_a.save(third) == Ok(third)
       assert messages_c.save(fourth) == Ok(fourth)
+      assert process.receive(deliveries_a, 10_000) == Ok(third.id)
       assert process.receive(deliveries_a, 10_000) == Ok(fourth.id)
       assert process.receive(deliveries_c, 10_000) == Ok(third.id)
+      assert process.receive(deliveries_c, 10_000) == Ok(fourth.id)
       assert process.receive(deliveries_b, 1500) == Error(Nil)
 
       let restarted_b =
