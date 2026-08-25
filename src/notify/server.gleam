@@ -149,6 +149,11 @@ fn start_after_lock(
     |> runtime.with_rate_limiter(limiter)
     |> runtime.with_audit(audit_store)
     |> runtime.with_template_directory(config.template_directory)
+  let runtime = case config.cluster_enabled, postgres_adapter {
+    True, Some(adapter) ->
+      runtime.with_cluster_health(runtime, adapter.cluster_health)
+    _, _ -> runtime
+  }
   let runtime = case webpush_runtime {
     None -> runtime
     Some(configured) -> runtime.with_webpush(runtime, configured)

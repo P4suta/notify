@@ -75,11 +75,11 @@ nodes must use the same capacities and refill period.
 
 ## Management collection pagination
 
-`GET /api/v1/users`, `/tokens`, `/acl`, `/delivery-jobs`, and `/attachments`
-use the same keyset page envelope as audit: `items` and `next_cursor`. The
-default limit is 50 and the maximum is 100. Limits outside 1–100, malformed or
-non-canonical cursors, cursors from another collection, and cursors issued for
-different username/kind filters fail with HTTP 400.
+`GET /api/v1/users`, `/tokens`, `/acl`, `/delivery-jobs`, `/attachments`, and
+`/cluster` use the same keyset page envelope as audit: `items` and
+`next_cursor`. The default limit is 50 and the maximum is 100. Limits outside
+1–100, malformed or non-canonical cursors, cursors from another collection,
+and cursors issued for different username/kind filters fail with HTTP 400.
 
 Cursors are opaque canonical base64url values. Ordering keys are username for
 users, token ID within a username, username/topic-pattern for ACL rules, job ID
@@ -93,6 +93,13 @@ ListObjectsV2 `start-after`/`max-keys`, and filesystem reads metadata only for
 the selected hash keys. Filesystem directory-name enumeration still scans and
 sorts the directory, so very large filesystem inventories should be sharded or
 use PostgreSQL/S3 until a persistent filesystem metadata index is available.
+Cluster pages order the PostgreSQL `notify_node_cursors` primary key by node ID
+and read at most `limit + 1` rows. Their summary and page share one read-only,
+repeatable-read transaction and PostgreSQL clock. The response contains only
+node ID, durable sequence, event-head lag, update time, and stale status; it
+never includes database configuration, credentials, event payloads, message
+content, or attachment metadata. When clustering is disabled, the endpoint
+returns `enabled: false` with an empty page.
 
 ## Audit durability and redaction
 

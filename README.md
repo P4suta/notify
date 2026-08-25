@@ -272,7 +272,8 @@ certification; the exact evidence is recorded in
   bodies; transport-level streaming and sendfile remain open.
 - Operations: liveness, readiness, Prometheus metrics, request IDs, human/JSON
   logs, effective configuration, OpenAPI, audit inspection, delivery
-  inspection/retry/purge, and attachment inspection. Every management
+  inspection/retry/purge, attachment inspection, and redacted PostgreSQL
+  cluster cursor/lag health. Every management
   collection uses strict 50-default/100-maximum opaque keyset pages whose
   cursors are bound to the collection and active filters.
 - PWA: Gleam/Lustre MVU interface, English/Japanese copy, live timeline,

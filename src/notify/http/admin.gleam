@@ -13,6 +13,7 @@ import gleam/string
 import notify/access
 import notify/attachment_store
 import notify/audit
+import notify/cluster/health as cluster_health_model
 import notify/core/acl
 import notify/delivery
 import notify/http/audit_log
@@ -122,6 +123,8 @@ pub fn route(
       )
     Get, ["api", "v1", "system", "health"] ->
       Some(with_admin(req, runtime, fn(_) { system_health(runtime) }))
+    Get, ["api", "v1", "cluster"] ->
+      Some(with_admin(req, runtime, fn(_) { cluster_health(req, runtime) }))
     Get, ["api", "v1", "delivery-jobs"] ->
       Some(with_admin(req, runtime, fn(_) { list_delivery_jobs(req, runtime) }))
     Post, ["api", "v1", "delivery-jobs", id, "retry"] ->
@@ -799,6 +802,114 @@ fn system_health(runtime: Runtime) -> Response(BitArray) {
       #("compatibility", json.string("ntfy v2.27.0")),
     ]),
   )
+}
+
+fn cluster_health(
+  req: Request(BitArray),
+  runtime: Runtime,
+) -> Response(BitArray) {
+  case keyset_request(req, "cluster_nodes") {
+    Error(_) -> invalid_page()
+    Ok(paging) ->
+      case runtime.cluster_health {
+        None -> cluster_disabled_response(runtime)
+        Some(store) -> {
+          let KeysetRequest(after:, limit:, ..) = paging
+          case store.inspect(after, limit) {
+            Error(cluster_health_model.InvalidPage) -> invalid_page()
+            Error(_) ->
+              problem(
+                503,
+                "Cluster health unavailable",
+                "Could not inspect the durable cluster cursors",
+              )
+            Ok(snapshot) -> cluster_snapshot_response(paging, snapshot)
+          }
+        }
+      }
+  }
+}
+
+fn cluster_disabled_response(runtime: Runtime) -> Response(BitArray) {
+  let runtime.Clock(now) = runtime.clock
+  json_response(
+    200,
+    json.object([
+      #("healthy", json.bool(True)),
+      #("enabled", json.bool(False)),
+      #("backend", json.string("single_node")),
+      #("node_id", json.null()),
+      #("event_head", json.int(0)),
+      #("database_time", json.int(now())),
+      #("cursor_count", json.int(0)),
+      #("stale_nodes", json.int(0)),
+      #(
+        "stale_after_seconds",
+        json.int(cluster_health_model.stale_after_seconds),
+      ),
+      #(
+        "items",
+        json.array([], fn(node: cluster_health_model.Node) {
+          cluster_node_json(node, 0)
+        }),
+      ),
+      #("next_cursor", json.null()),
+    ]),
+  )
+}
+
+fn cluster_snapshot_response(
+  paging: KeysetRequest,
+  snapshot: cluster_health_model.Snapshot,
+) -> Response(BitArray) {
+  let KeysetRequest(resource:, ..) = paging
+  let cluster_health_model.Snapshot(nodes:, ..) = snapshot
+  let cluster_health_model.Page(items:, has_more:) = nodes
+  let next_cursor = case has_more {
+    False -> None
+    True ->
+      items
+      |> list.last
+      |> result.map(fn(node) { cursor.encode_key(resource, node.node_id) })
+      |> option_from_result
+  }
+  json_response(
+    200,
+    json.object([
+      #("healthy", json.bool(snapshot.stale_nodes == 0)),
+      #("enabled", json.bool(True)),
+      #("backend", json.string("postgresql")),
+      #("node_id", json.string(snapshot.local_node_id)),
+      #("event_head", json.int(snapshot.event_head)),
+      #("database_time", json.int(snapshot.database_time)),
+      #("cursor_count", json.int(snapshot.cursor_count)),
+      #("stale_nodes", json.int(snapshot.stale_nodes)),
+      #(
+        "stale_after_seconds",
+        json.int(cluster_health_model.stale_after_seconds),
+      ),
+      #(
+        "items",
+        json.array(items, fn(node) {
+          cluster_node_json(node, snapshot.event_head)
+        }),
+      ),
+      #("next_cursor", json.nullable(next_cursor, json.string)),
+    ]),
+  )
+}
+
+fn cluster_node_json(
+  node: cluster_health_model.Node,
+  event_head: Int,
+) -> json.Json {
+  json.object([
+    #("node_id", json.string(node.node_id)),
+    #("sequence", json.int(node.sequence)),
+    #("lag_events", json.int(int.max(0, event_head - node.sequence))),
+    #("updated_at", json.int(node.updated_at)),
+    #("stale", json.bool(node.stale)),
+  ])
 }
 
 fn list_audit(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {

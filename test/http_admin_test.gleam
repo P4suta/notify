@@ -6,11 +6,13 @@ import gleam/http/response
 import gleam/int
 import gleam/json
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{None, Some}
+import gleam/order
 import gleam/string
 import notify/access
 import notify/attachment_store
 import notify/attachment_store/memory as attachment_memory
+import notify/cluster/health as cluster_health
 import notify/delivery
 import notify/delivery/memory as delivery_memory
 import notify/http/cursor
@@ -249,6 +251,133 @@ pub fn admin_can_inspect_delivery_failures_without_payload_content_test() {
   assert !string.contains(body, "secret-endpoint")
 }
 
+pub fn cluster_health_is_admin_only_redacted_and_keyset_paginated_test() {
+  let #(initial, setup_token) = managed_runtime()
+  let nodes = [
+    cluster_health.Node("node-a", 8, 1000, False),
+    cluster_health.Node("node-b", 6, 900, True),
+    cluster_health.Node("node-c", 9, 1001, False),
+  ]
+  let monitor =
+    cluster_health.Store(fn(after, limit) {
+      let remaining = case after {
+        None -> nodes
+        Some(key) ->
+          list.filter(nodes, fn(node) {
+            string.compare(node.node_id, key) == order.Gt
+          })
+      }
+      Ok(cluster_health.Snapshot(
+        local_node_id: "node-a",
+        event_head: 9,
+        database_time: 1001,
+        cursor_count: 3,
+        stale_nodes: 1,
+        nodes: cluster_health.Page(
+          items: list.take(remaining, limit),
+          has_more: list.length(remaining) > limit,
+        ),
+      ))
+    })
+  let runtime = runtime.with_cluster_health(initial, monitor)
+  complete_setup(runtime, setup_token)
+
+  let unauthenticated =
+    request.new()
+    |> request.set_method(http.Get)
+    |> request.set_path("/api/v1/cluster")
+    |> request.set_body(<<>>)
+    |> router.handle(runtime)
+  assert unauthenticated.status == 401
+
+  let first =
+    admin_request(http.Get, "/api/v1/cluster", "")
+    |> request.set_query([#("limit", "1")])
+    |> router.handle(runtime)
+  assert first.status == 200
+  let assert Ok(first_body) = bit_array.to_string(first.body)
+  let assert Ok(#(healthy, enabled, event_head, node_ids, next_cursor)) =
+    json.parse(first_body, {
+      use healthy <- decode.field("healthy", decode.bool)
+      use enabled <- decode.field("enabled", decode.bool)
+      use event_head <- decode.field("event_head", decode.int)
+      use node_ids <- decode.field(
+        "items",
+        decode.list({
+          use node_id <- decode.field("node_id", decode.string)
+          decode.success(node_id)
+        }),
+      )
+      use next_cursor <- decode.field("next_cursor", decode.string)
+      decode.success(#(healthy, enabled, event_head, node_ids, next_cursor))
+    })
+  assert healthy == False
+  assert enabled == True
+  assert event_head == 9
+  assert node_ids == ["node-a"]
+  assert !string.contains(next_cursor, "node-a")
+  assert string.contains(first_body, "\"lag_events\":1")
+  assert string.contains(first_body, "\"stale_nodes\":1")
+  assert !string.contains(first_body, "private-message")
+  assert !string.contains(first_body, "postgresql://")
+
+  let second =
+    admin_request(http.Get, "/api/v1/cluster", "")
+    |> request.set_query([#("limit", "1"), #("cursor", next_cursor)])
+    |> router.handle(runtime)
+  assert second.status == 200
+  let assert Ok(second_body) = bit_array.to_string(second.body)
+  assert string.contains(second_body, "\"node_id\":\"node-b\"")
+  assert string.contains(second_body, "\"lag_events\":3")
+  assert string.contains(second_body, "\"stale\":true")
+
+  let cross_resource =
+    admin_request(http.Get, "/api/v1/cluster", "")
+    |> request.set_query([
+      #("cursor", cursor.encode_key("attachments", string.repeat("a", 64))),
+    ])
+    |> router.handle(runtime)
+  assert cross_resource.status == 400
+}
+
+pub fn single_node_cluster_health_is_an_empty_enabled_false_snapshot_test() {
+  let #(runtime, setup_token) = managed_runtime()
+  complete_setup(runtime, setup_token)
+  let response =
+    admin_request(http.Get, "/api/v1/cluster", "")
+    |> router.handle(runtime)
+  assert response.status == 200
+  let assert Ok(body) = bit_array.to_string(response.body)
+  assert string.contains(body, "\"healthy\":true")
+  assert string.contains(body, "\"enabled\":false")
+  assert string.contains(body, "\"backend\":\"single_node\"")
+  assert string.contains(body, "\"node_id\":null")
+  assert string.contains(body, "\"items\":[]")
+  assert string.contains(body, "\"next_cursor\":null")
+}
+
+pub fn cluster_health_failure_is_a_redacted_service_unavailable_problem_test() {
+  let #(initial, setup_token) = managed_runtime()
+  let runtime =
+    runtime.with_cluster_health(
+      initial,
+      cluster_health.Store(fn(_, _) {
+        Error(cluster_health.Unavailable(
+          "postgresql://admin:secret@database/private-message",
+        ))
+      }),
+    )
+  complete_setup(runtime, setup_token)
+  let response =
+    admin_request(http.Get, "/api/v1/cluster", "")
+    |> router.handle(runtime)
+  assert response.status == 503
+  let assert Ok(body) = bit_array.to_string(response.body)
+  assert string.contains(body, "Cluster health unavailable")
+  assert !string.contains(body, "admin:secret")
+  assert !string.contains(body, "private-message")
+}
+
 pub fn admin_can_retry_and_purge_dead_letter_delivery_jobs_test() {
   let #(runtime, setup_token) = managed_runtime()
   complete_setup(runtime, setup_token)
@@ -368,6 +497,7 @@ pub fn every_management_collection_rejects_invalid_paging_parameters_test() {
     #("/api/v1/acl", []),
     #("/api/v1/delivery-jobs", []),
     #("/api/v1/attachments", []),
+    #("/api/v1/cluster", []),
   ]
 
   list.each(collections, fn(collection) {

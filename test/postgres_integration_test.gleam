@@ -10,6 +10,7 @@ import notify/attachment_store
 import notify/attachment_store/postgres as attachment_postgres
 import notify/audit
 import notify/audit/postgres as audit_postgres
+import notify/cluster/health as cluster_health
 import notify/cluster/postgres_bus
 import notify/core/acl
 import notify/core/filter
@@ -532,6 +533,60 @@ pub fn postgres_storage_event_replay_and_paging_contract_test() {
       let assert Ok(other_topic) = topic.parse("other")
       assert messages.has_attachment(other_topic, attachment_key) == Ok(False)
 
+      drop_test_database(database)
+    }
+  }
+}
+
+pub fn postgres_cluster_health_is_bounded_and_uses_database_time_test() {
+  case test_database() {
+    Error(_) -> Nil
+    Ok(database) -> {
+      let TestDatabase(configuration:, ..) = database
+      let assert Ok(adapter) = postgres.start(configuration, "node-local")
+      let postgres.Adapter(
+        storage: messages,
+        ack_events:,
+        cluster_health: monitor,
+        ..,
+      ) = adapter
+      let first =
+        fixture_on_topic("PgHealth01XY", False, 350, "postgres-health")
+      let second =
+        fixture_on_topic("PgHealth02XY", False, 351, "postgres-health")
+      assert messages.save(first) == Ok(first)
+      assert messages.save(second) == Ok(second)
+      assert ack_events("node-a", 1) == Ok(Nil)
+      assert ack_events("node-b", 0) == Ok(Nil)
+      let assert Ok(connection) = postgleam.connect(configuration)
+      let assert Ok(_) =
+        postgleam.query(
+          connection,
+          "UPDATE notify_node_cursors SET updated_at = now() - INTERVAL '8 days' WHERE node_id = $1",
+          [postgleam.text("node-b")],
+        )
+      postgleam.disconnect(connection)
+
+      assert monitor.inspect(None, 0) == Error(cluster_health.InvalidPage)
+      assert monitor.inspect(None, 101) == Error(cluster_health.InvalidPage)
+      let assert Ok(first_page) = monitor.inspect(None, 1)
+      assert first_page.local_node_id == "node-local"
+      assert first_page.event_head == 2
+      assert first_page.database_time > 0
+      assert first_page.cursor_count == 2
+      assert first_page.stale_nodes == 1
+      let assert cluster_health.Page([node_a], True) = first_page.nodes
+      assert node_a.node_id == "node-a"
+      assert node_a.sequence == 1
+      assert node_a.stale == False
+
+      let assert Ok(second_page) = monitor.inspect(Some("node-a"), 1)
+      let assert cluster_health.Page([node_b], False) = second_page.nodes
+      assert node_b.node_id == "node-b"
+      assert node_b.sequence == 0
+      assert node_b.stale == True
+      assert node_b.updated_at
+        <= second_page.database_time - cluster_health.stale_after_seconds
       drop_test_database(database)
     }
   }

@@ -52,6 +52,8 @@ pub fn openapi_document_is_valid_json_and_describes_security_boundaries_test() {
   assert string.contains(body, "/api/v1/delivery-jobs/{id}/retry")
   assert string.contains(body, "/api/v1/attachments/{key}")
   assert string.contains(body, "/api/v1/audit")
+  assert string.contains(body, "/api/v1/cluster")
+  assert string.contains(body, "ClusterHealthPage")
   assert string.contains(body, "AuditEvent")
   assert string.contains(
     body,
@@ -71,7 +73,7 @@ pub fn openapi_document_is_valid_json_and_describes_security_boundaries_test() {
 pub fn every_openapi_operation_has_stable_complete_metadata_test() {
   let operations = documented_operations(openapi_body())
 
-  assert list.length(operations) == 68
+  assert list.length(operations) == 69
   let operation_ids =
     list.map(operations, fn(operation) { operation.operation_id })
   assert list.length(list.unique(operation_ids)) == list.length(operation_ids)
@@ -134,6 +136,7 @@ pub fn management_collection_openapi_contracts_are_keyset_paginated_test() {
       #("/api/v1/acl", "AclPage"),
       #("/api/v1/delivery-jobs", "DeliveryJobPage"),
       #("/api/v1/attachments", "AttachmentPage"),
+      #("/api/v1/cluster", "ClusterHealthPage"),
     ],
     fn(contract) {
       let #(path, page_schema) = contract

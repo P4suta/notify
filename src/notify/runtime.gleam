@@ -4,6 +4,7 @@ import gleam/result
 import notify/access.{type Access}
 import notify/attachment_store.{type Store as AttachmentStore}
 import notify/audit.{type Store as AuditStore}
+import notify/cluster/health.{type Store as ClusterHealthStore}
 import notify/core/message.{type Message}
 import notify/delivery.{type Store as DeliveryStore}
 import notify/rate_limit.{type Limiter}
@@ -60,6 +61,7 @@ pub type Runtime {
     relay: Option(RelayRuntime),
     rate_limiter: Option(Limiter),
     audit: Option(AuditStore),
+    cluster_health: Option(ClusterHealthStore),
     template_directory: String,
     committer: Committer,
   )
@@ -88,6 +90,7 @@ pub fn new(
     relay: None,
     rate_limiter: None,
     audit: None,
+    cluster_health: None,
     template_directory: "",
     committer: Committer(fn(message, _) {
       storage.save(message) |> result.map_error(CommitPersistence)
@@ -179,6 +182,13 @@ pub fn with_rate_limiter(runtime: Runtime, limiter: Limiter) -> Runtime {
 
 pub fn with_audit(runtime: Runtime, store: AuditStore) -> Runtime {
   Runtime(..runtime, audit: Some(store))
+}
+
+pub fn with_cluster_health(
+  runtime: Runtime,
+  store: ClusterHealthStore,
+) -> Runtime {
+  Runtime(..runtime, cluster_health: Some(store))
 }
 
 pub fn with_template_directory(runtime: Runtime, directory: String) -> Runtime {

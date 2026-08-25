@@ -1,9 +1,11 @@
 import gleam/erlang/process.{type Subject}
+import gleam/int
 import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
+import notify/cluster/health as cluster_health
 import notify/core/message.{type Message}
 import notify/core/message_json
 import notify/core/topic
@@ -24,6 +26,7 @@ pub type Adapter {
     commit: storage.AtomicCommit,
     fetch_events: fn(String, Int) -> Result(List(ClusterEvent), storage.Error),
     ack_events: fn(String, Int) -> Result(Nil, storage.Error),
+    cluster_health: cluster_health.Store,
     pool_size: Int,
   )
 }
@@ -60,6 +63,11 @@ type Command {
   Health(Subject(Result(Nil, storage.Error)))
   FetchEvents(String, Int, Subject(Result(List(ClusterEvent), storage.Error)))
   AckEvents(String, Int, Subject(Result(Nil, storage.Error)))
+  InspectCluster(
+    Option(String),
+    Int,
+    Subject(Result(cluster_health.Snapshot, storage.Error)),
+  )
   Shutdown(Subject(Nil))
 }
 
@@ -336,6 +344,14 @@ fn adapter(pool: Subject(PoolCommand), workers: List(Worker)) -> Adapter {
     ack_events: fn(node_id, sequence) {
       call(pool, fn(reply) { AckEvents(node_id, sequence, reply) })
     },
+    cluster_health: cluster_health.Store(fn(after, limit) {
+      case limit >= 1 && limit <= 100 {
+        False -> Error(cluster_health.InvalidPage)
+        True ->
+          call(pool, fn(reply) { InspectCluster(after, limit, reply) })
+          |> result.map_error(cluster_health_error)
+      }
+    }),
     pool_size: list.length(workers),
   )
 }
@@ -383,6 +399,12 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
       respond(state, reply, fetch_events(state.connection, node_id, limit))
     AckEvents(node_id, sequence, reply) ->
       respond(state, reply, ack_events(state.connection, node_id, sequence))
+    InspectCluster(after, limit, reply) ->
+      respond(
+        state,
+        reply,
+        inspect_cluster(state.connection, state.node_id, after, limit),
+      )
     Shutdown(reply) -> {
       postgleam.disconnect(state.connection)
       process.send(reply, Nil)
@@ -716,8 +738,8 @@ fn cleanup_expired(
     use _ <- result.try(
       postgleam.query(
         tx,
-        "DELETE FROM notify_node_cursors WHERE updated_at < now() - INTERVAL '7 days'",
-        [],
+        "DELETE FROM notify_node_cursors WHERE updated_at < to_timestamp(extract(epoch from now()) - $1::bigint)",
+        [postgleam.int(cluster_health.stale_after_seconds)],
       ),
     )
     use deleted <- result.try(
@@ -860,6 +882,88 @@ fn ack_events(
   )
   |> result.map(fn(_) { Nil })
   |> result.map_error(map_error)
+}
+
+fn inspect_cluster(
+  connection: postgleam.Connection,
+  local_node_id: String,
+  after: Option(String),
+  limit: Int,
+) -> Result(cluster_health.Snapshot, storage.Error) {
+  let #(after_enabled, after_key) = case after {
+    None -> #(False, "")
+    Some(value) -> #(True, value)
+  }
+  postgleam.transaction(connection, fn(tx) {
+    use _ <- result.try(postgleam.simple_query(
+      tx,
+      "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY",
+    ))
+    use summary <- result.try(
+      postgleam.query_one(
+        tx,
+        "SELECT (SELECT COALESCE(MAX(sequence), 0)::bigint FROM notify_event_log), floor(extract(epoch from now()))::bigint, (SELECT COUNT(*)::bigint FROM notify_node_cursors), (SELECT COUNT(*)::bigint FROM notify_node_cursors WHERE updated_at < to_timestamp(extract(epoch from now()) - $1::bigint))",
+        [postgleam.int(cluster_health.stale_after_seconds)],
+        {
+          use event_head <- decode.element(0, decode.int)
+          use database_time <- decode.element(1, decode.int)
+          use cursor_count <- decode.element(2, decode.int)
+          use stale_nodes <- decode.element(3, decode.int)
+          decode.success(#(event_head, database_time, cursor_count, stale_nodes))
+        },
+      ),
+    )
+    use response <- result.try(
+      postgleam.query_with(
+        tx,
+        "SELECT node_id, sequence, floor(extract(epoch from updated_at))::bigint, updated_at < to_timestamp(extract(epoch from now()) - $3::bigint) FROM notify_node_cursors WHERE ($1::boolean = FALSE OR node_id > $2) ORDER BY node_id ASC LIMIT $4",
+        [
+          postgleam.bool(after_enabled),
+          postgleam.text(after_key),
+          postgleam.int(cluster_health.stale_after_seconds),
+          postgleam.int(limit + 1),
+        ],
+        {
+          use node_id <- decode.element(0, decode.text)
+          use sequence <- decode.element(1, decode.int)
+          use updated_at <- decode.element(2, decode.int)
+          use stale <- decode.element(3, decode.bool)
+          decode.success(cluster_health.Node(
+            node_id:,
+            sequence:,
+            updated_at:,
+            stale:,
+          ))
+        },
+      ),
+    )
+    Ok(cluster_health.Snapshot(
+      local_node_id:,
+      event_head: summary.0,
+      database_time: summary.1,
+      cursor_count: summary.2,
+      stale_nodes: summary.3,
+      nodes: cluster_health.Page(
+        items: list.take(response.rows, limit),
+        has_more: list.length(response.rows) > limit,
+      ),
+    ))
+  })
+  |> result.map_error(map_error)
+}
+
+fn cluster_health_error(error: storage.Error) -> cluster_health.Error {
+  case error {
+    storage.Corrupt(detail) | storage.UnsupportedSchema(detail) ->
+      cluster_health.Corrupt(detail)
+    storage.MigrationRequired(version) ->
+      cluster_health.Corrupt(
+        "PostgreSQL storage migration required at version "
+        <> int.to_string(version),
+      )
+    storage.Conflict(detail) | storage.Unavailable(detail) ->
+      cluster_health.Unavailable(detail)
+  }
 }
 
 fn map_error(error: pg_error.Error) -> storage.Error {
