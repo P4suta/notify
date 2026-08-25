@@ -177,6 +177,39 @@ test("WebSocket decoder handles split unmasked text frames", () => {
   assert.deepEqual(errors, []);
 });
 
+test("WebSocket decoder drains coalesced frames and retains only a split tail", () => {
+  const frame = (text) => {
+    const payload = Buffer.from(text, "utf8");
+    return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
+  };
+  const first = frame("first");
+  const second = frame("second");
+  const third = frame("third");
+  const splitAt = 4;
+  const state = { websocketBuffer: Buffer.alloc(0) };
+  const texts = [];
+  const errors = [];
+
+  decodeWebSocketFrames(
+    state,
+    Buffer.concat([first, second, third.subarray(0, splitAt)]),
+    (text) => texts.push(text),
+    (error) => errors.push(error),
+  );
+  assert.deepEqual(texts, ["first", "second"]);
+  assert.deepEqual(state.websocketBuffer, third.subarray(0, splitAt));
+
+  decodeWebSocketFrames(
+    state,
+    third.subarray(splitAt),
+    (text) => texts.push(text),
+    (error) => errors.push(error),
+  );
+  assert.deepEqual(texts, ["first", "second", "third"]);
+  assert.equal(state.websocketBuffer.length, 0);
+  assert.deepEqual(errors, []);
+});
+
 test("configuration rejects unsafe or internally inconsistent values", () => {
   assert.throws(
     () => loadConfiguration({ NOTIFY_SOAK_SUBSCRIPTIONS: "0" }),

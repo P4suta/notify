@@ -246,6 +246,12 @@ MinIO. `NOTIFY_SOAK_FORMAT` selects JSON, raw, SSE, or WebSocket; the
 weekly/manual workflow runs the target once per format. The driver paces
 publish starts independently of completion on a dedicated Node worker thread,
 so decoding 10,000 subscriber streams cannot delay the response-latency clock.
+The resource observer defaults to a one-minute interval, records that value in
+`environment.json`, and can be changed with
+`NOTIFY_SOAK_RESOURCE_SAMPLE_SECONDS`. Because each
+`docker stats --no-stream` call observes the daemon for multiple seconds, a
+shorter interval is diagnostic evidence rather than the default performance
+measurement.
 It continuously distributes publishes
 round-robin across all three nodes, rotates each topic's origin across rounds,
 records request-to-response commit latency and scheduler lag, and holds every

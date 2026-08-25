@@ -441,6 +441,11 @@ for 600 seconds, JSON format, and a 200 ms publish-response p95 budget. Setting
 `NOTIFY_SOAK_FORMAT` selects JSON, raw, SSE, or WebSocket with the same oracle.
 Publish pacing and response-latency measurement run on a dedicated Node worker
 thread, so decoding 10,000 subscriber streams cannot delay the latency clock.
+The resource observer defaults to one `docker stats --no-stream` sample per
+minute and records that interval in `environment.json`; its own multi-second
+daemon sample therefore stays outside five percent of a ten-minute latency
+population. `NOTIFY_SOAK_RESOURCE_SAMPLE_SECONDS` can shorten the interval for
+diagnosis, but such a run is separate performance evidence.
 For runs lasting at least 90 seconds it also requires every subscriber to
 receive the 45-second keepalive cadence. It rejects
 non-loopback endpoints unless explicitly overridden, records host/container/

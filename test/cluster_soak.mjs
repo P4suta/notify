@@ -545,6 +545,9 @@ export function parseSubscriptionChunk(
   throw new Error(`unsupported HTTP subscription format: ${format}`);
 }
 
+const emptyWebSocketBuffer = Buffer.alloc(0);
+const websocketTextDecoder = new TextDecoder("utf-8", { fatal: true });
+
 export function decodeWebSocketFrames(
   state,
   chunk,
@@ -552,44 +555,46 @@ export function decodeWebSocketFrames(
   onError,
   onControl = () => {},
 ) {
-  state.websocketBuffer = Buffer.concat([
-    state.websocketBuffer ?? Buffer.alloc(0),
-    Buffer.from(chunk),
-  ]);
-  for (;;) {
-    const buffer = state.websocketBuffer;
-    if (buffer.length < 2) return;
-    const final = (buffer[0] & 0x80) !== 0;
-    const opcode = buffer[0] & 0x0f;
-    const masked = (buffer[1] & 0x80) !== 0;
-    let length = buffer[1] & 0x7f;
-    let offset = 2;
-    if ((buffer[0] & 0x70) !== 0 || masked || !final) {
+  const incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+  const pending = state.websocketBuffer ?? emptyWebSocketBuffer;
+  const buffer =
+    pending.length === 0 ? incoming : Buffer.concat([pending, incoming]);
+  let cursor = 0;
+  while (buffer.length - cursor >= 2) {
+    const first = buffer[cursor];
+    const second = buffer[cursor + 1];
+    const final = (first & 0x80) !== 0;
+    const opcode = first & 0x0f;
+    const masked = (second & 0x80) !== 0;
+    let length = second & 0x7f;
+    let payloadOffset = cursor + 2;
+    if ((first & 0x70) !== 0 || masked || !final) {
       onError(`subscriber ${state.index ?? "?"} received an invalid WebSocket frame`);
-      state.websocketBuffer = Buffer.alloc(0);
+      state.websocketBuffer = emptyWebSocketBuffer;
       return;
     }
     if (length === 126) {
-      if (buffer.length < 4) return;
-      length = buffer.readUInt16BE(2);
-      offset = 4;
+      if (buffer.length - cursor < 4) break;
+      length = buffer.readUInt16BE(cursor + 2);
+      payloadOffset = cursor + 4;
     } else if (length === 127) {
-      if (buffer.length < 10) return;
-      const wideLength = buffer.readBigUInt64BE(2);
+      if (buffer.length - cursor < 10) break;
+      const wideLength = buffer.readBigUInt64BE(cursor + 2);
       if (wideLength > BigInt(Number.MAX_SAFE_INTEGER)) {
         onError(`subscriber ${state.index ?? "?"} received an oversized WebSocket frame`);
-        state.websocketBuffer = Buffer.alloc(0);
+        state.websocketBuffer = emptyWebSocketBuffer;
         return;
       }
       length = Number(wideLength);
-      offset = 10;
+      payloadOffset = cursor + 10;
     }
-    if (buffer.length < offset + length) return;
-    const payload = buffer.subarray(offset, offset + length);
-    state.websocketBuffer = buffer.subarray(offset + length);
+    const frameEnd = payloadOffset + length;
+    if (buffer.length < frameEnd) break;
+    const payload = buffer.subarray(payloadOffset, frameEnd);
+    cursor = frameEnd;
     if (opcode === 0x1) {
       try {
-        onText(new TextDecoder("utf-8", { fatal: true }).decode(payload));
+        onText(websocketTextDecoder.decode(payload));
       } catch {
         onError(`subscriber ${state.index ?? "?"} received invalid WebSocket UTF-8`);
       }
@@ -599,6 +604,10 @@ export function decodeWebSocketFrames(
       onError(`subscriber ${state.index ?? "?"} received unsupported WebSocket opcode`);
     }
   }
+  state.websocketBuffer =
+    cursor === buffer.length
+      ? emptyWebSocketBuffer
+      : Buffer.from(buffer.subarray(cursor));
 }
 
 function maskedClientFrame(opcode, payload = Buffer.alloc(0)) {

@@ -18,6 +18,7 @@ publish_rate=${NOTIFY_SOAK_PUBLISH_RATE:-500}
 duration_seconds=${NOTIFY_SOAK_DURATION_SECONDS:-600}
 settle_seconds=${NOTIFY_SOAK_SETTLE_SECONDS:-60}
 connect_timeout_seconds=${NOTIFY_SOAK_CONNECT_TIMEOUT_SECONDS:-180}
+resource_sample_seconds=${NOTIFY_SOAK_RESOURCE_SAMPLE_SECONDS:-60}
 format=${NOTIFY_SOAK_FORMAT:-json}
 case $format in
   json | raw | sse | websocket) ;;
@@ -32,7 +33,8 @@ for numeric_value in \
   "$publish_rate" \
   "$duration_seconds" \
   "$settle_seconds" \
-  "$connect_timeout_seconds"; do
+  "$connect_timeout_seconds" \
+  "$resource_sample_seconds"; do
   if [[ ! $numeric_value =~ ^[1-9][0-9]*$ ]]; then
     echo "soak scale values must be positive integers" >&2
     exit 2
@@ -190,7 +192,10 @@ sample_resources() {
       | jq -c --arg sampled_at "$sampled_at" \
         '{sampled_at: $sampled_at, stats: .}' \
         >>"$report_directory/resources.ndjson"
-    sleep 5
+    # `docker stats --no-stream` itself samples the daemon for roughly two
+    # seconds. A one-minute default keeps that observer below the p95 tail
+    # population while still retaining a time series and a final state check.
+    sleep "$resource_sample_seconds"
   done
 }
 sample_resources &
@@ -209,8 +214,10 @@ jq -n \
   --arg docker "$docker_server_version" \
   --arg compose "$compose_version" \
   --arg postgres "$postgres_version" \
+  --argjson resource_sample_seconds "$resource_sample_seconds" \
   '{generated_at: $generated_at, kernel: $kernel, docker: $docker,
-    docker_compose: $compose, postgresql: $postgres}' \
+    docker_compose: $compose, postgresql: $postgres,
+    resource_sample_seconds: $resource_sample_seconds}' \
   >"$report_directory/environment.json"
 
 export NOTIFY_SOAK_SUBSCRIPTIONS=$subscriptions
