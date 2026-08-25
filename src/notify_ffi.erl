@@ -61,13 +61,23 @@ tcp_nodelay_enabled() ->
 nil_value() -> nil.
 
 wait_for_shutdown_signal() ->
-    case install_shutdown_handler() of
-        ok ->
-            receive
-                notify_shutdown -> {ok, nil}
-            end;
-        {error, Reason} ->
-            {error, iolist_to_binary(io_lib:format("~tp", [Reason]))}
+    case os:type() of
+        {win32, _} ->
+            %% Windows ERTS rejects os:set_signal/2. Keep OTP's default
+            %% console/service termination handling and hold the CLI owner
+            %% open until the VM is stopped by the process manager.
+            wait_for_shutdown_message();
+        _ ->
+            case install_shutdown_handler() of
+                ok -> wait_for_shutdown_message();
+                {error, Reason} ->
+                    {error, iolist_to_binary(io_lib:format("~tp", [Reason]))}
+            end
+    end.
+
+wait_for_shutdown_message() ->
+    receive
+        notify_shutdown -> {ok, nil}
     end.
 
 install_shutdown_handler() ->
