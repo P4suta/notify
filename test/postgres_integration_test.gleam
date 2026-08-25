@@ -912,6 +912,66 @@ pub fn postgres_delivery_webpush_and_rate_limit_contract_test() {
   }
 }
 
+pub fn postgres_delivery_lease_expiry_and_competing_claims_contract_test() {
+  case test_database() {
+    Error(_) -> Nil
+    Ok(database) -> {
+      let TestDatabase(configuration:, ..) = database
+      let assert Ok(outbox_a) = delivery_postgres.start(configuration)
+      let assert Ok(outbox_b) = delivery_postgres.start(configuration)
+      let assert Ok(_) =
+        outbox_a.enqueue(delivery_fixture("lease-expiry", delivery.MobileRelay))
+
+      let assert Ok([original]) =
+        outbox_a.claim(delivery.MobileRelay, "node-a", 100, 30, 1)
+      assert original.lease_owner == Some("node-a")
+      assert outbox_b.claim(delivery.MobileRelay, "node-b", 129, 30, 1)
+        == Ok([])
+      let assert Ok([reclaimed]) =
+        outbox_b.claim(delivery.MobileRelay, "node-b", 130, 30, 1)
+      assert reclaimed.id == original.id
+      assert reclaimed.attempts == 0
+      assert reclaimed.lease_owner == Some("node-b")
+      assert outbox_a.complete(original.id, "node-a")
+        == Error(delivery.LeaseLost)
+      assert outbox_b.complete(reclaimed.id, "node-b") == Ok(Nil)
+
+      int.range(from: 1, to: 33, with: Nil, run: fn(_, index) {
+        let assert Ok(_) =
+          outbox_a.enqueue(delivery_fixture(
+            "lease-race-" <> int.to_string(index),
+            delivery.MobileRelay,
+          ))
+        Nil
+      })
+      let claims = process.new_subject()
+      process.spawn(fn() {
+        process.send(
+          claims,
+          outbox_a.claim(delivery.MobileRelay, "node-a", 200, 30, 16),
+        )
+      })
+      process.spawn(fn() {
+        process.send(
+          claims,
+          outbox_b.claim(delivery.MobileRelay, "node-b", 200, 30, 16),
+        )
+      })
+      let assert Ok(Ok(first_claim)) = process.receive(claims, 30_000)
+      let assert Ok(Ok(second_claim)) = process.receive(claims, 30_000)
+      assert list.length(first_claim) == 16
+      assert list.length(second_claim) == 16
+      let claimed_ids =
+        list.append(first_claim, second_claim)
+        |> list.map(fn(job) { job.id })
+      assert list.length(claimed_ids) == 32
+      assert list.length(list.unique(claimed_ids)) == 32
+
+      drop_test_database(database)
+    }
+  }
+}
+
 fn receive_rate_decisions(subject, remaining: Int, accumulated) {
   case remaining {
     0 -> accumulated

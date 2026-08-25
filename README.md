@@ -229,6 +229,12 @@ automatic write retry; that worker replaces its connection for subsequent
 operations. The fixed pool and forced-backend-termination recovery have
 real-PostgreSQL tests, but the target throughput is still unverified.
 
+Delivery workers share the PostgreSQL outbox using `FOR UPDATE SKIP LOCKED`.
+The real-store contract verifies that another node cannot claim a live lease,
+can reclaim it at expiry without incrementing attempts, and invalidates the old
+owner. It also races two independent stores over 32 jobs and requires 32 unique
+claims.
+
 Within each node, the live broker indexes subscription IDs by topic and keeps
 credit state by subscription ID. A publish visits only registrations for its
 topic instead of scanning every connected subscriber. Duplicate topics in one

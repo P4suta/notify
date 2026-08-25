@@ -254,8 +254,8 @@ replacement, scheduled release, and compaction. It also terminates the dedicated
 LISTEN backend, commits during the disconnect, waits for a different backend PID
 to reconnect and catch up from the event log, and injects duplicate wake-ups
 without duplicate delivery. These persistence cases run against real
-PostgreSQL in the pull-request gate. Multi-node process crash, lease expiry, and
-prolonged database/object-store outage tests remain required before production
+PostgreSQL in the pull-request gate. Multi-node process crash and prolonged
+database/object-store outage tests remain required before production
 certification.
 
 ## Durable delivery recovery
@@ -264,6 +264,13 @@ Web Push and explicitly configured mobile relay jobs use the durable outbox.
 Workers claim jobs with a 60-second lease; another node may reclaim an expired
 lease. Failed attempts use bounded exponential delay with stable equal jitter,
 and the tenth failed attempt becomes `dead_letter`.
+
+The real-PostgreSQL contract opens independent stores for two node identities.
+It rejects a second claim before expiry, permits reclamation exactly at expiry,
+preserves the attempt count, rejects completion by the stale owner, and races
+two 16-job claims over 32 due rows without overlap. Killing a worker during a
+live provider request and a prolonged outbox outage remain fault-injection
+gaps.
 
 Administrators can inspect redacted jobs at `GET /api/v1/delivery-jobs`, retry
 a dead letter at `POST /api/v1/delivery-jobs/{id}/retry`, or permanently purge
