@@ -237,10 +237,13 @@ also kills the origin of a scheduled message before its due time, stops
 PostgreSQL and MinIO independently, and kills an in-flight mobile-relay lease
 owner before requiring another node to reclaim and complete the content-blind
 job.
-The target-scale 10-minute steady-state JSON soak has passed on one recorded
-8-CPU environment. The same fail-closed driver and durable-order oracle support
-raw, SSE, and WebSocket modes; their target-scale runs remain separate evidence,
-not an inference from the JSON result.
+The target-scale 10-minute steady-state soak has passed independently for JSON,
+raw, SSE, and WebSocket at source commit `5ecabbc`. On four separate 4-CPU
+GitHub-hosted runners, commit p95 ranged from 124.46 to 162.10 ms; every format
+committed 300,000 messages and delivered all 3,000,000 expected subscriber
+events with zero loss, duplicates, order errors, disconnects, durable-log
+mismatches, or final cursor lag. These are single-host measurements, not a
+portable capacity certificate.
 
 SQLite uses WAL plus a per-database live-process lock and is strictly
 single-node.
@@ -322,11 +325,11 @@ replacement instead.
 
 The intended reconnect contract is at-least-once with de-duplication by the
 12-character message ID; exactly-once delivery across reconnects is not
-promised. One recorded 10-minute target run observed zero stable-connection
-loss, duplicates, order mismatches, or disconnects; this does not strengthen
-the reconnect contract. No outbound telemetry, tracking, CDN, or external fonts
-are used. Outbound traffic is limited to explicitly configured PostgreSQL, S3,
-Web Push endpoints, and mobile relay.
+promised. Recorded 10-minute target runs in all four stream formats observed
+zero stable-connection loss, duplicates, order mismatches, or disconnects;
+this does not strengthen the reconnect contract. No outbound telemetry,
+tracking, CDN, or external fonts are used. Outbound traffic is limited to
+explicitly configured PostgreSQL, S3, Web Push endpoints, and mobile relay.
 
 ## Builds and tests
 

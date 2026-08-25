@@ -190,9 +190,40 @@ The browser acceptance suite terminates ephemeral loopback TLS in a test-only
 Node proxy. This lets Chromium, Firefox, and WebKit exercise the real Secure
 cookie policy; the server has no insecure-cookie test switch.
 
-## Measured steady-state target and remaining certification
+## Measured steady-state target
 
-The exact default steady-state target passed on 2026-08-25 at source commit
+The full four-format matrix passed on 2026-08-25 UTC at source commit
+`5ecabbc67598f368966b2cadbdb6c4d1e5950cf6` in
+[workflow run 32908196993](https://github.com/P4suta/notify/actions/runs/32908196993).
+Each format ran independently with the exact three-node, 10,000-subscription,
+1,000-topic, 500 publish/s, 600-second defaults and the same fail-closed oracle.
+
+| Format | Achieved rate | Commit p50 | Commit p95 | Commit p99 | Commit max | Maximum scheduling lag |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| JSON | 499.95/s | 56.40 ms | 141.88 ms | 205.13 ms | 505.90 ms | 82.25 ms |
+| Raw | 499.94/s | 65.59 ms | 162.10 ms | 224.14 ms | 412.88 ms | 104.64 ms |
+| SSE | 499.96/s | 51.83 ms | 124.46 ms | 181.21 ms | 428.15 ms | 106.69 ms |
+| WebSocket | 499.95/s | 52.72 ms | 128.20 ms | 186.21 ms | 427.72 ms | 149.42 ms |
+
+Every row committed all 300,000 planned messages, received all 3,000,000
+expected deliveries, and observed a minimum of 13 keepalives per subscriber.
+Missing, duplicate, unexpected, and out-of-order deliveries; subscription
+errors and disconnects; durable event-sequence mismatches; and final cursor lag
+were all zero. Each independent GitHub-hosted runner reported four logical
+x86-64 CPUs, about 16.77 GB of memory, Linux 6.17.0-1022-azure, Node.js 22.23.2,
+Docker 28.0.4, Compose 2.38.2, and PostgreSQL 17.11. Resource observation used
+the recorded 60-second interval. All five containers remained running and none
+was OOM-killed when each verdict was captured. Artifacts are private to the
+workflow and retained for seven days.
+
+An independent 8-CPU local WebSocket run at the same commit corroborated the
+target with 499.97 publish/s and a 90.92 ms commit p95. It also committed
+300,000 messages, received 3,000,000 deliveries, and finished with every
+correctness counter and all three cursor lags at zero. That host reported Linux
+6.8.0-138-generic, Node.js 26.7.0, Docker 29.7.2, Compose 5.5.0, PostgreSQL
+17.11, and 16,703,741,952 bytes of memory.
+
+An earlier JSON-only steady-state target passed on 2026-08-25 at source commit
 `b0873a2a49dc73d9400fa43278b42f3ec5319ab3`. The fail-closed verdict included
 the live subscriber view, authoritative event-log sequence, final node cursors,
 container health, and OOM state.
@@ -223,14 +254,21 @@ captured. The isolated containers, network, volumes, and local image were
 removed afterward. The recorded maxima are observations from this run, not a
 proof of a universal heap, mailbox, or storage bound.
 
-This is one single-host steady-state measurement, not a portable capacity
-certificate. A separate compound test now covers simultaneous node failures,
-slow-subscriber isolation, scheduled-origin failure, PostgreSQL and MinIO
-outages, and delivery-lease reclamation, but not while the full target load is
-running. The recorded measurement also does not cover cross-host network
-latency or target-scale raw/SSE/WebSocket streams. Those load/environment
-results must be evaluated independently before a deployment-specific capacity
-claim. Reconnect delivery remains at-least-once, never exactly-once.
+These are single-host steady-state measurements, not portable capacity
+certificates. Each format runs alone. A separate compound test covers
+simultaneous node failures, slow-subscriber isolation, scheduled-origin
+failure, PostgreSQL and MinIO outages, and delivery-lease reclamation, but not
+while the full target load is running. Cross-host network latency and a
+deployment's own proxy, database, storage, and hardware still require an
+independent capacity run. Reconnect delivery remains at-least-once, never
+exactly-once.
+
+At commit `1d2d9c3`, the old five-second resource observer overlapped enough of
+the four-CPU latency population to make WebSocket p95 fail at 497.11 ms and
+213.24 ms on a retry, despite zero correctness failures in both attempts. The
+observer now defaults to 60 seconds, records its interval, and the WebSocket
+decoder reuses its UTF-8 decoder and avoids per-frame buffer copies. No load,
+duration, percentile budget, or correctness threshold was relaxed.
 
 A pre-fix diagnostic attempt at commit `2d76633` was stopped without a passing
 verdict after about 15 minutes with only 208,956 of 300,000 commits complete.
