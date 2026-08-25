@@ -1,6 +1,7 @@
 import gleam/bit_array
 import gleam/http
 import gleam/http/request
+import gleam/http/response
 import gleam/string
 import notify/http/router
 import notify/runtime
@@ -22,7 +23,7 @@ fn webpush_runtime() -> #(runtime.Runtime, webpush.Store) {
     runtime.new(
       storage: messages,
       clock: runtime.Clock(fn() { 1000 }),
-      ids: runtime.IdGenerator(fn() { "WebPush001" }),
+      ids: runtime.IdGenerator(fn() { "WebPush001XY" }),
       retention_seconds: 43_200,
     )
       |> runtime.with_webpush(configured),
@@ -92,7 +93,7 @@ pub fn webpush_api_is_not_exposed_when_unconfigured_test() {
     runtime.new(
       storage: messages,
       clock: runtime.Clock(fn() { 1000 }),
-      ids: runtime.IdGenerator(fn() { "WebPush001" }),
+      ids: runtime.IdGenerator(fn() { "WebPush001XY" }),
       retention_seconds: 43_200,
     )
   let response = call(http.Post, "{}", runtime)
@@ -121,10 +122,24 @@ pub fn pwa_exposes_webpush_registration_and_notification_handlers_test() {
   let assert Ok(index) = bit_array.to_string(asset("/").body)
   let assert Ok(app) = bit_array.to_string(asset("/notify_web.js").body)
   let assert Ok(worker) = bit_array.to_string(asset("/sw.js").body)
+  let manifest = asset("/manifest.webmanifest")
+  let icon_svg = asset("/icon.svg")
+  let icon_192 = asset("/icon-192.png")
+  let icon_512 = asset("/icon-512.png")
   assert string.contains(index, "id=\"app\"")
   assert string.contains(index, "src=\"/notify_web.js\"")
+  assert string.contains(index, "rel=\"apple-touch-icon\"")
   assert string.contains(app, "pushManager.subscribe")
   assert string.contains(app, "/v1/webpush")
   assert string.contains(worker, "addEventListener('push'")
   assert string.contains(worker, "addEventListener('notificationclick'")
+  assert manifest.status == 200
+  assert response.get_header(manifest, "content-type")
+    == Ok("application/manifest+json")
+  assert icon_svg.status == 200
+  assert response.get_header(icon_svg, "content-type") == Ok("image/svg+xml")
+  assert icon_192.status == 200
+  assert response.get_header(icon_192, "content-type") == Ok("image/png")
+  assert icon_512.status == 200
+  assert response.get_header(icon_512, "content-type") == Ok("image/png")
 }

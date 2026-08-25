@@ -1,5 +1,6 @@
 import gleam/list
 import gleam/option
+import gleam/string
 import notify/core/filter.{type Criteria}
 import notify/core/message.{type Message}
 import notify/core/topic.{type Topic}
@@ -27,6 +28,7 @@ pub type Error {
   Conflict(String)
   Corrupt(String)
   MigrationRequired(Int)
+  UnsupportedSchema(String)
 }
 
 pub type Stats {
@@ -48,11 +50,25 @@ pub type Storage {
     migrate: fn() -> Result(Nil, Error),
     save: fn(Message) -> Result(Message, Error),
     query: fn(Query) -> Result(List(Message), Error),
+    has_attachment: fn(Topic, String) -> Result(Bool, Error),
     release_due: fn(Int, Int) -> Result(List(Message), Error),
     cleanup_expired: fn(Int) -> Result(Int, Error),
     stats: fn() -> Result(Stats, Error),
     health: fn() -> Result(Nil, Error),
   )
+}
+
+/// Returns true only when a message's local attachment URL contains the
+/// content key under that message's own topic path.
+pub fn message_references_attachment(message: Message, key: String) -> Bool {
+  case message.attachment {
+    option.None -> False
+    option.Some(attachment) -> {
+      let path = "/file/" <> topic.to_string(message.topic) <> "/" <> key
+      string.contains(attachment.url, path <> "/")
+      || string.ends_with(attachment.url, path)
+    }
+  }
 }
 
 /// Shared selection semantics used by every adapter's contract suite.

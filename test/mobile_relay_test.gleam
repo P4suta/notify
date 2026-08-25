@@ -14,7 +14,7 @@ pub fn publish_enqueues_content_blind_ntfy_poll_request_test() {
     runtime.new(
       storage: messages,
       clock: runtime.Clock(fn() { 100 }),
-      ids: runtime.IdGenerator(fn() { "RelayMsg01" }),
+      ids: runtime.IdGenerator(fn() { "RelayMsg01XY" }),
       retention_seconds: 43_200,
     )
     |> runtime.with_deliveries(outbox)
@@ -33,7 +33,7 @@ pub fn publish_enqueues_content_blind_ntfy_poll_request_test() {
   let topic_hash = token.digest("https://notify.example/alerts")
   let assert Ok([job]) = outbox.list(delivery.MobileRelay)
   assert job.endpoint == "https://upstream.example/" <> topic_hash
-  assert job.message_id == "RelayMsg01"
+  assert job.message_id == "RelayMsg01XY"
   assert job.topic_hash == topic_hash
   assert job.payload == <<>>
 }

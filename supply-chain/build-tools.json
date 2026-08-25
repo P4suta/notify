@@ -1,0 +1,9 @@
+{
+  "components": {
+    "mix_gleam": {
+      "sha256": "d354680229729387d329248eabf10739748ebe3c0b2781c79f98ec772a62af6e",
+      "version": "0.6.2"
+    }
+  },
+  "schema_version": 1
+}

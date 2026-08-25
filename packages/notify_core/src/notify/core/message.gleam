@@ -1,6 +1,7 @@
+import gleam/bit_array
 import gleam/int
 import gleam/list
-import gleam/option.{type Option, None}
+import gleam/option.{type Option, None, Some}
 import gleam/string
 import notify/core/topic.{type Topic}
 
@@ -22,7 +23,7 @@ pub type Event {
 }
 
 pub type Action {
-  ViewAction(label: String, url: String, clear: Bool)
+  ViewAction(label: String, url: String, clear: Bool, id: Option(String))
   HttpAction(
     label: String,
     url: String,
@@ -30,8 +31,9 @@ pub type Action {
     headers: List(#(String, String)),
     body: Option(String),
     clear: Bool,
+    id: Option(String),
   )
-  CopyAction(label: String, value: String, clear: Bool)
+  CopyAction(label: String, value: String, clear: Bool, id: Option(String))
 }
 
 pub type Attachment {
@@ -86,11 +88,14 @@ pub type Message {
 
 pub type ValidationError {
   EmptyMessage
+  MessageTooLarge(limit: Int, actual: Int)
   InvalidId
   InvalidSequenceId
   InvalidPriority(Int)
   InvalidExpiry
 }
+
+pub const max_message_bytes = 4096
 
 pub fn plaintext_draft(topic: Topic, body: String) -> Draft {
   Draft(
@@ -116,11 +121,22 @@ pub fn materialise(
   now now: Int,
   expires expires: Int,
 ) -> Result(Message, ValidationError) {
-  case string.length(draft.message), valid_id(id), expires > now {
-    0, _, _ -> Error(EmptyMessage)
-    _, False, _ -> Error(InvalidId)
-    _, _, False -> Error(InvalidExpiry)
-    _, True, True ->
+  let message_bytes =
+    draft.message
+    |> bit_array.from_string
+    |> bit_array.byte_size
+  let sequence_id_valid = case draft.sequence_id {
+    None -> True
+    Some(value) -> valid_sequence_id(value)
+  }
+  case message_bytes, valid_id(id), expires > now, sequence_id_valid {
+    0, _, _, _ -> Error(EmptyMessage)
+    size, _, _, _ if size > max_message_bytes ->
+      Error(MessageTooLarge(max_message_bytes, size))
+    _, False, _, _ -> Error(InvalidId)
+    _, _, False, _ -> Error(InvalidExpiry)
+    _, _, _, False -> Error(InvalidSequenceId)
+    _, True, True, True ->
       Ok(Message(
         id:,
         time: now,
@@ -137,13 +153,40 @@ pub fn materialise(
         markdown: draft.markdown,
         icon: draft.icon,
         click: draft.click,
-        actions: draft.actions,
+        actions: assign_action_ids(draft.actions, id),
         attachment: draft.attachment,
         scheduled: False,
         cached: draft.cache,
         sequence_id: draft.sequence_id,
       ))
   }
+}
+
+fn assign_action_ids(
+  actions: List(Action),
+  message_id: String,
+) -> List(Action) {
+  list.index_map(actions, fn(action, index) {
+    let id = option.Some(action_id(message_id, index))
+    case action {
+      ViewAction(label:, url:, clear:, ..) ->
+        ViewAction(label:, url:, clear:, id:)
+      HttpAction(label:, url:, method:, headers:, body:, clear:, ..) ->
+        HttpAction(label:, url:, method:, headers:, body:, clear:, id:)
+      CopyAction(label:, value:, clear:, ..) ->
+        CopyAction(label:, value:, clear:, id:)
+    }
+  })
+}
+
+fn action_id(message_id: String, index: Int) -> String {
+  let alphabet =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+  let assert Ok(high) = int.floor_divide(index, by: 62)
+  let assert Ok(low) = int.modulo(index, by: 62)
+  string.slice(message_id, at_index: 0, length: 8)
+  <> string.slice(alphabet, at_index: high, length: 1)
+  <> string.slice(alphabet, at_index: low, length: 1)
 }
 
 /// Builds an append-only control event for an existing sequence. Control
@@ -184,7 +227,7 @@ pub fn materialise_control(
 }
 
 pub fn valid_id(value: String) -> Bool {
-  string.length(value) == 10
+  string.length(value) == 12
   && value
   |> string.to_graphemes
   |> list.all(fn(character) {
@@ -195,8 +238,18 @@ pub fn valid_id(value: String) -> Bool {
   })
 }
 
-fn valid_sequence_id(value: String) -> Bool {
-  string.length(value) > 0 && string.length(value) <= 64
+pub fn valid_sequence_id(value: String) -> Bool {
+  let length = string.length(value)
+  length > 0
+  && length <= 64
+  && value
+  |> string.to_graphemes
+  |> list.all(fn(character) {
+    string.contains(
+      "-_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789",
+      character,
+    )
+  })
 }
 
 pub fn priority_from_int(value: Int) -> Result(Priority, ValidationError) {

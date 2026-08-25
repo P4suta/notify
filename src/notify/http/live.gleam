@@ -9,7 +9,6 @@ import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
-import gleam/result
 import gleam/string
 import gleam/string_tree
 import mist
@@ -21,6 +20,7 @@ import notify/core/message_json
 import notify/core/topic.{type Topic}
 import notify/http/auth as http_auth
 import notify/http/filter_params
+import notify/http/parameter as http_parameter
 import notify/runtime.{type Runtime}
 import notify/since
 import notify/storage
@@ -30,6 +30,13 @@ const keepalive_milliseconds = 45_000
 type Format {
   JsonFormat
   RawFormat
+}
+
+type LiveRoute {
+  JsonSubscription(String)
+  RawSubscription(String)
+  SseSubscription(String)
+  WebSocketSubscription(String)
 }
 
 type State {
@@ -42,21 +49,46 @@ type State {
   )
 }
 
+type Prepared {
+  Prepared(
+    subscription: Int,
+    topics: List(Topic),
+    replay: List(message.Message),
+  )
+}
+
 pub fn route(
   request: Request(mist.Connection),
   runtime: Runtime,
   bus: Broker,
   buffer_capacity: Int,
 ) -> Option(Response(mist.ResponseData)) {
-  case request.method, request.path_segments(request), poll_requested(request) {
-    Get, [topics, "json"], False ->
+  case match_route(request) {
+    Some(JsonSubscription(topics)) ->
       Some(chunked(request, topics, JsonFormat, runtime, bus, buffer_capacity))
-    Get, [topics, "raw"], False ->
+    Some(RawSubscription(topics)) ->
       Some(chunked(request, topics, RawFormat, runtime, bus, buffer_capacity))
-    Get, [topics, "sse"], False ->
+    Some(SseSubscription(topics)) ->
       Some(sse(request, topics, runtime, bus, buffer_capacity))
-    Get, [topics, "ws"], False ->
+    Some(WebSocketSubscription(topics)) ->
       Some(websocket(request, topics, runtime, bus, buffer_capacity))
+    None -> None
+  }
+}
+
+pub fn matches(request: Request(body)) -> Bool {
+  case match_route(request) {
+    Some(_) -> True
+    None -> False
+  }
+}
+
+fn match_route(request: Request(body)) -> Option(LiveRoute) {
+  case request.method, request.path_segments(request), poll_requested(request) {
+    Get, [topics, "json"], False -> Some(JsonSubscription(topics))
+    Get, [topics, "raw"], False -> Some(RawSubscription(topics))
+    Get, [topics, "sse"], False -> Some(SseSubscription(topics))
+    Get, [topics, "ws"], False -> Some(WebSocketSubscription(topics))
     _, _, _ -> None
   }
 }
@@ -77,61 +109,70 @@ fn chunked(
         Ok(_) -> {
           case validate_since(request, runtime) {
             Error(_) -> invalid_since()
-            Ok(_) ->
+            Ok(marker) ->
               with_criteria(request, fn(criteria) {
-                let content_type = case format {
-                  JsonFormat -> "application/x-ndjson; charset=utf-8"
-                  RawFormat -> "text/plain; charset=utf-8"
-                }
-                mist.chunked(
-                  request:,
-                  response: response.new(200)
-                    |> response.set_header("content-type", content_type)
-                    |> response.set_header("cache-control", "no-store"),
-                  init: fn(subject) {
-                    initialise(
-                      subject,
-                      topics,
-                      criteria,
-                      request,
-                      runtime,
-                      bus,
-                      capacity,
-                    )
-                  },
-                  loop: fn(state, delivery, connection) {
-                    case delivery {
-                      broker.Overflow -> {
-                        let _ =
-                          mist.send_chunk(
-                            connection,
-                            bit_array.from_string(overflow_payload(format)),
-                          )
-                        state.bus.unsubscribe(state.subscription)
-                        mist.chunk_stop()
-                      }
-                      _ ->
-                        case
-                          mist.send_chunk(
-                            connection,
-                            bit_array.from_string(chunk_payload(
-                              delivery,
-                              format,
-                            )),
-                          )
-                        {
-                          Error(_) -> {
-                            state.bus.unsubscribe(state.subscription)
-                            mist.chunk_stop()
-                          }
-                          Ok(_) -> {
-                            after_delivery(state, delivery)
-                            mist.chunk_continue(state)
-                          }
-                        }
+                case
+                  prepare_stream(
+                    request,
+                    runtime,
+                    bus,
+                    topics,
+                    criteria,
+                    marker,
+                    capacity,
+                  )
+                {
+                  Error(_) -> storage_unavailable()
+                  Ok(prepared) -> {
+                    let content_type = case format {
+                      JsonFormat -> "application/x-ndjson; charset=utf-8"
+                      RawFormat -> "text/plain; charset=utf-8"
                     }
-                  },
-                )
+                    let reply =
+                      mist.chunked(
+                        request:,
+                        response: response.new(200)
+                          |> response.set_header("content-type", content_type)
+                          |> response.set_header("cache-control", "no-store"),
+                        init: fn(subject) {
+                          initialise(subject, prepared, runtime, bus)
+                        },
+                        loop: fn(state, delivery, connection) {
+                          case delivery {
+                            broker.Overflow -> {
+                              let _ =
+                                mist.send_chunk(
+                                  connection,
+                                  bit_array.from_string(overflow_payload(format)),
+                                )
+                              state.bus.unsubscribe(state.subscription)
+                              mist.chunk_stop()
+                            }
+                            _ ->
+                              case
+                                mist.send_chunk(
+                                  connection,
+                                  bit_array.from_string(chunk_payload(
+                                    delivery,
+                                    format,
+                                  )),
+                                )
+                              {
+                                Error(_) -> {
+                                  state.bus.unsubscribe(state.subscription)
+                                  mist.chunk_stop()
+                                }
+                                Ok(_) -> {
+                                  after_delivery(state, delivery)
+                                  mist.chunk_continue(state)
+                                }
+                              }
+                          }
+                        },
+                      )
+                    cleanup_failed_stream(reply, bus, prepared.subscription)
+                  }
+                }
               })
           }
         }
@@ -155,43 +196,55 @@ fn sse(
         Ok(_) ->
           case validate_since(request, runtime) {
             Error(_) -> invalid_since()
-            Ok(_) ->
+            Ok(marker) ->
               with_criteria(request, fn(criteria) {
-                mist.server_sent_events(
-                  request:,
-                  initial_response: response.new(200)
-                    |> response.set_header("x-content-type-options", "nosniff"),
-                  init: fn(subject) {
-                    initialise(
-                      subject,
-                      topics,
-                      criteria,
-                      request,
-                      runtime,
-                      bus,
-                      capacity,
-                    )
-                  },
-                  loop: fn(state, delivery, connection) {
-                    let event = sse_event(delivery)
-                    case mist.send_event(connection, event) {
-                      Error(_) -> {
-                        state.bus.unsubscribe(state.subscription)
-                        actor.stop()
-                      }
-                      Ok(_) -> {
-                        after_delivery(state, delivery)
-                        case delivery {
-                          broker.Overflow -> {
-                            state.bus.unsubscribe(state.subscription)
-                            actor.stop()
+                case
+                  prepare_stream(
+                    request,
+                    runtime,
+                    bus,
+                    topics,
+                    criteria,
+                    marker,
+                    capacity,
+                  )
+                {
+                  Error(_) -> storage_unavailable()
+                  Ok(prepared) -> {
+                    let reply =
+                      mist.server_sent_events(
+                        request:,
+                        initial_response: response.new(200)
+                          |> response.set_header(
+                            "x-content-type-options",
+                            "nosniff",
+                          ),
+                        init: fn(subject) {
+                          initialise(subject, prepared, runtime, bus)
+                        },
+                        loop: fn(state, delivery, connection) {
+                          let event = sse_event(delivery)
+                          case mist.send_event(connection, event) {
+                            Error(_) -> {
+                              state.bus.unsubscribe(state.subscription)
+                              actor.stop()
+                            }
+                            Ok(_) -> {
+                              after_delivery(state, delivery)
+                              case delivery {
+                                broker.Overflow -> {
+                                  state.bus.unsubscribe(state.subscription)
+                                  actor.stop()
+                                }
+                                _ -> actor.continue(state)
+                              }
+                            }
                           }
-                          _ -> actor.continue(state)
-                        }
-                      }
-                    }
-                  },
-                )
+                        },
+                      )
+                    cleanup_failed_stream(reply, bus, prepared.subscription)
+                  }
+                }
               })
           }
       }
@@ -213,65 +266,75 @@ fn websocket(
         Ok(_) ->
           case validate_since(request, runtime) {
             Error(_) -> invalid_since()
-            Ok(_) ->
+            Ok(marker) ->
               with_criteria(request, fn(criteria) {
-                mist.websocket(
-                  request:,
-                  on_init: fn(_) {
-                    let subject = process.new_subject()
-                    let state =
-                      initialise(
-                        subject,
-                        topics,
-                        criteria,
-                        request,
-                        runtime,
-                        bus,
-                        capacity,
-                      )
-                    let selector =
-                      process.new_selector() |> process.select(subject)
-                    #(state, Some(selector))
-                  },
-                  on_close: fn(state: State) {
-                    state.bus.unsubscribe(state.subscription)
-                  },
-                  handler: fn(
-                    state: State,
-                    incoming: mist.WebsocketMessage(Delivery),
-                    connection: mist.WebsocketConnection,
-                  ) {
-                    case incoming {
-                      mist.Custom(delivery) ->
-                        case
-                          mist.send_text_frame(
-                            connection,
-                            websocket_payload(delivery),
-                          )
-                        {
-                          Error(_) -> {
-                            state.bus.unsubscribe(state.subscription)
-                            mist.stop()
-                          }
-                          Ok(_) -> {
-                            after_delivery(state, delivery)
-                            case delivery {
-                              broker.Overflow -> {
-                                state.bus.unsubscribe(state.subscription)
-                                mist.stop()
+                case
+                  prepare_stream(
+                    request,
+                    runtime,
+                    bus,
+                    topics,
+                    criteria,
+                    marker,
+                    capacity,
+                  )
+                {
+                  Error(_) -> storage_unavailable()
+                  Ok(prepared) -> {
+                    let reply =
+                      mist.websocket(
+                        request:,
+                        on_init: fn(_) {
+                          let subject = process.new_subject()
+                          let state =
+                            initialise(subject, prepared, runtime, bus)
+                          let selector =
+                            process.new_selector() |> process.select(subject)
+                          #(state, Some(selector))
+                        },
+                        on_close: fn(state: State) {
+                          state.bus.unsubscribe(state.subscription)
+                        },
+                        handler: fn(
+                          state: State,
+                          incoming: mist.WebsocketMessage(Delivery),
+                          connection: mist.WebsocketConnection,
+                        ) {
+                          case incoming {
+                            mist.Custom(delivery) ->
+                              case
+                                mist.send_text_frame(
+                                  connection,
+                                  websocket_payload(delivery),
+                                )
+                              {
+                                Error(_) -> {
+                                  state.bus.unsubscribe(state.subscription)
+                                  mist.stop()
+                                }
+                                Ok(_) -> {
+                                  after_delivery(state, delivery)
+                                  case delivery {
+                                    broker.Overflow -> {
+                                      state.bus.unsubscribe(state.subscription)
+                                      mist.stop()
+                                    }
+                                    _ -> mist.continue(state)
+                                  }
+                                }
                               }
-                              _ -> mist.continue(state)
+                            mist.Text(_) | mist.Binary(_) ->
+                              mist.continue(state)
+                            mist.Closed | mist.Shutdown -> {
+                              state.bus.unsubscribe(state.subscription)
+                              mist.stop()
                             }
                           }
-                        }
-                      mist.Text(_) | mist.Binary(_) -> mist.continue(state)
-                      mist.Closed | mist.Shutdown -> {
-                        state.bus.unsubscribe(state.subscription)
-                        mist.stop()
-                      }
-                    }
-                  },
-                )
+                        },
+                      )
+                    cleanup_failed_stream(reply, bus, prepared.subscription)
+                  }
+                }
               })
           }
       }
@@ -280,64 +343,78 @@ fn websocket(
 
 fn initialise(
   subject: Subject(Delivery),
-  topics: List(Topic),
-  criteria: filter.Criteria,
-  request: Request(mist.Connection),
+  prepared: Prepared,
   runtime: Runtime,
   bus: Broker,
-  capacity: Int,
 ) -> State {
-  let subscription =
-    bus.subscribe_paused_filtered(topics, criteria, subject, capacity)
+  let Prepared(subscription:, topics:, replay:) = prepared
   let state = State(subscription:, subject:, topics:, bus:, runtime:)
-  process.send(subject, open_delivery(runtime, topics))
-  let replay = replay_messages(request, runtime, topics, criteria)
-  replay
-  |> list.take(capacity)
-  |> list.each(fn(message) { process.send(subject, broker.Replay(message)) })
-  case list.length(replay) > capacity {
-    True -> process.send(subject, broker.Overflow)
-    False ->
-      bus.activate(
-        subscription,
-        list.map(replay, fn(message) { message.id }),
-        list.length(replay),
-      )
-  }
+  bus.activate_prepared(
+    subscription,
+    subject,
+    open_delivery(runtime, topics),
+    replay,
+  )
   schedule_keepalive(state)
   state
 }
 
-fn replay_messages(
+fn prepare_stream(
   request: Request(body),
+  runtime: Runtime,
+  bus: Broker,
+  topics: List(Topic),
+  criteria: filter.Criteria,
+  marker: storage.Since,
+  capacity: Int,
+) -> Result(Prepared, storage.Error) {
+  let placeholder = process.new_subject()
+  let subscription =
+    bus.subscribe_paused_filtered(topics, criteria, placeholder, capacity)
+  let replay =
+    replay_messages(
+      runtime,
+      topics,
+      criteria,
+      marker,
+      parameter(request, ["x-scheduled", "scheduled", "sched"])
+        |> option.map(truthy)
+        |> option.unwrap(False),
+    )
+  case replay {
+    Error(error) -> {
+      bus.unsubscribe(subscription)
+      Error(error)
+    }
+    Ok(replay) -> Ok(Prepared(subscription:, topics:, replay:))
+  }
+}
+
+pub fn replay_messages(
   runtime: Runtime,
   topics: List(Topic),
   criteria: filter.Criteria,
-) -> List(message.Message) {
-  let runtime.Clock(now) = runtime.clock
-  case
-    since.parse(
-      parameter(request, ["since", "x-since", "si"]),
-      poll: False,
-      now: now(),
-    )
-  {
-    Error(_) -> []
-    Ok(marker) -> {
-      let query =
-        storage.Query(
-          topics:,
-          since: marker,
-          include_scheduled: parameter(request, [
-            "scheduled",
-            "x-scheduled",
-            "sched",
-          ])
-            |> option.map(truthy)
-            |> option.unwrap(False),
-          criteria:,
-        )
-      runtime.storage.query(query) |> result.unwrap([])
+  marker: storage.Since,
+  include_scheduled: Bool,
+) -> Result(List(message.Message), storage.Error) {
+  runtime.storage.query(storage.Query(
+    topics:,
+    since: marker,
+    include_scheduled:,
+    criteria:,
+  ))
+}
+
+fn cleanup_failed_stream(
+  reply: Response(mist.ResponseData),
+  bus: Broker,
+  subscription: Int,
+) -> Response(mist.ResponseData) {
+  case reply.status == 200 {
+    True -> reply
+    False -> {
+      bus.unsubscribe(subscription)
+      reply
     }
   }
 }
@@ -348,7 +425,7 @@ fn validate_since(
 ) -> Result(storage.Since, since.Error) {
   let runtime.Clock(now) = runtime.clock
   since.parse(
-    parameter(request, ["since", "x-since", "si"]),
+    parameter(request, ["x-since", "since", "si"]),
     poll: False,
     now: now(),
   )
@@ -447,7 +524,7 @@ fn overflow_json() -> String {
 }
 
 fn poll_requested(request: Request(body)) -> Bool {
-  parameter(request, ["poll", "x-poll", "po"])
+  parameter(request, ["x-poll", "poll", "po"])
   |> option.map(truthy)
   |> option.unwrap(False)
 }
@@ -457,23 +534,7 @@ fn truthy(value: String) -> Bool {
 }
 
 fn parameter(request: Request(body), aliases: List(String)) -> Option(String) {
-  let query = request.get_query(request) |> result.unwrap([])
-  case
-    list.find_map(aliases, fn(alias) {
-      list.find_map(query, fn(pair) {
-        case string.lowercase(pair.0) == alias {
-          True -> Ok(pair.1)
-          False -> Error(Nil)
-        }
-      })
-    })
-  {
-    Ok(value) -> Some(value)
-    Error(_) ->
-      aliases
-      |> list.find_map(fn(alias) { request.get_header(request, alias) })
-      |> option.from_result
-  }
+  http_parameter.read(request, aliases)
 }
 
 fn with_criteria(
@@ -512,6 +573,17 @@ fn invalid_priority() -> Response(mist.ResponseData) {
   |> response.set_body(
     mist.Bytes(bytes_tree.from_string(
       "{\"code\":40007,\"http\":400,\"error\":\"invalid priority parameter\"}",
+    )),
+  )
+}
+
+fn storage_unavailable() -> Response(mist.ResponseData) {
+  response.new(503)
+  |> response.set_header("content-type", "application/json; charset=utf-8")
+  |> response.set_header("cache-control", "no-store")
+  |> response.set_body(
+    mist.Bytes(bytes_tree.from_string(
+      "{\"code\":50301,\"http\":503,\"error\":\"storage unavailable\"}",
     )),
   )
 }

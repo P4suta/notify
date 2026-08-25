@@ -11,6 +11,7 @@ import notify/core/message.{
 import notify/core/topic
 
 pub type DecodeError {
+  MalformedJson
   InvalidJson
   InvalidTopic(topic.Error)
   InvalidPriority(Int)
@@ -133,14 +134,16 @@ fn append_optional(
 
 fn encode_action(action: Action) -> Json {
   case action {
-    message.ViewAction(label:, url:, clear:) ->
-      json.object([
+    message.ViewAction(label:, url:, clear:, id:) ->
+      [
         #("action", json.string("view")),
         #("label", json.string(label)),
         #("url", json.string(url)),
         #("clear", json.bool(clear)),
-      ])
-    message.HttpAction(label:, url:, method:, headers:, body:, clear:) -> {
+      ]
+      |> append_optional("id", id, json.string)
+      |> json.object
+    message.HttpAction(label:, url:, method:, headers:, body:, clear:, id:) -> {
       let fields = [
         #("action", json.string("http")),
         #("label", json.string(label)),
@@ -156,15 +159,18 @@ fn encode_action(action: Action) -> Json {
       ]
       fields
       |> append_optional("body", body, json.string)
+      |> append_optional("id", id, json.string)
       |> json.object
     }
-    message.CopyAction(label:, value:, clear:) ->
-      json.object([
+    message.CopyAction(label:, value:, clear:, id:) ->
+      [
         #("action", json.string("copy")),
         #("label", json.string(label)),
         #("value", json.string(value)),
         #("clear", json.bool(clear)),
-      ])
+      ]
+      |> append_optional("id", id, json.string)
+      |> json.object
   }
 }
 
@@ -178,9 +184,13 @@ fn encode_attachment(attachment: Attachment) -> Json {
 }
 
 pub fn decode_publish(body: String) -> Result(Draft, DecodeError) {
-  case json.parse(body, raw_publish_decoder()) {
-    Error(_) -> Error(InvalidJson)
-    Ok(raw) -> raw_to_draft(raw)
+  case json.parse(body, decode.dynamic) {
+    Error(_) -> Error(MalformedJson)
+    Ok(_) ->
+      case json.parse(body, raw_publish_decoder()) {
+        Error(_) -> Error(InvalidJson)
+        Ok(raw) -> raw_to_draft(raw)
+      }
   }
 }
 
@@ -304,12 +314,13 @@ fn event_decoder() -> decode.Decoder(message.Event) {
 
 fn action_decoder() -> decode.Decoder(Action) {
   use action_type <- decode.field("action", decode.string)
+  use id <- decode.optional_field("id", None, decode.optional(decode.string))
   case action_type {
     "view" -> {
       use label <- decode.field("label", decode.string)
       use url <- decode.field("url", decode.string)
       use clear <- decode.optional_field("clear", False, decode.bool)
-      decode.success(message.ViewAction(label:, url:, clear:))
+      decode.success(message.ViewAction(label:, url:, clear:, id:))
     }
     "http" -> {
       use label <- decode.field("label", decode.string)
@@ -333,13 +344,14 @@ fn action_decoder() -> decode.Decoder(Action) {
         headers: dict.to_list(headers),
         body:,
         clear:,
+        id:,
       ))
     }
     "copy" -> {
       use label <- decode.field("label", decode.string)
       use value <- decode.field("value", decode.string)
       use clear <- decode.optional_field("clear", False, decode.bool)
-      decode.success(message.CopyAction(label:, value:, clear:))
+      decode.success(message.CopyAction(label:, value:, clear:, id:))
     }
     _ ->
       decode.failure(
@@ -347,6 +359,7 @@ fn action_decoder() -> decode.Decoder(Action) {
           label: action_type,
           value: action_type,
           clear: string.is_empty(action_type),
+          id:,
         ),
         expected: "view, http, or copy action",
       )

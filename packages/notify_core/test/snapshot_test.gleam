@@ -10,7 +10,7 @@ import notify/core/topic
 pub fn complete_ntfy_message_wire_snapshot_test() {
   let assert Ok(alerts) = topic.parse("alerts")
   message.Message(
-    id: "AbCdEf1234",
+    id: "AbCdEf1234XY",
     time: 1_725_000_000,
     expires: Some(1_725_043_200),
     event: message.MessageEvent,
@@ -27,8 +27,14 @@ pub fn complete_ntfy_message_wire_snapshot_test() {
         label: "Open incident",
         url: "https://example.test/incidents/42",
         clear: True,
+        id: Some("Action0001"),
       ),
-      message.CopyAction(label: "Copy ID", value: "INC-42", clear: False),
+      message.CopyAction(
+        label: "Copy ID",
+        value: "INC-42",
+        clear: False,
+        id: Some("Action0002"),
+      ),
     ],
     attachment: Some(message.Attachment(
       name: "report.txt",

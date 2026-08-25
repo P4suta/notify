@@ -22,7 +22,7 @@ jobs:
   mutation:
     name: Mutation
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 75
     steps:
       - name: Check out complete history
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -44,11 +44,21 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            if git diff --quiet "origin/$BASE_REF"...HEAD -- src; then
+            changed_paths_file=$(mktemp "${RUNNER_TEMP:-/tmp}/notify-core-changed.XXXXXX")
+            trap 'find "$changed_paths_file" -maxdepth 0 -type f -delete' EXIT
+            git diff --name-only -z --diff-filter=ACMR --relative \
+              "origin/$BASE_REF"...HEAD -- \
+              ':(glob)src/**/*.gleam' >"$changed_paths_file"
+            mapfile -d '' -t changed_core_files <"$changed_paths_file"
+            if ((${#changed_core_files[@]} == 0)); then
               echo 'No notify_core source changes; mutation gate is not needed.'
               exit 0
             fi
-            gleam run -m gleam_mutants -- run --strict --changed "origin/$BASE_REF"
+            include_args=()
+            for changed_core_file in "${changed_core_files[@]}"; do
+              include_args+=(--include "$changed_core_file")
+            done
+            gleam run -m gleam_mutants -- run --strict "${include_args[@]}"
           else
             gleam run -m gleam_mutants -- run --strict
           fi
@@ -59,4 +69,4 @@ jobs:
           name: mutation-report-${{ github.run_id }}
           path: packages/notify_core/reports/mutation
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 7

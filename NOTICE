@@ -4,9 +4,25 @@ Copyright 2026 Notify contributors
 Licensed under the Apache License, Version 2.0.
 
 Notify implements compatibility with the public ntfy protocol and documents
-ntfy as its compatibility reference. ntfy is Copyright Philipp C. Heckel and
-contributors and is distributed under the Apache License, Version 2.0.
+ntfy as its compatibility reference.
+ntfy is Copyright Philipp C. Heckel and contributors.
+ntfy is distributed under the Apache License, Version 2.0.
 
-No ntfy source code or web assets are included in Notify. The ntfy name is used
-only to describe wire compatibility; this project is not endorsed by or
-affiliated with the ntfy project.
+No ntfy source code or web assets are included in Notify.
+The ntfy name is used only to describe wire compatibility.
+Notify is not endorsed by or affiliated with the ntfy project.
+
+Third-party notices
+
+The bcrypt 1.2.2 dependency contains these works:
+
+- Erlang code Copyright (c) 2011 Hunter Morris.
+- OpenBSD-derived Blowfish and bcrypt code Copyright (c) 1997 Niels Provos.
+- Asynchronous queue code Copyright (c) 2011 Konstantin V. Sorokin.
+
+This product includes software developed by Niels Provos.
+
+The build-only telemetry 1.4.2 dependency has this notice:
+
+Copyright (c) 2018, Chris McCord and Erlang Solutions.
+Licensed under the Apache License, Version 2.0.

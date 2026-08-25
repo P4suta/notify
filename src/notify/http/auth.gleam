@@ -27,16 +27,26 @@ pub fn check(
   use credentials <- result.try(
     credentials(request) |> result.map_error(fn(_) { MalformedCredentials }),
   )
-  use principal <- result.try(
-    access.authenticate(control, credentials, now)
-    |> result.map_error(fn(error) {
-      case error {
-        access.InvalidCredentials -> Unauthenticated
-        access.SetupRequired -> SetupRequired
-        _ -> Unavailable
-      }
-    }),
-  )
+  let principal = case access.authenticate(control, credentials, now) {
+    Ok(principal) -> Ok(principal)
+    // With authentication configured, ntfy rejects an explicitly invalid
+    // credential even when the anonymous ACL would permit the operation.
+    // OpenAccess already returns Anonymous above and therefore still ignores
+    // credentials exactly like an auth-disabled ntfy server.
+    Error(access.InvalidCredentials) -> Error(Unauthenticated)
+    Error(access.SetupRequired) -> Error(SetupRequired)
+    Error(_) -> Error(Unavailable)
+  }
+  use principal <- result.try(principal)
+  authorize(control, principal, topics, operation)
+}
+
+fn authorize(
+  control: Access,
+  principal: acl.Principal,
+  topics: List(Topic),
+  operation: acl.Operation,
+) -> Result(acl.Principal, Failure) {
   case access.authorize(control, principal, topics, operation) {
     Ok(True) -> Ok(principal)
     Ok(False) -> Error(Forbidden)
@@ -122,7 +132,7 @@ pub fn uses_session(request: Request(body)) -> Bool {
 pub fn valid_csrf(request: Request(body)) -> Bool {
   case session_token(request), request.get_header(request, "x-csrf-token") {
     Some(session), Ok(presented) ->
-      presented == token.digest("csrf:" <> session)
+      token.secure_equal(presented, token.digest("csrf:" <> session))
     _, _ -> False
   }
 }

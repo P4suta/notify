@@ -1,5 +1,6 @@
 import gleam/erlang/process.{type Subject}
-import gleam/option.{Some}
+import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
 import notify/delivery.{type Job, type Store}
@@ -28,7 +29,16 @@ type Command {
     Int,
     Subject(Result(Job, delivery.Error)),
   )
+  Requeue(String, Int, Subject(Result(Job, delivery.Error)))
+  Purge(String, Subject(Result(Nil, delivery.Error)))
   List(delivery.Kind, Subject(Result(List(Job), delivery.Error)))
+  Page(
+    Option(delivery.Kind),
+    Option(String),
+    Int,
+    Subject(Result(delivery.Page(delivery.Summary), delivery.Error)),
+  )
+  Stats(Subject(Result(delivery.Stats, delivery.Error)))
   Health(Subject(Result(Nil, delivery.Error)))
 }
 
@@ -50,6 +60,8 @@ CREATE TABLE IF NOT EXISTS notify_delivery_outbox (
 );
 CREATE INDEX IF NOT EXISTS notify_delivery_outbox_claim
   ON notify_delivery_outbox(kind, state, available_at, lease_until, created_at);
+CREATE INDEX IF NOT EXISTS notify_delivery_outbox_kind_id
+  ON notify_delivery_outbox(kind, id);
 "
 
 pub fn start(config: Config) -> Result(Store, delivery.Error) {
@@ -108,9 +120,21 @@ fn start_actor(
           Fail(id, owner, now, detail, max_attempts, base_delay, reply)
         })
       },
+      requeue: fn(id, now) {
+        process.call(subject, 30_000, fn(reply) { Requeue(id, now, reply) })
+      },
+      purge: fn(id) {
+        process.call(subject, 30_000, fn(reply) { Purge(id, reply) })
+      },
       list: fn(kind) {
         process.call(subject, 30_000, fn(reply) { List(kind, reply) })
       },
+      page: fn(kind, after, limit) {
+        process.call(subject, 30_000, fn(reply) {
+          Page(kind, after, limit, reply)
+        })
+      },
+      stats: fn() { process.call(subject, 30_000, Stats) },
       health: fn() { process.call(subject, 30_000, Health) },
     ),
   )
@@ -134,7 +158,12 @@ fn handle(
         reply,
         fail(connection, id, owner, now, detail, max_attempts, base_delay),
       )
+    Requeue(id, now, reply) -> process.send(reply, requeue(connection, id, now))
+    Purge(id, reply) -> process.send(reply, purge(connection, id))
     List(kind, reply) -> process.send(reply, list_jobs(connection, kind))
+    Page(kind, after, limit, reply) ->
+      process.send(reply, page_jobs(connection, kind, after, limit))
+    Stats(reply) -> process.send(reply, stats(connection))
     Health(reply) -> process.send(reply, health(connection))
   }
   actor.continue(connection)
@@ -239,7 +268,7 @@ fn fail(
           True -> #(delivery.DeadLetter, job.available_at)
           False -> #(
             delivery.Pending,
-            now + delivery.retry_delay(base_delay, attempts),
+            now + delivery.retry_delay_with_jitter(base_delay, attempts, job.id),
           )
         }
         use response <- result.try(postgleam.query_with(
@@ -268,6 +297,59 @@ fn fail(
       other -> map_error(other)
     }
   })
+}
+
+fn requeue(
+  connection: postgleam.Connection,
+  id: String,
+  now: Int,
+) -> Result(Job, delivery.Error) {
+  postgleam.transaction(connection, fn(tx) {
+    use job <- result.try(
+      find_job(tx, id, True) |> result.map_error(to_pg_error),
+    )
+    case job.state {
+      delivery.DeadLetter -> {
+        use response <- result.try(postgleam.query_with(
+          tx,
+          "UPDATE notify_delivery_outbox SET state = 'pending', attempts = 0, available_at = $1, lease_owner = NULL, lease_until = NULL WHERE id = $2 AND state = 'dead_letter' RETURNING id, kind, endpoint, payload, message_id, topic_hash, state, attempts, available_at, lease_owner, lease_until, last_error",
+          [postgleam.int(now), postgleam.text(id)],
+          job_decoder(),
+        ))
+        case response.rows {
+          [requeued] -> Ok(requeued)
+          _ -> Error(postgleam.query_error("delivery update failed"))
+        }
+      }
+      _ -> Error(postgleam.query_error("delivery conflict"))
+    }
+  })
+  |> result.map_error(map_transaction_error)
+}
+
+fn purge(
+  connection: postgleam.Connection,
+  id: String,
+) -> Result(Nil, delivery.Error) {
+  postgleam.transaction(connection, fn(tx) {
+    use job <- result.try(
+      find_job(tx, id, True) |> result.map_error(to_pg_error),
+    )
+    case job.state {
+      delivery.DeadLetter -> {
+        use _ <- result.try(
+          postgleam.query(
+            tx,
+            "DELETE FROM notify_delivery_outbox WHERE id = $1 AND state = 'dead_letter'",
+            [postgleam.text(id)],
+          ),
+        )
+        Ok(Nil)
+      }
+      _ -> Error(postgleam.query_error("delivery conflict"))
+    }
+  })
+  |> result.map_error(map_transaction_error)
 }
 
 fn find_job(
@@ -308,6 +390,129 @@ fn list_jobs(
   )
   |> result.map(fn(response) { response.rows })
   |> result.map_error(map_error)
+}
+
+fn page_jobs(
+  connection: postgleam.Connection,
+  kind: Option(delivery.Kind),
+  after: Option(String),
+  limit: Int,
+) -> Result(delivery.Page(delivery.Summary), delivery.Error) {
+  use _ <- result.try(valid_page_limit(limit))
+  let rows = case kind, after {
+    None, None ->
+      postgleam.query_with(
+        connection,
+        "SELECT id, kind, message_id, topic_hash, state, attempts, available_at, lease_owner, lease_until, last_error FROM notify_delivery_outbox ORDER BY id LIMIT $1",
+        [postgleam.int(limit + 1)],
+        summary_decoder(),
+      )
+    None, Some(after) ->
+      postgleam.query_with(
+        connection,
+        "SELECT id, kind, message_id, topic_hash, state, attempts, available_at, lease_owner, lease_until, last_error FROM notify_delivery_outbox WHERE id > $1 ORDER BY id LIMIT $2",
+        [postgleam.text(after), postgleam.int(limit + 1)],
+        summary_decoder(),
+      )
+    Some(kind), None ->
+      postgleam.query_with(
+        connection,
+        "SELECT id, kind, message_id, topic_hash, state, attempts, available_at, lease_owner, lease_until, last_error FROM notify_delivery_outbox WHERE kind = $1 ORDER BY id LIMIT $2",
+        [postgleam.text(kind_string(kind)), postgleam.int(limit + 1)],
+        summary_decoder(),
+      )
+    Some(kind), Some(after) ->
+      postgleam.query_with(
+        connection,
+        "SELECT id, kind, message_id, topic_hash, state, attempts, available_at, lease_owner, lease_until, last_error FROM notify_delivery_outbox WHERE kind = $1 AND id > $2 ORDER BY id LIMIT $3",
+        [
+          postgleam.text(kind_string(kind)),
+          postgleam.text(after),
+          postgleam.int(limit + 1),
+        ],
+        summary_decoder(),
+      )
+  }
+  rows
+  |> result.map(fn(response) { bounded_page(response.rows, limit) })
+  |> result.map_error(map_error)
+}
+
+fn valid_page_limit(limit: Int) -> Result(Nil, delivery.Error) {
+  case limit >= 1 && limit <= 100 {
+    True -> Ok(Nil)
+    False -> Error(delivery.InvalidPage)
+  }
+}
+
+fn bounded_page(rows: List(a), limit: Int) -> delivery.Page(a) {
+  delivery.Page(
+    items: list.take(rows, limit),
+    has_more: list.length(rows) > limit,
+  )
+}
+
+fn stats(
+  connection: postgleam.Connection,
+) -> Result(delivery.Stats, delivery.Error) {
+  use response <- result.try(
+    postgleam.query_with(
+      connection,
+      "SELECT COUNT(*) FILTER (WHERE kind = 'webpush' AND state = 'pending'), COUNT(*) FILTER (WHERE kind = 'webpush' AND state = 'leased'), COUNT(*) FILTER (WHERE kind = 'webpush' AND state = 'dead_letter'), COUNT(*) FILTER (WHERE kind = 'mobile_relay' AND state = 'pending'), COUNT(*) FILTER (WHERE kind = 'mobile_relay' AND state = 'leased'), COUNT(*) FILTER (WHERE kind = 'mobile_relay' AND state = 'dead_letter') FROM notify_delivery_outbox",
+      [],
+      stats_decoder(),
+    )
+    |> result.map_error(map_error),
+  )
+  case response.rows {
+    [statistics] -> Ok(statistics)
+    _ ->
+      Error(delivery.Unavailable(
+        "delivery statistics query returned an invalid row count",
+      ))
+  }
+}
+
+fn stats_decoder() -> decode.RowDecoder(delivery.Stats) {
+  use webpush_pending <- decode.element(0, decode.int)
+  use webpush_leased <- decode.element(1, decode.int)
+  use webpush_dead_letter <- decode.element(2, decode.int)
+  use mobile_relay_pending <- decode.element(3, decode.int)
+  use mobile_relay_leased <- decode.element(4, decode.int)
+  use mobile_relay_dead_letter <- decode.element(5, decode.int)
+  decode.success(delivery.Stats(
+    webpush_pending:,
+    webpush_leased:,
+    webpush_dead_letter:,
+    mobile_relay_pending:,
+    mobile_relay_leased:,
+    mobile_relay_dead_letter:,
+  ))
+}
+
+fn summary_decoder() -> decode.RowDecoder(delivery.Summary) {
+  use id <- decode.element(0, decode.text)
+  use kind <- decode.element(1, decode_kind)
+  use message_id <- decode.element(2, decode.text)
+  use topic_hash <- decode.element(3, decode.text)
+  use state <- decode.element(4, decode_state)
+  use attempts <- decode.element(5, decode.int)
+  use available_at <- decode.element(6, decode.int)
+  use lease_owner <- decode.element(7, decode.optional(decode.text))
+  use lease_until <- decode.element(8, decode.optional(decode.int))
+  use last_error <- decode.element(9, decode.optional(decode.text))
+  decode.success(delivery.Summary(
+    id:,
+    kind:,
+    message_id:,
+    topic_hash:,
+    state:,
+    attempts:,
+    available_at:,
+    lease_owner:,
+    lease_until:,
+    last_error:,
+  ))
 }
 
 fn job_decoder() -> decode.RowDecoder(Job) {
@@ -401,7 +606,16 @@ fn to_pg_error(error: delivery.Error) -> pg_error.Error {
     delivery.NotFound -> postgleam.query_error("delivery not found")
     delivery.LeaseLost -> postgleam.query_error("delivery lease lost")
     delivery.Conflict -> postgleam.query_error("delivery conflict")
+    delivery.InvalidPage -> postgleam.query_error("delivery page invalid")
     delivery.Unavailable(detail) -> postgleam.query_error(detail)
+  }
+}
+
+fn map_transaction_error(error: pg_error.Error) -> delivery.Error {
+  case error {
+    pg_error.ConnectionError("delivery not found") -> delivery.NotFound
+    pg_error.ConnectionError("delivery conflict") -> delivery.Conflict
+    other -> map_error(other)
   }
 }
 

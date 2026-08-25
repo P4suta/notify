@@ -16,12 +16,25 @@ pub fn rejects_past_or_malformed_delay_test() {
   assert delay.resolve("0m", now: 1000) == Error(delay.NotInFuture)
 }
 
+pub fn delay_is_bounded_from_ten_seconds_through_three_days_test() {
+  let now = 1000
+  assert delay.resolve("9s", now:) == Error(delay.TooSoon(10))
+  assert delay.resolve("10s", now:) == Ok(1010)
+  assert delay.resolve("3d", now:) == Ok(260_200)
+  assert delay.resolve("259201s", now:) == Error(delay.TooFar(259_200))
+
+  assert delay.resolve("1009", now:) == Error(delay.TooSoon(10))
+  assert delay.resolve("1010", now:) == Ok(1010)
+  assert delay.resolve("260200", now:) == Ok(260_200)
+  assert delay.resolve("260201", now:) == Error(delay.TooFar(259_200))
+}
+
 pub fn every_documented_duration_alias_has_the_exact_multiplier_test() {
   let now = 1000
-  assert delay.resolve("2seconds", now:) == Ok(1002)
-  assert delay.resolve("2second", now:) == Ok(1002)
-  assert delay.resolve("2secs", now:) == Ok(1002)
-  assert delay.resolve("2sec", now:) == Ok(1002)
+  assert delay.resolve("10seconds", now:) == Ok(1010)
+  assert delay.resolve("10second", now:) == Ok(1010)
+  assert delay.resolve("10secs", now:) == Ok(1010)
+  assert delay.resolve("10sec", now:) == Ok(1010)
   assert delay.resolve("2minutes", now:) == Ok(1120)
   assert delay.resolve("2minute", now:) == Ok(1120)
   assert delay.resolve("2mins", now:) == Ok(1120)
@@ -32,7 +45,7 @@ pub fn every_documented_duration_alias_has_the_exact_multiplier_test() {
   assert delay.resolve("2hr", now:) == Ok(8200)
   assert delay.resolve("2days", now:) == Ok(173_800)
   assert delay.resolve("2day", now:) == Ok(173_800)
-  assert delay.resolve("2s", now:) == Ok(1002)
+  assert delay.resolve("10s", now:) == Ok(1010)
   assert delay.resolve("2m", now:) == Ok(1120)
   assert delay.resolve("2h", now:) == Ok(8200)
   assert delay.resolve("2d", now:) == Ok(173_800)

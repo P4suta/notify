@@ -1,4 +1,5 @@
 import gleam/option.{None, Some}
+import gleam/string
 import notify/core/message
 import notify/core/topic
 
@@ -14,12 +15,12 @@ pub fn builds_a_deterministic_plaintext_message_test() {
   let assert Ok(value) =
     message.materialise(
       draft,
-      id: "AbCdEf1234",
+      id: "AbCdEf1234XY",
       now: 1_725_000_000,
       expires: 1_725_043_200,
     )
 
-  assert value.id == "AbCdEf1234"
+  assert value.id == "AbCdEf1234XY"
   assert value.topic == fixture_topic()
   assert value.message == "Backup complete"
   assert value.title == None
@@ -34,16 +35,91 @@ pub fn builds_a_deterministic_plaintext_message_test() {
 pub fn validates_id_message_and_priority_test() {
   let draft = message.plaintext_draft(fixture_topic(), "")
   let assert Error(message.EmptyMessage) =
-    message.materialise(draft, id: "AbCdEf1234", now: 1, expires: 2)
+    message.materialise(draft, id: "AbCdEf1234XY", now: 1, expires: 2)
 
   let draft = message.plaintext_draft(fixture_topic(), "ok")
   let assert Error(message.InvalidId) =
     message.materialise(draft, id: "short", now: 1, expires: 2)
 
   let assert Error(message.InvalidExpiry) =
-    message.materialise(draft, id: "AbCdEf1234", now: 2, expires: 2)
+    message.materialise(draft, id: "AbCdEf1234XY", now: 2, expires: 2)
 
   let assert Error(message.InvalidPriority(9)) = message.priority_from_int(9)
+}
+
+pub fn message_ids_are_exactly_twelve_ascii_alphanumerics_test() {
+  assert message.valid_id("AbCdEf1234XY")
+  assert !message.valid_id("AbCdEf1234X")
+  assert !message.valid_id("AbCdEf1234XYZ")
+  assert !message.valid_id("AbCdEf1234-_")
+}
+
+pub fn sequence_ids_use_the_pinned_ntfy_charset_and_length_test() {
+  let sixty_four =
+    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+  assert message.valid_sequence_id("a")
+  assert message.valid_sequence_id("job_42-nightly")
+  assert message.valid_sequence_id(sixty_four)
+  assert !message.valid_sequence_id("")
+  assert !message.valid_sequence_id(sixty_four <> "a")
+  assert !message.valid_sequence_id("invalid*sequence")
+  assert !message.valid_sequence_id("invalid.sequence")
+  assert !message.valid_sequence_id("ジョブ42")
+}
+
+pub fn materialise_rejects_invalid_sequence_parameters_test() {
+  let invalid =
+    message.Draft(
+      ..message.plaintext_draft(fixture_topic(), "Backup complete"),
+      sequence_id: Some("invalid*sequence"),
+    )
+  let assert Error(message.InvalidSequenceId) =
+    message.materialise(invalid, id: "AbCdEf1234XY", now: 1, expires: 2)
+}
+
+pub fn message_body_is_limited_to_four_kibibytes_test() {
+  let draft =
+    message.plaintext_draft(fixture_topic(), string.repeat("a", times: 4096))
+  let assert Ok(_) =
+    message.materialise(draft, id: "AbCdEf1234XY", now: 1, expires: 2)
+
+  let too_large =
+    message.plaintext_draft(fixture_topic(), string.repeat("a", times: 4097))
+  let assert Error(message.MessageTooLarge(4096, 4097)) =
+    message.materialise(too_large, id: "AbCdEf1234XY", now: 1, expires: 2)
+}
+
+pub fn message_body_limit_is_measured_in_utf8_bytes_test() {
+  let draft =
+    message.plaintext_draft(fixture_topic(), string.repeat("界", times: 1366))
+  let assert Error(message.MessageTooLarge(4096, 4098)) =
+    message.materialise(draft, id: "AbCdEf1234XY", now: 1, expires: 2)
+}
+
+pub fn materialise_assigns_stable_ten_character_action_ids_test() {
+  let draft =
+    message.Draft(
+      ..message.plaintext_draft(fixture_topic(), "Act now"),
+      actions: [
+        message.ViewAction(
+          label: "Open",
+          url: "https://example.test",
+          clear: False,
+          id: None,
+        ),
+        message.CopyAction(label: "Copy", value: "42", clear: False, id: None),
+      ],
+    )
+  let assert Ok(value) =
+    message.materialise(draft, id: "AbCdEf1234XY", now: 1, expires: 2)
+  let assert [
+    message.ViewAction(id: Some(first), ..),
+    message.CopyAction(id: Some(second), ..),
+  ] = value.actions
+  assert first == "AbCdEf12AA"
+  assert second == "AbCdEf12AB"
+  assert string.length(first) == 10
+  assert string.length(second) == 10
 }
 
 pub fn parses_priority_names_and_numbers_test() {
@@ -76,7 +152,7 @@ pub fn control_messages_validate_sequence_boundaries_and_reset_payload_test() {
       fixture_topic(),
       message.MessageClearEvent,
       "sequence-1",
-      "AbCdEf1234",
+      "AbCdEf1234XY",
       100,
     )
   assert clear.event == message.MessageClearEvent
@@ -97,7 +173,7 @@ pub fn control_messages_validate_sequence_boundaries_and_reset_payload_test() {
       fixture_topic(),
       message.MessageDeleteEvent,
       "a",
-      "AbCdEf1234",
+      "AbCdEf1234XY",
       100,
     )
   let assert Ok(_) =
@@ -105,7 +181,7 @@ pub fn control_messages_validate_sequence_boundaries_and_reset_payload_test() {
       fixture_topic(),
       message.MessageDeleteEvent,
       sixty_four,
-      "AbCdEf1234",
+      "AbCdEf1234XY",
       100,
     )
   let assert Error(message.InvalidSequenceId) =
@@ -113,7 +189,7 @@ pub fn control_messages_validate_sequence_boundaries_and_reset_payload_test() {
       fixture_topic(),
       message.MessageDeleteEvent,
       "",
-      "AbCdEf1234",
+      "AbCdEf1234XY",
       100,
     )
   let assert Error(message.InvalidSequenceId) =
@@ -121,7 +197,7 @@ pub fn control_messages_validate_sequence_boundaries_and_reset_payload_test() {
       fixture_topic(),
       message.MessageDeleteEvent,
       sixty_four <> "a",
-      "AbCdEf1234",
+      "AbCdEf1234XY",
       100,
     )
   let assert Error(message.InvalidId) =
@@ -137,7 +213,7 @@ pub fn control_messages_validate_sequence_boundaries_and_reset_payload_test() {
       fixture_topic(),
       message.MessageEvent,
       "sequence-1",
-      "AbCdEf1234",
+      "AbCdEf1234XY",
       100,
     )
 }

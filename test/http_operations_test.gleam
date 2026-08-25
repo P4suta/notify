@@ -3,6 +3,9 @@ import gleam/http
 import gleam/http/request
 import gleam/http/response
 import gleam/string
+import notify/audit/memory as audit_memory
+import notify/delivery
+import notify/delivery/memory as delivery_memory
 import notify/http/router
 import notify/runtime
 import notify/storage
@@ -18,20 +21,22 @@ fn call(path: String, runtime: runtime.Runtime) {
 
 pub fn liveness_readiness_and_prometheus_endpoints_are_distinct_test() {
   let assert Ok(messages) = memory.start()
+  let assert Ok(audits) = audit_memory.start()
   let runtime =
     runtime.new(
       storage: messages,
       clock: runtime.Clock(fn() { 1000 }),
-      ids: runtime.IdGenerator(fn() { "OpsMetric1" }),
+      ids: runtime.IdGenerator(fn() { "OpsMetric1XY" }),
       retention_seconds: 43_200,
     )
+    |> runtime.with_audit(audits)
 
   let live = call("/healthz", runtime)
   assert live.status == 200
   assert bit_array.to_string(live.body) == Ok("ok\n")
   let assert Ok(generated_request_id) =
     response.get_header(live, "x-request-id")
-  assert string.length(generated_request_id) == 10
+  assert string.length(generated_request_id) == 12
   let ready = call("/readyz", runtime)
   assert ready.status == 200
   assert bit_array.to_string(ready.body) == Ok("ready\n")
@@ -45,6 +50,41 @@ pub fn liveness_readiness_and_prometheus_endpoints_are_distinct_test() {
   assert string.contains(body, "notify_messages 0")
   assert string.contains(body, "notify_scheduled_messages 0")
   assert string.contains(body, "notify_event_log_entries 0")
+  assert string.contains(body, "notify_audit_up 1")
+}
+
+pub fn prometheus_reports_delivery_jobs_by_kind_and_state_test() {
+  let assert Ok(messages) = memory.start()
+  let assert Ok(deliveries) = delivery_memory.start()
+  let assert Ok(_) =
+    deliveries.enqueue(delivery.NewJob(
+      id: "metric-job",
+      kind: delivery.MobileRelay,
+      endpoint: "https://relay.example/safe",
+      payload: <<"{}":utf8>>,
+      message_id: "Message001",
+      topic_hash: "safe-hash",
+      available_at: 1000,
+    ))
+  let runtime =
+    runtime.new(
+      storage: messages,
+      clock: runtime.Clock(fn() { 1000 }),
+      ids: runtime.IdGenerator(fn() { "OpsMetric1XY" }),
+      retention_seconds: 43_200,
+    )
+    |> runtime.with_deliveries(deliveries)
+
+  let metrics = call("/metrics", runtime)
+  let assert Ok(body) = bit_array.to_string(metrics.body)
+  assert string.contains(
+    body,
+    "notify_delivery_jobs{kind=\"mobile_relay\",state=\"pending\"} 1",
+  )
+  assert string.contains(
+    body,
+    "notify_delivery_jobs{kind=\"webpush\",state=\"dead_letter\"} 0",
+  )
 }
 
 pub fn safe_request_id_is_preserved_and_header_injection_is_rejected_test() {
@@ -53,7 +93,7 @@ pub fn safe_request_id_is_preserved_and_header_injection_is_rejected_test() {
     runtime.new(
       storage: messages,
       clock: runtime.Clock(fn() { 1000 }),
-      ids: runtime.IdGenerator(fn() { "OpsMetric1" }),
+      ids: runtime.IdGenerator(fn() { "OpsMetric1XY" }),
       retention_seconds: 43_200,
     )
   let accepted =
@@ -74,7 +114,7 @@ pub fn safe_request_id_is_preserved_and_header_injection_is_rejected_test() {
     |> router.handle(runtime)
   let assert Ok(replacement) = response.get_header(rejected, "x-request-id")
   assert replacement != "unsafe/id"
-  assert string.length(replacement) == 10
+  assert string.length(replacement) == 12
 }
 
 pub fn readiness_fails_but_liveness_survives_dependency_failure_test() {
@@ -83,6 +123,7 @@ pub fn readiness_fails_but_liveness_survives_dependency_failure_test() {
       migrate: fn() { Ok(Nil) },
       save: fn(message) { Ok(message) },
       query: fn(_) { Ok([]) },
+      has_attachment: fn(_, _) { Ok(False) },
       release_due: fn(_, _) { Ok([]) },
       cleanup_expired: fn(_) { Ok(0) },
       stats: fn() { Error(storage.Unavailable("offline")) },
@@ -92,7 +133,7 @@ pub fn readiness_fails_but_liveness_survives_dependency_failure_test() {
     runtime.new(
       storage: unavailable,
       clock: runtime.Clock(fn() { 1000 }),
-      ids: runtime.IdGenerator(fn() { "OpsMetric1" }),
+      ids: runtime.IdGenerator(fn() { "OpsMetric1XY" }),
       retention_seconds: 43_200,
     )
   assert call("/healthz", runtime).status == 200

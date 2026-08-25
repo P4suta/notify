@@ -12,9 +12,13 @@ import gleam/result
 import gleam/string
 import notify/access
 import notify/attachment_store
+import notify/audit
+import notify/cluster/health as cluster_health_model
 import notify/core/acl
 import notify/delivery
+import notify/http/audit_log
 import notify/http/auth
+import notify/http/cursor
 import notify/identity
 import notify/runtime.{type Runtime}
 import notify/security/token
@@ -43,6 +47,16 @@ type GrantRequest {
   )
 }
 
+type KeysetRequest {
+  KeysetRequest(resource: String, limit: Int, after: Option(String))
+}
+
+type DeliveryFilter {
+  AllDeliveryJobs
+  WebPushDeliveryJobs
+  MobileRelayDeliveryJobs
+}
+
 pub fn route(
   req: Request(BitArray),
   runtime: Runtime,
@@ -52,116 +66,182 @@ pub fn route(
     Get, ["api", "v1", "session"] -> Some(current_session(req, runtime))
     Delete, ["api", "v1", "session"] -> Some(logout(req, runtime))
     Get, ["api", "v1", "users"] ->
-      Some(with_admin(req, runtime, False, fn(_) { list_users(req, runtime) }))
+      Some(with_admin(req, runtime, fn(_) { list_users(req, runtime) }))
     Post, ["api", "v1", "users"] ->
-      Some(with_admin(req, runtime, True, fn(_) { create_user(req, runtime) }))
+      Some(
+        with_admin_mutation(req, runtime, audit.UserCreate, fn(_) {
+          create_user(req, runtime)
+        }),
+      )
     Delete, ["api", "v1", "users", username] ->
       Some(
-        with_admin(req, runtime, True, fn(_) { delete_user(username, runtime) }),
+        with_admin_mutation(req, runtime, audit.UserDelete, fn(_) {
+          delete_user(username, runtime)
+        }),
       )
     Put, ["api", "v1", "users", username, "password"] ->
       Some(
-        with_admin(req, runtime, True, fn(_) {
+        with_admin_mutation(req, runtime, audit.PasswordChange, fn(_) {
           change_password(req, username, runtime)
         }),
       )
     Get, ["api", "v1", "tokens"] ->
-      Some(with_admin(req, runtime, False, fn(_) { list_tokens(req, runtime) }))
+      Some(with_admin(req, runtime, fn(_) { list_tokens(req, runtime) }))
     Post, ["api", "v1", "tokens"] ->
-      Some(with_admin(req, runtime, True, fn(_) { create_token(req, runtime) }))
-    Delete, ["api", "v1", "tokens", id] ->
-      Some(with_admin(req, runtime, True, fn(_) { revoke_token(id, runtime) }))
-    Get, ["api", "v1", "acl"] ->
-      Some(with_admin(req, runtime, False, fn(_) { list_acl(req, runtime) }))
-    Put, ["api", "v1", "acl"] | Post, ["api", "v1", "acl"] ->
-      Some(with_admin(req, runtime, True, fn(_) { put_acl(req, runtime) }))
-    Delete, ["api", "v1", "acl"] ->
-      Some(with_admin(req, runtime, True, fn(_) { delete_acl(req, runtime) }))
-    Get, ["api", "v1", "anonymous-access"] ->
       Some(
-        with_admin(req, runtime, False, fn(_) { get_anonymous_access(runtime) }),
+        with_admin_mutation(req, runtime, audit.TokenCreate, fn(_) {
+          create_token(req, runtime)
+        }),
       )
+    Delete, ["api", "v1", "tokens", id] ->
+      Some(
+        with_admin_mutation(req, runtime, audit.TokenRevoke, fn(_) {
+          revoke_token(id, runtime)
+        }),
+      )
+    Get, ["api", "v1", "acl"] ->
+      Some(with_admin(req, runtime, fn(_) { list_acl(req, runtime) }))
+    Put, ["api", "v1", "acl"] | Post, ["api", "v1", "acl"] ->
+      Some(
+        with_admin_mutation(req, runtime, audit.AclChange, fn(_) {
+          put_acl(req, runtime)
+        }),
+      )
+    Delete, ["api", "v1", "acl"] ->
+      Some(
+        with_admin_mutation(req, runtime, audit.AclRevoke, fn(_) {
+          delete_acl(req, runtime)
+        }),
+      )
+    Get, ["api", "v1", "anonymous-access"] ->
+      Some(with_admin(req, runtime, fn(_) { get_anonymous_access(runtime) }))
     Put, ["api", "v1", "anonymous-access"] ->
       Some(
-        with_admin(req, runtime, True, fn(_) {
+        with_admin_mutation(req, runtime, audit.AnonymousAccessChange, fn(_) {
           put_anonymous_access(req, runtime)
         }),
       )
     Get, ["api", "v1", "system", "health"] ->
-      Some(with_admin(req, runtime, False, fn(_) { system_health(runtime) }))
+      Some(with_admin(req, runtime, fn(_) { system_health(runtime) }))
+    Get, ["api", "v1", "cluster"] ->
+      Some(with_admin(req, runtime, fn(_) { cluster_health(req, runtime) }))
     Get, ["api", "v1", "delivery-jobs"] ->
+      Some(with_admin(req, runtime, fn(_) { list_delivery_jobs(req, runtime) }))
+    Post, ["api", "v1", "delivery-jobs", id, "retry"] ->
       Some(
-        with_admin(req, runtime, False, fn(_) {
-          list_delivery_jobs(req, runtime)
+        with_admin_mutation(req, runtime, audit.DeliveryRetry, fn(_) {
+          retry_delivery_job(id, runtime)
+        }),
+      )
+    Delete, ["api", "v1", "delivery-jobs", id] ->
+      Some(
+        with_admin_mutation(req, runtime, audit.DeliveryPurge, fn(_) {
+          purge_delivery_job(id, runtime)
         }),
       )
     Get, ["api", "v1", "attachments"] ->
-      Some(
-        with_admin(req, runtime, False, fn(_) { list_attachments(req, runtime) }),
-      )
+      Some(with_admin(req, runtime, fn(_) { list_attachments(req, runtime) }))
     Delete, ["api", "v1", "attachments", key] ->
       Some(
-        with_admin(req, runtime, True, fn(_) { delete_attachment(key, runtime) }),
+        with_admin_mutation(req, runtime, audit.AttachmentDelete, fn(_) {
+          delete_attachment(key, runtime)
+        }),
       )
+    Get, ["api", "v1", "audit"] ->
+      Some(with_admin(req, runtime, fn(_) { list_audit(req, runtime) }))
     _, _ -> None
   }
 }
 
 fn login(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
   use login <- parse_json_body(req, login_decoder())
-  let runtime.Clock(now) = runtime.clock
   case
-    access.setup_required(runtime.access),
-    access.authenticate(
-      runtime.access,
-      access.Basic(login.username, login.password),
-      now(),
+    audit_log.append(
+      req,
+      runtime,
+      "anonymous",
+      audit.SessionLogin,
+      None,
+      audit.Attempted,
+      None,
     )
   {
-    Ok(True), _ ->
-      problem(503, "Setup required", "Complete the one-time server setup first")
-    _, Error(_) ->
-      problem(401, "Authentication failed", "Invalid username or password")
-    Error(_), _ ->
-      problem(
-        503,
-        "Authentication unavailable",
-        "Identity storage is unavailable",
-      )
-    Ok(False), Ok(principal) -> {
-      let runtime.IdGenerator(next_id) = runtime.ids
-      case
-        access.create_token_for_username(
+    Error(_) -> audit_unavailable()
+    Ok(_) -> {
+      let runtime.Clock(now) = runtime.clock
+      let reply = case
+        access.setup_required(runtime.access),
+        access.authenticate(
           runtime.access,
-          "ses_" <> next_id(),
-          login.username,
-          "__web_session__",
-          Some(now() + 43_200),
+          access.Basic(login.username, login.password),
           now(),
-          token.secure_entropy,
         )
       {
-        Error(_) ->
-          problem(503, "Session unavailable", "Could not persist the session")
-        Ok(#(_, raw)) -> {
-          let #(username, role) = principal_name_role(principal)
-          json_response(
-            201,
-            json.object([
-              #("username", json.string(username)),
-              #("role", json.string(role_string(role))),
-              #("csrf_token", json.string(csrf_token(raw))),
-              #("expires", json.int(now() + 43_200)),
-            ]),
+        Ok(True), _ ->
+          problem(
+            503,
+            "Setup required",
+            "Complete the one-time server setup first",
           )
-          |> response.set_header(
-            "set-cookie",
-            "notify_session="
-              <> raw
-              <> "; Path=/; Max-Age=43200; Secure; HttpOnly; SameSite=Strict",
+        _, Error(_) ->
+          problem(401, "Authentication failed", "Invalid username or password")
+        Error(_), _ ->
+          problem(
+            503,
+            "Authentication unavailable",
+            "Identity storage is unavailable",
           )
+        Ok(False), Ok(principal) -> {
+          let runtime.IdGenerator(next_id) = runtime.ids
+          case
+            access.create_token_for_username(
+              runtime.access,
+              fn() { "ses_" <> next_id() },
+              login.username,
+              "__web_session__",
+              Some(now() + 43_200),
+              now(),
+              token.secure_entropy,
+            )
+          {
+            Error(_) ->
+              problem(
+                503,
+                "Session unavailable",
+                "Could not persist the session",
+              )
+            Ok(#(_, raw)) -> {
+              let #(username, role) = principal_name_role(principal)
+              json_response(
+                201,
+                json.object([
+                  #("username", json.string(username)),
+                  #("role", json.string(role_string(role))),
+                  #("csrf_token", json.string(csrf_token(raw))),
+                  #("expires", json.int(now() + 43_200)),
+                ]),
+              )
+              |> response.set_header(
+                "set-cookie",
+                "notify_session="
+                  <> raw
+                  <> "; Path=/; Max-Age=43200; Secure; HttpOnly; SameSite=Strict",
+              )
+            }
+          }
         }
       }
+      audited_result(
+        reply,
+        req,
+        runtime,
+        case reply.status == 201 {
+          True -> login.username
+          False -> "anonymous"
+        },
+        audit.SessionLogin,
+        None,
+      )
     }
   }
 }
@@ -201,38 +281,75 @@ fn current_session(
 
 fn logout(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
   case auth.session_token(req), auth.valid_csrf(req) {
-    None, _ ->
-      problem(401, "Session required", "No web session cookie was sent")
-    Some(_), False ->
-      problem(403, "CSRF check failed", "Send the session CSRF token")
-    Some(raw), True ->
-      case access.revoke_raw_token(runtime.access, raw) {
-        Error(_) ->
-          problem(503, "Logout unavailable", "Could not revoke the session")
-        Ok(_) ->
-          response.new(204)
-          |> response.set_header(
-            "set-cookie",
-            "notify_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
-          )
-          |> response.set_body(<<>>)
+    None, _ -> {
+      let reply =
+        problem(401, "Session required", "No web session cookie was sent")
+      audited_result(
+        reply,
+        req,
+        runtime,
+        "anonymous",
+        audit.SessionLogout,
+        None,
+      )
+    }
+    Some(_), False -> {
+      let reply =
+        problem(403, "CSRF check failed", "Send the session CSRF token")
+      audited_result(
+        reply,
+        req,
+        runtime,
+        "anonymous",
+        audit.SessionLogout,
+        None,
+      )
+    }
+    Some(raw), True -> {
+      let runtime.Clock(now) = runtime.clock
+      let actor = case auth.authenticate(req, runtime.access, now()) {
+        Ok(acl.Authenticated(username, _)) -> username
+        _ -> "anonymous"
       }
+      case
+        audit_log.append(
+          req,
+          runtime,
+          actor,
+          audit.SessionLogout,
+          None,
+          audit.Attempted,
+          None,
+        )
+      {
+        Error(_) -> audit_unavailable()
+        Ok(_) -> {
+          let reply = case access.revoke_raw_token(runtime.access, raw) {
+            Error(_) ->
+              problem(503, "Logout unavailable", "Could not revoke the session")
+            Ok(_) ->
+              response.new(204)
+              |> response.set_header(
+                "set-cookie",
+                "notify_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Strict",
+              )
+              |> response.set_body(<<>>)
+          }
+          audited_result(reply, req, runtime, actor, audit.SessionLogout, None)
+        }
+      }
+    }
   }
 }
 
 fn with_admin(
   req: Request(BitArray),
   runtime: Runtime,
-  mutation: Bool,
   next: fn(String) -> Response(BitArray),
 ) -> Response(BitArray) {
   let runtime.Clock(now) = runtime.clock
   case auth.authenticate(req, runtime.access, now()) {
-    Ok(acl.Authenticated(username, acl.Admin)) ->
-      case mutation && auth.uses_session(req) && !auth.valid_csrf(req) {
-        True -> problem(403, "CSRF check failed", "Send the session CSRF token")
-        False -> next(username)
-      }
+    Ok(acl.Authenticated(username, acl.Admin)) -> next(username)
     Ok(_) | Error(auth.Unauthenticated) | Error(auth.MalformedCredentials) ->
       problem(
         401,
@@ -250,29 +367,116 @@ fn with_admin(
   }
 }
 
+fn with_admin_mutation(
+  req: Request(BitArray),
+  runtime: Runtime,
+  action: audit.Action,
+  next: fn(String) -> Response(BitArray),
+) -> Response(BitArray) {
+  let runtime.Clock(now) = runtime.clock
+  case auth.authenticate(req, runtime.access, now()) {
+    Ok(acl.Authenticated(username, acl.Admin)) ->
+      case auth.uses_session(req) && !auth.valid_csrf(req) {
+        True -> {
+          let reply =
+            problem(403, "CSRF check failed", "Send the session CSRF token")
+          audited_result(reply, req, runtime, username, action, Some(req.path))
+        }
+        False ->
+          case
+            audit_log.append(
+              req,
+              runtime,
+              username,
+              action,
+              Some(req.path),
+              audit.Attempted,
+              None,
+            )
+          {
+            Error(_) -> audit_unavailable()
+            Ok(_) ->
+              next(username)
+              |> audited_result(req, runtime, username, action, Some(req.path))
+          }
+      }
+    Ok(acl.Authenticated(username, _)) ->
+      problem(
+        401,
+        "Administrator authentication required",
+        "Sign in as an administrator",
+      )
+      |> audited_result(req, runtime, username, action, Some(req.path))
+    Ok(acl.Anonymous)
+    | Error(auth.Unauthenticated)
+    | Error(auth.MalformedCredentials) ->
+      problem(
+        401,
+        "Administrator authentication required",
+        "Sign in as an administrator",
+      )
+      |> audited_result(req, runtime, "anonymous", action, Some(req.path))
+    Error(auth.SetupRequired) ->
+      problem(503, "Setup required", "Complete server setup first")
+      |> audited_result(req, runtime, "anonymous", action, Some(req.path))
+    Error(_) ->
+      problem(
+        503,
+        "Authorization unavailable",
+        "Identity storage is unavailable",
+      )
+      |> audited_result(req, runtime, "anonymous", action, Some(req.path))
+  }
+}
+
+fn audited_result(
+  reply: Response(BitArray),
+  req: Request(BitArray),
+  runtime: Runtime,
+  actor: String,
+  action: audit.Action,
+  target: Option(String),
+) -> Response(BitArray) {
+  case
+    audit_log.append(
+      req,
+      runtime,
+      actor,
+      action,
+      target,
+      audit_log.outcome_for_status(reply.status),
+      Some(reply.status),
+    )
+  {
+    Ok(_) -> reply
+    Error(_) ->
+      response.set_header(reply, "x-notify-audit-status", "incomplete")
+  }
+}
+
+fn audit_unavailable() -> Response(BitArray) {
+  problem(
+    503,
+    "Audit unavailable",
+    "The security audit attempt could not be persisted",
+  )
+}
+
 fn list_users(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
-  case access.list_users(runtime.access) {
-    Error(_) -> problem(503, "Users unavailable", "Could not list users")
-    Ok(users) -> {
-      let limit = page_limit(req)
-      let after = query(req, "cursor")
-      let selected = case after {
-        None -> users
-        Some(cursor) ->
-          list.filter(users, fn(user) {
-            string.compare(user.username, cursor) == order.Gt
-          })
+  case keyset_request(req, "users") {
+    Error(_) -> invalid_page()
+    Ok(page) -> {
+      let KeysetRequest(after:, limit:, ..) = page
+      case access.page_users(runtime.access, after, limit) {
+        Error(_) -> problem(503, "Users unavailable", "Could not list users")
+        Ok(users) ->
+          stored_keyset_response(
+            page,
+            users,
+            fn(user) { user.username },
+            user_json,
+          )
       }
-      let page = list.take(selected, limit)
-      let next_cursor = case list.length(selected) > limit {
-        False -> None
-        True ->
-          page
-          |> list.last
-          |> result.map(fn(user) { user.username })
-          |> option_from_result
-      }
-      page_response(page, next_cursor, user_json)
     }
   }
 }
@@ -356,13 +560,27 @@ fn change_password(
 fn list_tokens(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
   case query(req, "username") {
     None -> problem(400, "Username required", "Pass ?username=<name>")
-    Some(username) ->
-      case access.list_tokens(runtime.access, username) {
-        Ok(tokens) -> page_response(tokens, None, stored_token_json)
-        Error(access.IdentityError(identity.NotFound)) ->
-          problem(404, "User not found", "No user has that username")
-        Error(_) -> problem(503, "Tokens unavailable", "Could not list tokens")
+    Some(username) -> {
+      case keyset_request(req, "tokens:" <> username) {
+        Error(_) -> invalid_page()
+        Ok(page) -> {
+          let KeysetRequest(after:, limit:, ..) = page
+          case access.page_tokens(runtime.access, username, after, limit) {
+            Ok(tokens) ->
+              stored_keyset_response(
+                page,
+                tokens,
+                fn(token) { token.id },
+                stored_token_json,
+              )
+            Error(access.IdentityError(identity.NotFound)) ->
+              problem(404, "User not found", "No user has that username")
+            Error(_) ->
+              problem(503, "Tokens unavailable", "Could not list tokens")
+          }
+        }
       }
+    }
   }
 }
 
@@ -376,7 +594,7 @@ fn create_token(
   case
     access.create_token_for_username(
       runtime.access,
-      "tok_" <> next_id(),
+      fn() { "tok_" <> next_id() },
       requested.username,
       requested.label,
       requested.expires,
@@ -395,6 +613,7 @@ fn create_token(
           #("prefix", json.string(stored.prefix)),
           #("created_at", json.int(stored.created_at)),
           #("expires", json.nullable(stored.expires, json.int)),
+          #("last_access", json.nullable(stored.last_access, json.int)),
         ]),
       )
     Error(access.InvalidTokenLabel) ->
@@ -418,9 +637,27 @@ fn revoke_token(id: String, runtime: Runtime) -> Response(BitArray) {
 }
 
 fn list_acl(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
-  case access.list_grants(runtime.access, query(req, "username")) {
-    Ok(rules) -> page_response(rules, None, rule_json)
-    Error(_) -> problem(503, "ACL unavailable", "Could not list access rules")
+  let username = query(req, "username")
+  let resource = case username {
+    None -> "acl:all"
+    Some(username) -> "acl:user:" <> username
+  }
+  case keyset_request(req, resource) {
+    Error(_) -> invalid_page()
+    Ok(page) -> {
+      let KeysetRequest(after:, limit:, ..) = page
+      case grant_cursor(after) {
+        Error(_) -> invalid_page()
+        Ok(after) ->
+          case access.page_grants(runtime.access, username, after, limit) {
+            Ok(rules) ->
+              stored_keyset_response(page, rules, rule_key, rule_json)
+            Error(access.IdentityError(identity.InvalidPage)) -> invalid_page()
+            Error(_) ->
+              problem(503, "ACL unavailable", "Could not list access rules")
+          }
+      }
+    }
   }
 }
 
@@ -507,7 +744,12 @@ fn system_health(runtime: Runtime) -> Response(BitArray) {
     None -> True
     Some(configured) -> configured.store.health() |> result.is_ok
   }
-  let healthy = storage_ok && attachment_ok && delivery_ok && webpush_ok
+  let audit_ok = case runtime.audit {
+    None -> False
+    Some(store) -> store.health() |> result.is_ok
+  }
+  let healthy =
+    storage_ok && attachment_ok && delivery_ok && webpush_ok && audit_ok
   json_response(
     case healthy {
       True -> 200
@@ -544,6 +786,13 @@ fn system_health(runtime: Runtime) -> Response(BitArray) {
         }),
       ),
       #(
+        "audit",
+        json.string(case audit_ok {
+          True -> "healthy"
+          False -> "unavailable"
+        }),
+      ),
+      #(
         "mobile_relay",
         json.string(case runtime.relay {
           None -> "disabled"
@@ -555,35 +804,253 @@ fn system_health(runtime: Runtime) -> Response(BitArray) {
   )
 }
 
+fn cluster_health(
+  req: Request(BitArray),
+  runtime: Runtime,
+) -> Response(BitArray) {
+  case keyset_request(req, "cluster_nodes") {
+    Error(_) -> invalid_page()
+    Ok(paging) ->
+      case runtime.cluster_health {
+        None -> cluster_disabled_response(runtime)
+        Some(store) -> {
+          let KeysetRequest(after:, limit:, ..) = paging
+          case store.inspect(after, limit) {
+            Error(cluster_health_model.InvalidPage) -> invalid_page()
+            Error(_) ->
+              problem(
+                503,
+                "Cluster health unavailable",
+                "Could not inspect the durable cluster cursors",
+              )
+            Ok(snapshot) -> cluster_snapshot_response(paging, snapshot)
+          }
+        }
+      }
+  }
+}
+
+fn cluster_disabled_response(runtime: Runtime) -> Response(BitArray) {
+  let runtime.Clock(now) = runtime.clock
+  json_response(
+    200,
+    json.object([
+      #("healthy", json.bool(True)),
+      #("enabled", json.bool(False)),
+      #("backend", json.string("single_node")),
+      #("node_id", json.null()),
+      #("event_head", json.int(0)),
+      #("database_time", json.int(now())),
+      #("cursor_count", json.int(0)),
+      #("stale_nodes", json.int(0)),
+      #(
+        "stale_after_seconds",
+        json.int(cluster_health_model.stale_after_seconds),
+      ),
+      #(
+        "items",
+        json.array([], fn(node: cluster_health_model.Node) {
+          cluster_node_json(node, 0)
+        }),
+      ),
+      #("next_cursor", json.null()),
+    ]),
+  )
+}
+
+fn cluster_snapshot_response(
+  paging: KeysetRequest,
+  snapshot: cluster_health_model.Snapshot,
+) -> Response(BitArray) {
+  let KeysetRequest(resource:, ..) = paging
+  let cluster_health_model.Snapshot(nodes:, ..) = snapshot
+  let cluster_health_model.Page(items:, has_more:) = nodes
+  let next_cursor = case has_more {
+    False -> None
+    True ->
+      items
+      |> list.last
+      |> result.map(fn(node) { cursor.encode_key(resource, node.node_id) })
+      |> option_from_result
+  }
+  json_response(
+    200,
+    json.object([
+      #("healthy", json.bool(snapshot.stale_nodes == 0)),
+      #("enabled", json.bool(True)),
+      #("backend", json.string("postgresql")),
+      #("node_id", json.string(snapshot.local_node_id)),
+      #("event_head", json.int(snapshot.event_head)),
+      #("database_time", json.int(snapshot.database_time)),
+      #("cursor_count", json.int(snapshot.cursor_count)),
+      #("stale_nodes", json.int(snapshot.stale_nodes)),
+      #(
+        "stale_after_seconds",
+        json.int(cluster_health_model.stale_after_seconds),
+      ),
+      #(
+        "items",
+        json.array(items, fn(node) {
+          cluster_node_json(node, snapshot.event_head)
+        }),
+      ),
+      #("next_cursor", json.nullable(next_cursor, json.string)),
+    ]),
+  )
+}
+
+fn cluster_node_json(
+  node: cluster_health_model.Node,
+  event_head: Int,
+) -> json.Json {
+  json.object([
+    #("node_id", json.string(node.node_id)),
+    #("sequence", json.int(node.sequence)),
+    #("lag_events", json.int(int.max(0, event_head - node.sequence))),
+    #("updated_at", json.int(node.updated_at)),
+    #("stale", json.bool(node.stale)),
+  ])
+}
+
+fn list_audit(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
+  case runtime.audit {
+    None ->
+      problem(503, "Audit unavailable", "The security audit store is disabled")
+    Some(store) ->
+      case strict_page_limit(req), audit_cursor(req) {
+        Error(_), _ | _, Error(_) ->
+          problem(
+            400,
+            "Invalid audit page",
+            "Use a limit from 1 to 100 and an unmodified audit cursor",
+          )
+        Ok(limit), Ok(after) ->
+          case store.page(after, limit) {
+            Error(audit.InvalidPage) ->
+              problem(
+                400,
+                "Invalid audit page",
+                "Use a limit from 1 to 100 and an unmodified audit cursor",
+              )
+            Error(_) ->
+              problem(
+                503,
+                "Audit unavailable",
+                "Could not read the security audit log",
+              )
+            Ok(page) -> {
+              let next = case page.next {
+                None -> None
+                Some(audit.Cursor(sequence)) ->
+                  Some(cursor.encode("audit", sequence))
+              }
+              page_response(page.items, next, audit_event_json)
+            }
+          }
+      }
+  }
+}
+
+fn audit_event_json(event: audit.Event) -> json.Json {
+  json.object([
+    #("sequence", json.int(event.sequence)),
+    #("occurred_at", json.int(event.occurred_at)),
+    #("actor", json.string(event.actor)),
+    #("action", json.string(audit.action_name(event.action))),
+    #("target", json.nullable(event.target, json.string)),
+    #("outcome", json.string(audit.outcome_name(event.outcome))),
+    #("status", json.nullable(event.status, json.int)),
+    #("client_ip", json.string(event.client_ip)),
+    #("request_id", json.string(event.request_id)),
+  ])
+}
+
+fn strict_page_limit(req: Request(body)) -> Result(Int, Nil) {
+  case query(req, "limit") {
+    None -> Ok(50)
+    Some(raw) ->
+      case int.parse(raw) {
+        Ok(limit) if limit >= 1 && limit <= 100 -> Ok(limit)
+        _ -> Error(Nil)
+      }
+  }
+}
+
+fn audit_cursor(req: Request(body)) -> Result(Option(audit.Cursor), Nil) {
+  case query(req, "cursor") {
+    None -> Ok(None)
+    Some(encoded) ->
+      cursor.decode(encoded, "audit")
+      |> result.map(fn(sequence) { Some(audit.Cursor(sequence)) })
+      |> result.map_error(fn(_) { Nil })
+  }
+}
+
 fn list_delivery_jobs(
   req: Request(BitArray),
   runtime: Runtime,
 ) -> Response(BitArray) {
-  case runtime.deliveries {
-    None -> page_response([], None, delivery_job_json)
-    Some(store) -> {
-      let selected = case query(req, "kind") {
-        Some("webpush") -> store.list(delivery.WebPush)
-        Some("mobile_relay") | Some("relay") -> store.list(delivery.MobileRelay)
-        Some(_) -> Error(delivery.NotFound)
-        None ->
-          case store.list(delivery.WebPush), store.list(delivery.MobileRelay) {
-            Ok(webpush), Ok(relay) -> Ok(list.append(webpush, relay))
-            Error(error), _ | _, Error(error) -> Error(error)
+  case delivery_filter(req) {
+    Error(_) ->
+      problem(400, "Invalid delivery kind", "Use webpush or mobile_relay")
+    Ok(filter) ->
+      case keyset_request(req, delivery_resource(filter)) {
+        Error(_) -> invalid_page()
+        Ok(page) -> {
+          let KeysetRequest(after:, limit:, ..) = page
+          case runtime.deliveries {
+            None ->
+              keyset_response(
+                page,
+                [],
+                fn(job: delivery.Job) { job.id },
+                delivery_job_json,
+              )
+            Some(store) ->
+              case store.page(delivery_filter_kind(filter), after, limit) {
+                Ok(jobs) ->
+                  delivery_keyset_response(
+                    page,
+                    jobs,
+                    fn(job) { job.id },
+                    delivery_summary_json,
+                  )
+                Error(delivery.InvalidPage) -> invalid_page()
+                Error(_) ->
+                  problem(
+                    503,
+                    "Delivery outbox unavailable",
+                    "Could not list durable delivery jobs",
+                  )
+              }
           }
+        }
       }
-      case selected {
-        Ok(jobs) -> page_response(jobs, None, delivery_job_json)
-        Error(delivery.NotFound) ->
-          problem(400, "Invalid delivery kind", "Use webpush or mobile_relay")
-        Error(_) ->
-          problem(
-            503,
-            "Delivery outbox unavailable",
-            "Could not list durable delivery jobs",
-          )
-      }
-    }
+  }
+}
+
+fn delivery_filter(req: Request(body)) -> Result(DeliveryFilter, Nil) {
+  case query(req, "kind") {
+    None -> Ok(AllDeliveryJobs)
+    Some("webpush") -> Ok(WebPushDeliveryJobs)
+    Some("mobile_relay") | Some("relay") -> Ok(MobileRelayDeliveryJobs)
+    Some(_) -> Error(Nil)
+  }
+}
+
+fn delivery_resource(filter: DeliveryFilter) -> String {
+  case filter {
+    AllDeliveryJobs -> "delivery_jobs:all"
+    WebPushDeliveryJobs -> "delivery_jobs:webpush"
+    MobileRelayDeliveryJobs -> "delivery_jobs:mobile_relay"
+  }
+}
+
+fn delivery_filter_kind(filter: DeliveryFilter) -> Option(delivery.Kind) {
+  case filter {
+    AllDeliveryJobs -> None
+    WebPushDeliveryJobs -> Some(delivery.WebPush)
+    MobileRelayDeliveryJobs -> Some(delivery.MobileRelay)
   }
 }
 
@@ -600,6 +1067,73 @@ fn delivery_job_json(job: delivery.Job) -> json.Json {
     #("lease_until", json.nullable(job.lease_until, json.int)),
     #("last_error", json.nullable(job.last_error, json.string)),
   ])
+}
+
+fn delivery_summary_json(job: delivery.Summary) -> json.Json {
+  json.object([
+    #("id", json.string(job.id)),
+    #("kind", json.string(delivery_kind_string(job.kind))),
+    #("message_id", json.string(job.message_id)),
+    #("topic_hash", json.string(job.topic_hash)),
+    #("state", json.string(delivery_state_string(job.state))),
+    #("attempts", json.int(job.attempts)),
+    #("available_at", json.int(job.available_at)),
+    #("lease_owner", json.nullable(job.lease_owner, json.string)),
+    #("lease_until", json.nullable(job.lease_until, json.int)),
+    #("last_error", json.nullable(job.last_error, json.string)),
+  ])
+}
+
+fn retry_delivery_job(id: String, runtime: Runtime) -> Response(BitArray) {
+  case runtime.deliveries {
+    None ->
+      problem(404, "Delivery job not found", "The delivery outbox is disabled")
+    Some(store) -> {
+      let runtime.Clock(now) = runtime.clock
+      case store.requeue(id, now()) {
+        Ok(job) -> json_response(200, delivery_job_json(job))
+        Error(delivery.NotFound) ->
+          problem(404, "Delivery job not found", "No job has that ID")
+        Error(delivery.Conflict) ->
+          problem(
+            409,
+            "Delivery job is active",
+            "Only dead-letter jobs can be retried manually",
+          )
+        Error(_) ->
+          problem(
+            503,
+            "Delivery retry unavailable",
+            "Could not requeue the delivery job",
+          )
+      }
+    }
+  }
+}
+
+fn purge_delivery_job(id: String, runtime: Runtime) -> Response(BitArray) {
+  case runtime.deliveries {
+    None ->
+      problem(404, "Delivery job not found", "The delivery outbox is disabled")
+    Some(store) ->
+      case store.purge(id) {
+        Ok(_) -> no_content()
+        Error(delivery.NotFound) ->
+          problem(404, "Delivery job not found", "No job has that ID")
+        Error(delivery.Conflict) ->
+          problem(
+            409,
+            "Delivery job is active",
+            "Only dead-letter jobs can be purged manually",
+          )
+        Error(_) ->
+          problem(
+            503,
+            "Delivery purge unavailable",
+            "Could not purge the delivery job",
+          )
+      }
+  }
 }
 
 fn delivery_kind_string(kind: delivery.Kind) -> String {
@@ -621,37 +1155,37 @@ fn list_attachments(
   req: Request(BitArray),
   runtime: Runtime,
 ) -> Response(BitArray) {
-  case runtime.attachments {
-    None -> page_response([], None, attachment_json)
-    Some(store) ->
-      case store.list() {
-        Error(_) ->
-          problem(
-            503,
-            "Attachments unavailable",
-            "Could not list attachment metadata",
+  case keyset_request(req, "attachments") {
+    Error(_) -> invalid_page()
+    Ok(page) -> {
+      let KeysetRequest(after:, limit:, ..) = page
+      case runtime.attachments {
+        None ->
+          keyset_response(
+            page,
+            [],
+            fn(item: attachment_store.Stored) { item.key },
+            attachment_json,
           )
-        Ok(items) -> {
-          let limit = page_limit(req)
-          let selected = case query(req, "cursor") {
-            None -> items
-            Some(cursor) ->
-              list.filter(items, fn(item) {
-                string.compare(item.key, cursor) == order.Gt
-              })
+        Some(store) ->
+          case store.page(after, limit) {
+            Error(attachment_store.InvalidPage) -> invalid_page()
+            Error(_) ->
+              problem(
+                503,
+                "Attachments unavailable",
+                "Could not list attachment metadata",
+              )
+            Ok(items) ->
+              attachment_keyset_response(
+                page,
+                items,
+                fn(item) { item.key },
+                attachment_json,
+              )
           }
-          let page = list.take(selected, limit)
-          let next_cursor = case list.length(selected) > limit {
-            False -> None
-            True ->
-              page
-              |> list.last
-              |> result.map(fn(item) { item.key })
-              |> option_from_result
-          }
-          page_response(page, next_cursor, attachment_json)
-        }
       }
+    }
   }
 }
 
@@ -768,6 +1302,7 @@ fn stored_token_json(stored: identity.Token) -> json.Json {
     #("label", json.string(stored.label)),
     #("created_at", json.int(stored.created_at)),
     #("expires", json.nullable(stored.expires, json.int)),
+    #("last_access", json.nullable(stored.last_access, json.int)),
   ])
 }
 
@@ -777,6 +1312,141 @@ fn rule_json(rule: acl.Rule) -> json.Json {
     #("topic_pattern", json.string(rule.topic_pattern)),
     #("permission", json.string(permission_string(rule.permission))),
   ])
+}
+
+fn rule_key(rule: acl.Rule) -> String {
+  rule.username <> "\t" <> rule.topic_pattern
+}
+
+fn grant_cursor(
+  after: Option(String),
+) -> Result(Option(identity.GrantCursor), Nil) {
+  case after {
+    None -> Ok(None)
+    Some(value) ->
+      case string.split_once(value, "\t") {
+        Error(_) -> Error(Nil)
+        Ok(#(username, topic_pattern)) ->
+          case
+            username != ""
+            && topic_pattern != ""
+            && !string.contains(topic_pattern, "\t")
+          {
+            True -> Ok(Some(identity.GrantCursor(username:, topic_pattern:)))
+            False -> Error(Nil)
+          }
+      }
+  }
+}
+
+fn keyset_request(
+  req: Request(body),
+  resource: String,
+) -> Result(KeysetRequest, Nil) {
+  use limit <- result.try(strict_page_limit(req))
+  use after <- result.try(case query(req, "cursor") {
+    None -> Ok(None)
+    Some(encoded) ->
+      cursor.decode_key(encoded, resource)
+      |> result.map(Some)
+      |> result.map_error(fn(_) { Nil })
+  })
+  Ok(KeysetRequest(resource:, limit:, after:))
+}
+
+fn keyset_response(
+  paging: KeysetRequest,
+  items: List(a),
+  key: fn(a) -> String,
+  encode: fn(a) -> json.Json,
+) -> Response(BitArray) {
+  let KeysetRequest(resource:, limit:, after:) = paging
+  let sorted =
+    list.sort(items, by: fn(left, right) {
+      string.compare(key(left), key(right))
+    })
+  let selected = case after {
+    None -> sorted
+    Some(after) ->
+      list.filter(sorted, fn(item) {
+        string.compare(key(item), after) == order.Gt
+      })
+  }
+  let items = list.take(selected, limit)
+  let next_cursor = case list.length(selected) > limit {
+    False -> None
+    True ->
+      items
+      |> list.last
+      |> result.map(fn(item) { cursor.encode_key(resource, key(item)) })
+      |> option_from_result
+  }
+  page_response(items, next_cursor, encode)
+}
+
+fn stored_keyset_response(
+  paging: KeysetRequest,
+  stored: identity.Page(a),
+  key: fn(a) -> String,
+  encode: fn(a) -> json.Json,
+) -> Response(BitArray) {
+  let KeysetRequest(resource:, ..) = paging
+  let identity.Page(items:, has_more:) = stored
+  let next_cursor = case has_more {
+    False -> None
+    True ->
+      items
+      |> list.last
+      |> result.map(fn(item) { cursor.encode_key(resource, key(item)) })
+      |> option_from_result
+  }
+  page_response(items, next_cursor, encode)
+}
+
+fn delivery_keyset_response(
+  paging: KeysetRequest,
+  stored: delivery.Page(a),
+  key: fn(a) -> String,
+  encode: fn(a) -> json.Json,
+) -> Response(BitArray) {
+  let KeysetRequest(resource:, ..) = paging
+  let delivery.Page(items:, has_more:) = stored
+  let next_cursor = case has_more {
+    False -> None
+    True ->
+      items
+      |> list.last
+      |> result.map(fn(item) { cursor.encode_key(resource, key(item)) })
+      |> option_from_result
+  }
+  page_response(items, next_cursor, encode)
+}
+
+fn attachment_keyset_response(
+  paging: KeysetRequest,
+  stored: attachment_store.Page(a),
+  key: fn(a) -> String,
+  encode: fn(a) -> json.Json,
+) -> Response(BitArray) {
+  let KeysetRequest(resource:, ..) = paging
+  let attachment_store.Page(items:, has_more:) = stored
+  let next_cursor = case has_more {
+    False -> None
+    True ->
+      items
+      |> list.last
+      |> result.map(fn(item) { cursor.encode_key(resource, key(item)) })
+      |> option_from_result
+  }
+  page_response(items, next_cursor, encode)
+}
+
+fn invalid_page() -> Response(BitArray) {
+  problem(
+    400,
+    "Invalid page",
+    "Use a limit from 1 to 100 and an unmodified cursor from this collection",
+  )
 }
 
 fn page_response(
@@ -791,13 +1461,6 @@ fn page_response(
       #("next_cursor", json.nullable(next_cursor, json.string)),
     ]),
   )
-}
-
-fn page_limit(req: Request(body)) -> Int {
-  case query(req, "limit") |> option_then_int {
-    Some(limit) if limit >= 1 && limit <= 100 -> limit
-    _ -> 50
-  }
 }
 
 fn query(req: Request(body), name: String) -> Option(String) {
@@ -859,13 +1522,6 @@ fn option_from_result(value: Result(a, Nil)) -> Option(a) {
   case value {
     Ok(value) -> Some(value)
     Error(_) -> None
-  }
-}
-
-fn option_then_int(value: Option(String)) -> Option(Int) {
-  case value {
-    Some(value) -> int.parse(value) |> option_from_result
-    None -> None
   }
 }
 

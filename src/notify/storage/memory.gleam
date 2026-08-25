@@ -4,11 +4,13 @@ import gleam/option
 import gleam/otp/actor
 import gleam/result
 import notify/core/message.{type Message}
+import notify/core/topic.{type Topic}
 import notify/storage.{type Query, type Storage}
 
 type Command {
   Save(Message, Subject(Result(Message, storage.Error)))
   RunQuery(Query, Subject(Result(List(Message), storage.Error)))
+  HasAttachment(Topic, String, Subject(Result(Bool, storage.Error)))
   ReleaseDue(Int, Int, Subject(Result(List(Message), storage.Error)))
   CleanupExpired(Int, Subject(Result(Int, storage.Error)))
   Stats(Subject(Result(storage.Stats, storage.Error)))
@@ -16,9 +18,13 @@ type Command {
   Health(Subject(Result(Nil, storage.Error)))
 }
 
+type State {
+  State(messages: List(Message), events: Int)
+}
+
 pub fn start() -> Result(Storage, actor.StartError) {
   use started <- result.try(
-    actor.new([])
+    actor.new(State(messages: [], events: 0))
     |> actor.on_message(handle)
     |> actor.start,
   )
@@ -32,6 +38,11 @@ pub fn start() -> Result(Storage, actor.StartError) {
       query: fn(query) {
         process.call(subject, 5000, fn(reply) { RunQuery(query, reply) })
       },
+      has_attachment: fn(topic, key) {
+        process.call(subject, 5000, fn(reply) {
+          HasAttachment(topic, key, reply)
+        })
+      },
       release_due: fn(now, limit) {
         process.call(subject, 5000, fn(reply) { ReleaseDue(now, limit, reply) })
       },
@@ -44,52 +55,71 @@ pub fn start() -> Result(Storage, actor.StartError) {
   )
 }
 
-fn handle(
-  messages: List(Message),
-  command: Command,
-) -> actor.Next(List(Message), Command) {
+fn handle(state: State, command: Command) -> actor.Next(State, Command) {
   case command {
     Save(message, reply) -> {
       process.send(reply, Ok(message))
-      actor.continue(list.append(messages, [message]))
+      actor.continue(State(
+        messages: list.append(state.messages, [message]),
+        events: state.events + 1,
+      ))
     }
     RunQuery(query, reply) -> {
-      process.send(reply, Ok(storage.apply_query(messages, query)))
-      actor.continue(messages)
+      process.send(reply, Ok(storage.apply_query(state.messages, query)))
+      actor.continue(state)
+    }
+    HasAttachment(topic, key, reply) -> {
+      process.send(
+        reply,
+        Ok(
+          list.any(state.messages, fn(message) {
+            message.topic == topic
+            && storage.message_references_attachment(message, key)
+          }),
+        ),
+      )
+      actor.continue(state)
     }
     ReleaseDue(now, limit, reply) -> {
-      let #(updated, released) = release(messages, now, max(0, limit), [], [])
+      let #(updated, released) =
+        release(state.messages, now, max(0, limit), [], [])
       process.send(reply, Ok(released))
-      actor.continue(updated)
+      actor.continue(State(
+        messages: updated,
+        events: state.events + list.length(released),
+      ))
     }
     CleanupExpired(now, reply) -> {
       let remaining =
-        list.filter(messages, fn(message) {
+        list.filter(state.messages, fn(message) {
           case message.cached, message.expires {
             False, _ -> False
             True, option.Some(expires) -> expires > now
             True, option.None -> True
           }
         })
-      process.send(reply, Ok(list.length(messages) - list.length(remaining)))
-      actor.continue(remaining)
+      process.send(
+        reply,
+        Ok(list.length(state.messages) - list.length(remaining)),
+      )
+      actor.continue(State(..state, messages: remaining))
     }
     Stats(reply) -> {
       process.send(
         reply,
         Ok(storage.Stats(
-          messages: list.length(messages),
-          scheduled: messages
+          messages: list.length(state.messages),
+          scheduled: state.messages
             |> list.filter(fn(message) { message.scheduled })
             |> list.length,
-          events: list.length(messages),
+          events: state.events,
         )),
       )
-      actor.continue(messages)
+      actor.continue(state)
     }
     Migrate(reply) | Health(reply) -> {
       process.send(reply, Ok(Nil))
-      actor.continue(messages)
+      actor.continue(state)
     }
   }
 }

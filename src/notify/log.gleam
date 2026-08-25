@@ -1,6 +1,7 @@
 import gleam/int
 import gleam/io
 import gleam/json
+import gleam/list
 import gleam/string
 
 pub type Format {
@@ -40,13 +41,13 @@ pub fn request_line(
       "time="
       <> int.to_string(at)
       <> " level=info event=http_request request_id="
-      <> request_id
+      <> human_field(request_id)
       <> " client_ip="
-      <> client_ip
+      <> human_field(client_ip)
       <> " method="
-      <> method
+      <> human_field(method)
       <> " path="
-      <> path
+      <> human_field(path)
       <> " status="
       <> int.to_string(status)
       <> " duration_ms="
@@ -93,4 +94,21 @@ fn single_line(value: String) -> String {
   |> string.replace("\r\n", "\\r\\n")
   |> string.replace("\r", "\\r")
   |> string.replace("\n", "\\n")
+}
+
+fn human_field(value: String) -> String {
+  let escaped =
+    value
+    |> string.to_utf_codepoints
+    |> list.map(fn(codepoint) {
+      let code = string.utf_codepoint_to_int(codepoint)
+      case code {
+        34 -> "\\\""
+        92 -> "\\\\"
+        code if code < 32 || code == 127 -> "\\u" <> int.to_string(code)
+        _ -> string.from_utf_codepoints([codepoint])
+      }
+    })
+    |> string.concat
+  "\"" <> escaped <> "\""
 }

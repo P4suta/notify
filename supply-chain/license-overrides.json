@@ -1,0 +1,61 @@
+{
+  "components": {
+    "pkg:hex/bcrypt@1.2.2": {
+      "license_files": {
+        "LICENSE": "5e645467a5b6e82046abbd0554d366da14a873e61956649f003ca40d60089a51"
+      },
+      "licenses": [
+        "BSD-3-Clause",
+        "BSD-4-Clause",
+        "ISC"
+      ],
+      "reason": "The release metadata omits the compound licenses documented in LICENSE."
+    },
+    "pkg:hex/esqlite@0.9.0": {
+      "license_files": {
+        "LICENSE": "b04c8850fdf64d17233f0acbe4eb632f03bd663094233c949bdbe788858bb841"
+      },
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "reason": "The release metadata omits the Apache-2.0 license documented in LICENSE."
+    },
+    "pkg:hex/hpack_erl@0.3.0": {
+      "license_files": {
+        "LICENSE": "bd3650b667ef52236018184e6413992cb9e81c7520d646189c3eaa7ff9f84691"
+      },
+      "licenses": [
+        "MIT"
+      ],
+      "reason": "The release metadata omits the MIT license documented in LICENSE."
+    },
+    "pkg:hex/jargon@1.1.0": {
+      "license_files": {
+        "LICENSE": "f156a0b1413454c4a07a8400fc7eba2db87b265bc15b9f85e98acd9e427188ff"
+      },
+      "licenses": [
+        "MIT"
+      ],
+      "reason": "The release metadata omits the MIT license documented in LICENSE."
+    },
+    "pkg:hex/poolboy@1.5.2": {
+      "license_files": {
+        "LICENSE": "af7e0c1deb1e000cd1c0aa389d3b404ba5a05fe30df83e9e041c41ca408c33d2"
+      },
+      "licenses": [
+        "ISC"
+      ],
+      "reason": "The release metadata omits the ISC license documented in LICENSE."
+    },
+    "pkg:hex/telemetry@1.4.2": {
+      "license_files": {
+        "LICENSE": "0cec06e0e55fbc3dc5cee4fca9b607f66cb8f4e4dbcf3b3c013594dd156732e9"
+      },
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "reason": "The release metadata omits the Apache-2.0 license documented in LICENSE."
+    }
+  },
+  "schema_version": 1
+}

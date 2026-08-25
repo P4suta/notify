@@ -6,7 +6,17 @@
 
 Notify is a self-hosted notification server written in Gleam/OTP. It exposes an
 ntfy-compatible HTTP surface, durable pub/sub, a bilingual Lustre PWA, access
-control, attachments, Web Push, and PostgreSQL active-active operation.
+control, attachments, Web Push, and an experimental PostgreSQL active-active
+mode.
+
+> **Development status:** Notify is not yet production-ready. The v2.27.0
+> differential corpus is intentionally pinned but still incomplete, the full
+> fault-injection matrix has not run, and the measured steady-state soak is not
+> a production capacity certificate. The 10,000-subscription / 500
+> publish-per-second target has passed once on the environment recorded in the
+> operational limits. See the measured
+> [compatibility status](docs/compatibility.md) and
+> [operational limits](docs/operations.md) before testing a deployment.
 
 The compatibility baseline is ntfy **v2.27.0**. Notify is an independent
 implementation based on the public protocol; it does not copy ntfy source code
@@ -93,8 +103,36 @@ failures in one run with an actionable `FIX` line and exits non-zero.
 
 Sensitive PostgreSQL, S3, Web Push, and relay credentials are accepted from
 environment variables and are never printed by `config show`. Request logs do
-not include bodies, authorization headers, or query strings. Set
-`NOTIFY_LOG_FORMAT=json` for structured logs.
+not include bodies, authorization headers, or query strings. Human log fields
+are quoted and escape control characters; JSON logs use structural encoding.
+Set `NOTIFY_LOG_FORMAT=json` for structured logs. Session CSRF digests are
+checked with constant-time binary comparison.
+
+Rate limits use continuously refilled token buckets keyed by the effective
+client IP. The default 60-second refill period has independent capacities for
+all requests (120), subscription attempts (30), publish/topic-creation
+attempts (60), authentication failures (10), attachment transfer MiB (120),
+and attachment upload attempts (20). Configure them under `[rate_limit]`, with
+the corresponding `NOTIFY_RATE_LIMIT_*` variables, or with the documented CLI
+flags. In active-active mode PostgreSQL updates each bucket transactionally
+across nodes; limiter storage failure fails closed with HTTP 503.
+
+HTTP security and administration changes use an append-only audit log in the
+same SQLite or PostgreSQL backend. A mutation is not run unless its `attempted`
+event is durable; a separate result event records `succeeded`, `failed`, or
+`denied`. Audit pages use opaque base64url keyset cursors and never contain
+request bodies, query strings, credentials, session cookies, raw tokens, or
+message content.
+
+Webhook message templates use the fixed ntfy v2.27 aliases (`X-Template`,
+`Template`, `Tpl`, or `template`/`tpl` query parameters). Inline templates and
+the independently implemented `github`, `grafana`, and `alertmanager` names are
+available; custom `.yml` files come from `[templates].directory`,
+`NOTIFY_TEMPLATE_DIRECTORY`, or `--template-dir`. Rendering is isolated and
+bounded by input, template, output, recursion, expansion, and wall-clock
+limits. The compatibility matrix records the remaining advanced function gaps.
+See [bounded message templates](docs/templates.md) for the language, allowlist,
+configuration, and exact error/limit contract.
 
 Useful operational commands include:
 
@@ -136,8 +174,19 @@ from the ntfy YAML file. The importer accepts ntfy SQLite cache schemas 9–15,
 auth schemas 1–9, Web Push subscriptions, and content-addresses local
 attachments in the configured Notify backend. Apply uses one SQLite
 transaction and is idempotent; newly copied attachment objects are removed if
-the database transaction fails. Migrated bcrypt passwords are upgraded to
-Argon2id on the first successful login.
+the database transaction fails. Migrated token activity is preserved. Migrated
+bcrypt passwords and verified older Argon2 encodings are upgraded to the fixed
+Argon2id policy (19,456 KiB, two iterations, one lane, 32-byte output) on the
+first successful login. The lock-file's Argus 1.0.4/Jargon 1.1.0 pair emits
+the PHC version field `v=13`; that exact dependency output is pinned so a
+future correction requires an explicit migration review.
+
+The migration suite applies independent version-shaped fixtures for every
+supported cache schema (9–15) and auth schema (1–9), checks the imported
+message/user/token/ACL semantics, and verifies each source SHA-256 is unchanged.
+It also rejects cache 8/16 and auth 0/10 before creating a destination. The
+combined current-schema fixture separately covers dry-run, Web Push, local
+attachments, idempotency, and attachment rollback after a database conflict.
 
 ## PostgreSQL active-active example
 
@@ -145,12 +194,13 @@ Argon2id on the first successful login.
 docker compose -f compose.cluster.yml up --build
 ```
 
-This starts two Notify nodes, PostgreSQL 17, and a development MinIO bucket.
-Node A is exposed on port 8080 and node B on 8081. The development-only
-PostgreSQL and MinIO APIs are bound to loopback ports 15432 and 19000; the MinIO
-console is on loopback port 19001. Replace all example
-credentials, place both nodes behind a trusted reverse proxy, and set the public
-base URL before production use.
+This starts three Notify nodes, PostgreSQL 17, and a development MinIO bucket.
+Nodes A, B, and C are exposed on ports 8080, 8081, and 8082. The
+development-only PostgreSQL and MinIO APIs are bound to loopback ports 15432
+and 19000; the MinIO console is on loopback port 19001. Replace all example
+credentials, place all nodes behind a trusted reverse proxy, and set the public
+base URL before any shared test deployment. This mode is not yet certified for
+production use.
 
 The first cluster-wide setup challenge is installed transactionally. Concurrent
 nodes never rotate it or print unusable competing URLs; any node can consume the
@@ -158,28 +208,94 @@ single URL, after which reuse is rejected across the cluster.
 
 The durable PostgreSQL event log is authoritative. LISTEN/NOTIFY only wakes
 nodes; each node resumes from its stored cursor after lost notifications or a
-restart. Scheduled publication uses `FOR UPDATE SKIP LOCKED`. Web Push and the
-privacy-preserving mobile relay use a leased durable outbox with retry and
-dead-letter states. Distributed request limiting uses an atomic PostgreSQL
-counter. SQLite uses WAL plus a per-database live-process lock and is strictly
+restart. A node advances its cursor only after the broker has synchronously
+applied every non-scheduled event, including its own origin, in sequence; a
+dispatch or cursor-write failure leaves the batch available for at-least-once
+retry. Cursor heartbeats protect
+active readers, cursors stale for seven days are removed, and compaction deletes
+only acknowledged event rows whose message has already expired. Scheduled
+publication uses `FOR UPDATE SKIP LOCKED` and commits the released message plus
+its event in one transaction. These paths have real-PostgreSQL contract
+coverage. The contract also terminates the dedicated LISTEN backend, commits an
+event while it is disconnected, requires a new listener PID to catch up from
+the log, and proves duplicate wake-ups do not duplicate delivery. A separate
+three-node data-plane contract requires every node to consume both local- and
+remote-origin events in the same durable order, stops one bus actor, commits on
+both surviving origins, and requires the restarted node to resume both events
+in sequence from its durable cursor. A weekly/manual full-container contract
+additionally SIGKILLs one of three nodes, publishes through both survivors,
+restarts the failed node, and verifies ordered replay plus message-ID live
+resume.
+The target-scale 10-minute steady-state JSON soak has passed on one recorded
+8-CPU environment. Simultaneous multi-node outage and prolonged fault-injection
+coverage remain open.
+
+SQLite uses WAL plus a per-database live-process lock and is strictly
 single-node.
 
-## Protocol and operations
+The PostgreSQL message adapter uses a bounded four-worker round-robin query
+pool, one event-cursor connection, one ordered commit connection, and a
+separate LISTEN connection. The commit actor coalesces up to 64 ordinary
+message/event writes for at most one millisecond into one synchronous database
+transaction; writes with delivery jobs retain their dedicated atomic
+message/event/outbox transaction. Transactions that append events take one
+database advisory transaction lock before allocating message/event sequence
+values, so concurrent commits cannot expose a higher cursor while a lower event
+remains uncommitted. Notify enables `TCP_NODELAY` for outbound Erlang client sockets
+before opening the pool, while preserving other configured connect defaults;
+this avoids delayed-ACK stalls across PostgreSQL protocol round trips. A failed
+operation is returned to its caller without an ambiguous automatic write retry;
+that lane replaces its connection for subsequent operations. The fixed lanes,
+same-batch duplicate handling, forced-backend-termination recovery, and event
+sequence validation have real-PostgreSQL tests. The recorded target run is
+summarised in [operational limits](docs/operations.md).
+
+Delivery workers share the PostgreSQL outbox using `FOR UPDATE SKIP LOCKED`.
+The real-store contract verifies that another node cannot claim a live lease,
+can reclaim it at expiry without incrementing attempts, and invalidates the old
+owner. It also races two independent stores over 32 jobs and requires 32 unique
+claims.
+
+Within each node, the live broker indexes subscription IDs by topic and keeps
+credit state by subscription ID. A publish visits only registrations for its
+topic instead of scanning every connected subscriber. Duplicate topics in one
+subscription are collapsed, and unsubscribe or overflow removes every related
+index entry. This fixes the broker's fan-out cost model; the recorded soak is
+the separate end-to-end evidence and is not a general hardware capacity claim.
+
+## Implemented surface
+
+The following items exist in the current tree. Inclusion here does not mean the
+entire surface has passed differential, fault-injection, accessibility, or load
+certification; the exact evidence is recorded in
+[docs/compatibility.md](docs/compatibility.md).
 
 - Publish: plaintext, JSON, query/header aliases, delay, actions, updates,
   delete/clear controls, and local/remote attachments.
 - Subscribe: JSON, SSE, raw, and WebSocket; multi-topic filters, `since`, poll,
-  scheduled events, keepalive, and bounded credit-based fan-out.
-- Identity: setup gate, Argon2id passwords, one-time bearer-token display,
-  Basic/Bearer authentication, wildcard ACLs, CSRF-protected admin sessions.
-- Attachments: filesystem, shared filesystem, PostgreSQL blob, and S3-compatible
-  stores; content-addressed keys, ranges, quotas, expiry, and orphan cleanup.
+  scheduled events, keepalive, topic-indexed fan-out, and a bounded credit
+  window that disconnects only an overflowing subscriber.
+- Identity: setup gate, fixed-policy Argon2id passwords with successful-login
+  legacy rehash, one-time bearer-token display, monotonic token last-access
+  tracking, bounded ID/hash collision retry, Basic/Bearer authentication,
+  wildcard ACLs, CSRF-protected admin sessions, and append-only redacted audit
+  records for HTTP setup, sessions, and administration mutations.
+- Attachments: filesystem/shared-filesystem, PostgreSQL chunk, and S3-compatible
+  stores with `begin/write/finish/abort`, incremental SHA-256,
+  content-addressed promotion, byte ranges, quotas, expiry, and one-hour staging
+  cleanup. The current HTTP server still materialises request and response
+  bodies; transport-level streaming and sendfile remain open.
 - Operations: liveness, readiness, Prometheus metrics, request IDs, human/JSON
-  logs, effective configuration, OpenAPI, delivery and attachment inspection.
+  logs, effective configuration, OpenAPI, audit inspection, delivery
+  inspection/retry/purge, attachment inspection, and redacted PostgreSQL
+  cluster cursor/lag health. Every management
+  collection uses strict 50-default/100-maximum opaque keyset pages whose
+  cursors are bound to the collection and active filters.
 - PWA: Gleam/Lustre MVU interface, English/Japanese copy, live timeline,
   publishing, attachments, Web Push, user/token/ACL mutations, delivery failure
   and attachment inventory, keyboard controls, responsive dark/light
-  presentation, and an offline shell.
+  presentation, an offline shell, and local 192/512-pixel plus scalable install
+  icons with no external asset dependency.
 
 Raw bearer values are returned exactly once when created (including account
 login/token compatibility routes) and only hashes are persisted. Account and
@@ -188,16 +304,21 @@ raw tokens. This is an intentional security deviation where an ntfy client
 expects an already-issued raw token to be listed again; revoke and create a
 replacement instead.
 
-Stable connections do not duplicate messages. Across reconnects delivery is
-at-least-once; clients should de-duplicate using the message ID. No outbound
-telemetry, tracking, CDN, or external fonts are used. Outbound traffic is limited
-to explicitly configured PostgreSQL, S3, Web Push endpoints, and ntfy relay.
+The intended reconnect contract is at-least-once with de-duplication by the
+12-character message ID; exactly-once delivery across reconnects is not
+promised. One recorded 10-minute target run observed zero stable-connection
+loss, duplicates, order mismatches, or disconnects; this does not strengthen
+the reconnect contract. No outbound telemetry, tracking, CDN, or external fonts
+are used. Outbound traffic is limited to explicitly configured PostgreSQL, S3,
+Web Push endpoints, and mobile relay.
 
 ## Builds and tests
 
 ```sh
 gleam format --check src test packages/notify_core/src packages/notify_core/test
 test/lint.sh
+test/security_lint.sh
+python3 test/check_licenses.py --root .
 gleam test
 (cd packages/notify_core && gleam test)
 (cd packages/notify_core && gleam run -m gleam_mutants -- run --strict)
@@ -205,26 +326,101 @@ gleam test
 (cd web && gleam test)
 gleam export erlang-shipment
 docker build --check .
+docker build --tag notify:security .
+test/container_smoke.sh notify:security
+test/cluster_fault.sh
+test/vulnerability_scan.sh notify:security
+test/generate_sbom.sh notify:security /tmp/notify-sbom
 ```
+
+`test/security_lint.sh` runs actionlint, hadolint, ShellCheck, zizmor, and
+Gitleaks in network-disabled, read-only containers pinned by image digest.
+yamllint is installed separately from `requirements/security-lint.txt` with
+required hashes. Generated dependency/build trees are excluded from the
+working-tree Gitleaks scan; source, configuration, fixtures, and workflows
+remain in scope. Dependabot applies a seven-day cooldown to routine version
+updates; Dependabot security updates are not delayed by that setting.
+
+The `Supply-chain lint / Static supply-chain policy`,
+`Supply-chain security / Vulnerability, license, and SBOM`, and CodeQL jobs are
+required-check candidates. Add each exact check name to the repository ruleset
+only after it has completed successfully on GitHub Actions. CodeQL intentionally
+analyzes only JavaScript/TypeScript and GitHub Actions; this project does not
+claim CodeQL coverage for Gleam or Erlang.
+
+The supply-chain security gate converts all locked Gleam, npm, Mix, exact Mix
+archive, and pinned Git dependencies to one strict inventory. It scans that
+inventory with OSV-Scanner and scans both the source tree and locally built
+runtime image with Trivy. It
+generates and validates separate CycloneDX source and image SBOMs. CI retains
+those workflow artifacts for three days; it does not attach them to a release
+or publish them externally. `supply-chain/locked-licenses.json` is reviewed and
+checked against the allowlist and NOTICE requirements. Refresh it deliberately
+with `python3 test/refresh_locked_licenses.py --root .` after changing a lock
+file; the refresh verifies Hex tarball checksums and fails rather than guessing
+when structured license metadata is unavailable.
 
 The core suite includes deterministic, shrinking property tests for topic,
 priority, delay, JSON codec, and ACL invariants. Accepted Birdie snapshots pin
 the complete message wire shape, action normalisation, and validation errors;
 run the Birdie reviewer only when intentionally changing those contracts.
+The root suite also parses the served OpenAPI 3.1 document, requires unique
+stable IDs and response metadata for all 68 operations, and executes every
+documented method/path against the in-process body or live WebSocket router.
 
-The Playwright suite covers first-run setup, Secure-cookie login, live publish,
-attachments, ACL denial, one-time token display, Web Push registration,
-English/Japanese switching, keyboard operation, mobile layout, and WCAG 2.2 AA
-rules. It runs only against an isolated local Compose project:
+The pull-request Playwright gate runs Chromium desktop. Pushes to `main` and
+manual runs add Chromium mobile plus Firefox and WebKit in both desktop and
+mobile viewports. Every browser covers first-run setup, Secure-cookie login,
+live publish, attachments, ACL denial, one-time token display,
+English/Japanese switching, keyboard operation, responsive layout, and WCAG
+2.2 AA automated rules. Chromium additionally covers Web Push
+registration/removal, Service Worker control, and an offline reload of a topic
+query URL. A separate contract verifies the install manifest, 192/512-pixel
+PNG dimensions, scalable icon, precache list, and navigation fallback. Actual
+OS install-prompt/installed-mode behavior, screen-reader review, and manual
+WCAG audits remain open.
+
+The browser suite runs only against an isolated local Compose project through
+an ephemeral loopback TLS proxy, so the real `Secure; HttpOnly; SameSite=Strict`
+session cookie is exercised without weakening server policy:
 
 ```sh
 npm ci --prefix test/e2e
 test/e2e/run.sh
+NOTIFY_E2E_BROWSER=firefox NOTIFY_E2E_DEVICE=mobile test/e2e/run.sh
 ```
 
 With the SQLite Compose example running, `test/smoke/admin_session.sh` verifies
 the real Secure-cookie/CSRF management flow, user/token/ACL mutations, inventory
 endpoints, cleanup, and that a raw token cannot be recovered from listings.
+
+`test/container_smoke.sh IMAGE` uses an isolated, throwaway Docker volume and a
+loopback-only ephemeral port. It performs CLI setup, authenticated publish and
+poll, a restart with the same SQLite data, 12-character message-ID recovery,
+and graceful SIGTERM shutdown. The test runs the image with dropped
+capabilities, `no-new-privileges`, and a read-only root filesystem, then removes
+its container and volume.
+
+`test/cluster_fault.sh` builds one local image and starts three Notify
+containers with real PostgreSQL and MinIO. It checks ordered duplicate-free
+cross-node live delivery, SIGKILLs node B, publishes through nodes A and C,
+restarts B, and verifies ordered replay plus `since=<message ID>` live resume.
+The harness uses a unique Compose project/image and removes its containers,
+volumes, temporary files, and image on every exit. The same test runs weekly
+and on manual dispatch; it is intentionally outside the pull-request fast path.
+
+`test/cluster_soak.sh` is the fail-closed target load gate. Its defaults are
+three nodes, 10,000 live JSON subscriptions, 1,000 topics, 500 publishes per
+second for 600 seconds, and a 200 ms publish-response p95 budget. It rejects
+non-loopback endpoints unless explicitly overridden, records host/container/
+PostgreSQL evidence, checks every subscriber for loss, duplicates,
+disconnection, and topic order, then compares that order with the authoritative
+PostgreSQL event sequence. It also fails unless all three durable node cursors
+exist and finish at the event-log head. The harness removes its exact Compose
+project and local image on every exit. The target workflow runs weekly and
+manually and retains its private evidence for seven days; it does not publish
+an image or release artifact. The latest recorded local result and its scope are
+in [operational limits](docs/operations.md).
 
 Set `NOTIFY_TEST_POSTGRES_HOST` (plus optional `PORT` and `PASSWORD` variants)
 to enable the real PostgreSQL contract suite. Set `NOTIFY_TEST_S3_ENDPOINT`
@@ -242,14 +438,22 @@ NOTIFY_TEST_S3_SECRET_KEY=notify-minio-development-password \
 gleam test
 ```
 
+The `CI / PostgreSQL and MinIO` pull-request check starts these services in an
+isolated Compose project and runs the same suite. It is the required real-store
+counterpart to the default SQLite server test; failure logs are retained only
+inside the workflow run and its volumes are always removed.
+
 The pinned differential corpus lives in `test/compat`. Run it against the
 local `compose.compat.yml` stack to compare normalised status codes, media
 types, JSON messages, and errors with ntfy v2.27.0. Upstream-main drift uses a
 separate endpoint/artifact and never rewrites the stable baseline.
 
 The optional ERTS-embedded native build scaffold is under `packaging/native`.
-It uses MixGleam and Burrito only at build time; no registry publication or
-release-page automation is included.
+It uses exact MixGleam, Mix lock, Zig, and Burrito inputs. Scheduled/main CI
+builds Linux amd64/arm64 and macOS amd64/arm64 on matching standard runners;
+the upstream-supported Linux cross-build path produces Windows amd64 for a
+Windows recovery smoke. The transfer artifact expires after three days. No
+registry publication or release-page automation is included.
 
 ## License
 

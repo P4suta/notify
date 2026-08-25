@@ -488,7 +488,8 @@ fn storage_error(error: storage.Error) -> String {
   case error {
     storage.Unavailable(detail)
     | storage.Conflict(detail)
-    | storage.Corrupt(detail) -> detail
+    | storage.Corrupt(detail)
+    | storage.UnsupportedSchema(detail) -> detail
     storage.MigrationRequired(version) ->
       "migration " <> int.to_string(version) <> " is required"
   }
@@ -502,6 +503,7 @@ fn identity_error(error: identity.Error) -> String {
     identity.NotFound -> "identity record was not found"
     identity.InvalidSetupToken -> "setup token is invalid"
     identity.SetupAlreadyComplete -> "setup is already complete"
+    identity.InvalidPage -> "identity page is invalid"
   }
 }
 
@@ -516,6 +518,7 @@ fn attachment_error(error: attachment_store.Error) -> String {
       "quota is exhausted at " <> int.to_string(limit) <> " bytes"
     attachment_store.NotFound -> "object was not found"
     attachment_store.InvalidRange -> "byte range is invalid"
+    attachment_store.InvalidPage -> "attachment page is invalid"
     attachment_store.Unavailable(detail) -> detail
   }
 }
@@ -525,6 +528,7 @@ fn delivery_error(error: delivery.Error) -> String {
     delivery.NotFound -> "delivery job was not found"
     delivery.Conflict -> "delivery job conflicts with an existing record"
     delivery.LeaseLost -> "delivery worker lease was lost"
+    delivery.InvalidPage -> "delivery page is invalid"
     delivery.Unavailable(detail) -> detail
   }
 }

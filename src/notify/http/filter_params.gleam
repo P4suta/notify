@@ -5,24 +5,26 @@ import gleam/result
 import gleam/string
 import notify/core/filter
 import notify/core/message
+import notify/http/parameter as http_parameter
 
 /// Parse the ntfy query/header aliases used by both poll and live subscribers.
 pub fn parse(request: Request(body)) -> Result(filter.Criteria, Nil) {
   use priorities <- result.try(
     parse_priorities(
       parameter(request, [
-        "priority",
         "x-priority",
+        "priority",
+        "prio",
         "p",
       ]),
     ),
   )
   Ok(filter.Criteria(
-    id: parameter(request, ["id", "x-id"]),
-    message: parameter(request, ["message", "x-message", "m"]),
-    title: parameter(request, ["title", "x-title", "t"]),
+    id: parameter(request, ["x-id", "id"]),
+    message: parameter(request, ["x-message", "message", "m"]),
+    title: parameter(request, ["x-title", "title", "t"]),
     priorities:,
-    tags: parameter(request, ["tags", "x-tags", "tag", "ta"])
+    tags: parameter(request, ["x-tags", "tags", "tag", "ta"])
       |> option.map(split_csv)
       |> option.unwrap([]),
   ))
@@ -50,21 +52,5 @@ fn split_csv(value: String) -> List(String) {
 }
 
 fn parameter(request: Request(body), aliases: List(String)) -> Option(String) {
-  let query = request.get_query(request) |> result.unwrap([])
-  case
-    list.find_map(aliases, fn(alias) {
-      list.find_map(query, fn(pair) {
-        case string.lowercase(pair.0) == alias {
-          True -> Ok(pair.1)
-          False -> Error(Nil)
-        }
-      })
-    })
-  {
-    Ok(value) -> Some(value)
-    Error(_) ->
-      aliases
-      |> list.find_map(fn(alias) { request.get_header(request, alias) })
-      |> option.from_result
-  }
+  http_parameter.read(request, aliases)
 }

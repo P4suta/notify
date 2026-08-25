@@ -6,6 +6,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import gleam/uri
 import notify/attachment_store
 import notify/core/acl
 import notify/core/message
@@ -102,6 +103,7 @@ type SourceToken {
     label: String,
     created_at: Int,
     expires: Option(Int),
+    last_access: Option(Int),
   )
 }
 
@@ -703,6 +705,7 @@ fn load_auth_current(
             False -> now
           },
           expires: positive(expires),
+          last_access: positive(last_access),
         ))
       },
     )
@@ -983,7 +986,12 @@ fn apply_attachment_loop(
               attachment: Some(
                 message.Attachment(
                   ..metadata,
-                  url: attachment_url(base_url, value.topic, stored.key),
+                  url: attachment_url(
+                    base_url,
+                    value.topic,
+                    stored.key,
+                    metadata.name,
+                  ),
                   size: Some(stored.size),
                   expires: Some(stored.expires),
                 ),
@@ -1017,12 +1025,19 @@ fn attachment_url(
   base_url: String,
   attached_topic: topic.Topic,
   key: String,
+  filename: String,
 ) -> String {
   let base = case string.ends_with(base_url, "/") {
     True -> string.drop_end(base_url, 1)
     False -> base_url
   }
-  base <> "/file/" <> topic.to_string(attached_topic) <> "/" <> key
+  base
+  <> "/file/"
+  <> topic.to_string(attached_topic)
+  <> "/"
+  <> key
+  <> "/"
+  <> uri.percent_encode(filename)
 }
 
 fn rollback_attachments(
@@ -1274,8 +1289,32 @@ fn insert_tokens(
         0 -> verify_existing_token(connection, token, digest)
         _ -> Ok(Nil)
       })
+      use _ <- result.try(record_token_last_access(
+        connection,
+        digest,
+        token.last_access,
+      ))
       insert_tokens(connection, rest, inserted + changed)
     }
+  }
+}
+
+fn record_token_last_access(
+  connection: Connection,
+  digest: String,
+  last_access: Option(Int),
+) -> Result(Nil, Error) {
+  case last_access {
+    None -> Ok(Nil)
+    Some(last_access) ->
+      sqlight.query(
+        "INSERT INTO access_token_activity(token_id, last_access) SELECT id, ? FROM access_tokens WHERE token_hash = ? ON CONFLICT(token_id) DO UPDATE SET last_access = MAX(access_token_activity.last_access, excluded.last_access)",
+        on: connection,
+        with: [sqlight.int(last_access), sqlight.text(digest)],
+        expecting: decode.dynamic,
+      )
+      |> result.map(fn(_) { Nil })
+      |> result.map_error(destination_sql_error)
   }
 }
 

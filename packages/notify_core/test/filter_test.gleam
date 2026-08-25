@@ -6,7 +6,7 @@ import notify/core/topic
 fn fixture() -> message.Message {
   let assert Ok(topic) = topic.parse("alerts")
   message.Message(
-    id: "AbCdEf1234",
+    id: "AbCdEf1234XY",
     time: 100,
     expires: Some(200),
     event: message.MessageEvent,
@@ -29,7 +29,7 @@ fn fixture() -> message.Message {
 pub fn matches_all_configured_fields_test() {
   let criteria =
     filter.Criteria(
-      id: Some("AbCdEf1234"),
+      id: Some("AbCdEf1234XY"),
       message: Some("Disk full"),
       title: Some("Storage"),
       priorities: [message.Max, message.High],

@@ -18,7 +18,7 @@ fn test_runtime() -> runtime.Runtime {
   runtime.new(
     storage: messages,
     clock: runtime.Clock(fn() { 1_725_000_000 }),
-    ids: runtime.IdGenerator(fn() { "Attach0001" }),
+    ids: runtime.IdGenerator(fn() { "Attach0001XY" }),
     retention_seconds: 43_200,
   )
   |> runtime.with_attachments(
@@ -56,6 +56,32 @@ pub fn local_attachment_publish_download_range_and_head_test() {
     |> router.handle(runtime)
   assert complete.status == 200
   assert complete.body == <<0, 1, 2, 3, 4, 5>>
+  let assert Ok(etag) = request_header(complete.headers, "etag")
+  assert string.starts_with(etag, "\"")
+  assert string.ends_with(etag, "\"")
+  let assert Ok(disposition) =
+    request_header(complete.headers, "content-disposition")
+  assert string.contains(disposition, "filename*=UTF-8''report.bin")
+
+  let not_modified =
+    request.new()
+    |> request.set_method(http.Get)
+    |> request.set_path(path)
+    |> request.set_header("if-none-match", etag)
+    |> request.set_body(<<>>)
+    |> router.handle(runtime)
+  assert not_modified.status == 304
+  assert not_modified.body == <<>>
+  assert request_header(not_modified.headers, "etag") == Ok(etag)
+
+  let weak_not_modified =
+    request.new()
+    |> request.set_method(http.Get)
+    |> request.set_path(path)
+    |> request.set_header("if-none-match", "W/" <> etag)
+    |> request.set_body(<<>>)
+    |> router.handle(runtime)
+  assert weak_not_modified.status == 304
 
   let partial =
     request.new()
@@ -77,6 +103,45 @@ pub fn local_attachment_publish_download_range_and_head_test() {
   assert head.status == 200
   assert head.body == <<>>
   assert request_header(head.headers, "content-length") == Ok("6")
+  assert request_header(head.headers, "etag") == Ok(etag)
+
+  let forged_topic =
+    path |> string.replace("/file/reports/", "/file/other-topic/")
+  let denied =
+    request.new()
+    |> request.set_method(http.Get)
+    |> request.set_path(forged_topic)
+    |> request.set_body(<<>>)
+    |> router.handle(runtime)
+  assert denied.status == 404
+}
+
+pub fn attachment_filename_is_percent_decoded_for_content_disposition_test() {
+  let runtime = test_runtime()
+  let upload =
+    request.new()
+    |> request.set_method(http.Put)
+    |> request.set_path("/reports")
+    |> request.set_header("filename", "報告 1.txt")
+    |> request.set_body(<<1>>)
+    |> router.handle(runtime)
+  let assert Ok(body) = bit_array.to_string(upload.body)
+  let assert Ok(message) = json.parse(body, message_json.decoder())
+  let assert option.Some(attachment) = message.attachment
+  assert string.contains(attachment.url, "%E5%A0%B1%E5%91%8A%201.txt")
+  let path = attachment.url |> string.replace("https://notify.example", "")
+  let downloaded =
+    request.new()
+    |> request.set_method(http.Get)
+    |> request.set_path(path)
+    |> request.set_body(<<>>)
+    |> router.handle(runtime)
+  let assert Ok(disposition) =
+    request_header(downloaded.headers, "content-disposition")
+  assert string.contains(
+    disposition,
+    "filename*=UTF-8''%E5%A0%B1%E5%91%8A%201.txt",
+  )
 }
 
 fn request_header(headers: List(#(String, String)), name: String) {

@@ -10,8 +10,8 @@ pub fn since_defaults_differ_for_poll_and_live_test() {
 pub fn since_supports_ntfy_keywords_ids_timestamps_and_durations_test() {
   assert since.parse(Some("latest"), poll: True, now: 1000)
     == Ok(storage.Latest)
-  assert since.parse(Some("AbCdEf1234"), poll: True, now: 1000)
-    == Ok(storage.AfterId("AbCdEf1234"))
+  assert since.parse(Some("AbCdEf1234XY"), poll: True, now: 1000)
+    == Ok(storage.AfterId("AbCdEf1234XY"))
   assert since.parse(Some("900"), poll: True, now: 1000)
     == Ok(storage.AfterTime(900))
   assert since.parse(Some("1.5m"), poll: True, now: 1000)

@@ -3,14 +3,19 @@ import gleam/dynamic/decode
 import gleam/http
 import gleam/http/request
 import gleam/http/response
+import gleam/int
 import gleam/json
-import gleam/option.{Some}
+import gleam/list
+import gleam/option.{None, Some}
+import gleam/order
 import gleam/string
 import notify/access
 import notify/attachment_store
 import notify/attachment_store/memory as attachment_memory
+import notify/cluster/health as cluster_health
 import notify/delivery
 import notify/delivery/memory as delivery_memory
+import notify/http/cursor
 import notify/http/router
 import notify/identity/sqlite as identity_sqlite
 import notify/runtime
@@ -151,6 +156,7 @@ pub fn admin_user_token_and_acl_api_never_lists_raw_secrets_test() {
   let assert Ok(tokens_body) = bit_array.to_string(tokens.body)
   assert tokens.status == 200
   assert string.contains(tokens_body, "tk_")
+  assert string.contains(tokens_body, "\"last_access\":null")
   assert !string.contains(tokens_body, raw)
 
   let last_admin =
@@ -245,6 +251,172 @@ pub fn admin_can_inspect_delivery_failures_without_payload_content_test() {
   assert !string.contains(body, "secret-endpoint")
 }
 
+pub fn cluster_health_is_admin_only_redacted_and_keyset_paginated_test() {
+  let #(initial, setup_token) = managed_runtime()
+  let nodes = [
+    cluster_health.Node("node-a", 8, 1000, False),
+    cluster_health.Node("node-b", 6, 900, True),
+    cluster_health.Node("node-c", 9, 1001, False),
+  ]
+  let monitor =
+    cluster_health.Store(fn(after, limit) {
+      let remaining = case after {
+        None -> nodes
+        Some(key) ->
+          list.filter(nodes, fn(node) {
+            string.compare(node.node_id, key) == order.Gt
+          })
+      }
+      Ok(cluster_health.Snapshot(
+        local_node_id: "node-a",
+        event_head: 9,
+        database_time: 1001,
+        cursor_count: 3,
+        stale_nodes: 1,
+        nodes: cluster_health.Page(
+          items: list.take(remaining, limit),
+          has_more: list.length(remaining) > limit,
+        ),
+      ))
+    })
+  let runtime = runtime.with_cluster_health(initial, monitor)
+  complete_setup(runtime, setup_token)
+
+  let unauthenticated =
+    request.new()
+    |> request.set_method(http.Get)
+    |> request.set_path("/api/v1/cluster")
+    |> request.set_body(<<>>)
+    |> router.handle(runtime)
+  assert unauthenticated.status == 401
+
+  let first =
+    admin_request(http.Get, "/api/v1/cluster", "")
+    |> request.set_query([#("limit", "1")])
+    |> router.handle(runtime)
+  assert first.status == 200
+  let assert Ok(first_body) = bit_array.to_string(first.body)
+  let assert Ok(#(healthy, enabled, event_head, node_ids, next_cursor)) =
+    json.parse(first_body, {
+      use healthy <- decode.field("healthy", decode.bool)
+      use enabled <- decode.field("enabled", decode.bool)
+      use event_head <- decode.field("event_head", decode.int)
+      use node_ids <- decode.field(
+        "items",
+        decode.list({
+          use node_id <- decode.field("node_id", decode.string)
+          decode.success(node_id)
+        }),
+      )
+      use next_cursor <- decode.field("next_cursor", decode.string)
+      decode.success(#(healthy, enabled, event_head, node_ids, next_cursor))
+    })
+  assert healthy == False
+  assert enabled == True
+  assert event_head == 9
+  assert node_ids == ["node-a"]
+  assert !string.contains(next_cursor, "node-a")
+  assert string.contains(first_body, "\"lag_events\":1")
+  assert string.contains(first_body, "\"stale_nodes\":1")
+  assert !string.contains(first_body, "private-message")
+  assert !string.contains(first_body, "postgresql://")
+
+  let second =
+    admin_request(http.Get, "/api/v1/cluster", "")
+    |> request.set_query([#("limit", "1"), #("cursor", next_cursor)])
+    |> router.handle(runtime)
+  assert second.status == 200
+  let assert Ok(second_body) = bit_array.to_string(second.body)
+  assert string.contains(second_body, "\"node_id\":\"node-b\"")
+  assert string.contains(second_body, "\"lag_events\":3")
+  assert string.contains(second_body, "\"stale\":true")
+
+  let cross_resource =
+    admin_request(http.Get, "/api/v1/cluster", "")
+    |> request.set_query([
+      #("cursor", cursor.encode_key("attachments", string.repeat("a", 64))),
+    ])
+    |> router.handle(runtime)
+  assert cross_resource.status == 400
+}
+
+pub fn single_node_cluster_health_is_an_empty_enabled_false_snapshot_test() {
+  let #(runtime, setup_token) = managed_runtime()
+  complete_setup(runtime, setup_token)
+  let response =
+    admin_request(http.Get, "/api/v1/cluster", "")
+    |> router.handle(runtime)
+  assert response.status == 200
+  let assert Ok(body) = bit_array.to_string(response.body)
+  assert string.contains(body, "\"healthy\":true")
+  assert string.contains(body, "\"enabled\":false")
+  assert string.contains(body, "\"backend\":\"single_node\"")
+  assert string.contains(body, "\"node_id\":null")
+  assert string.contains(body, "\"items\":[]")
+  assert string.contains(body, "\"next_cursor\":null")
+}
+
+pub fn cluster_health_failure_is_a_redacted_service_unavailable_problem_test() {
+  let #(initial, setup_token) = managed_runtime()
+  let runtime =
+    runtime.with_cluster_health(
+      initial,
+      cluster_health.Store(fn(_, _) {
+        Error(cluster_health.Unavailable(
+          "postgresql://admin:secret@database/private-message",
+        ))
+      }),
+    )
+  complete_setup(runtime, setup_token)
+  let response =
+    admin_request(http.Get, "/api/v1/cluster", "")
+    |> router.handle(runtime)
+  assert response.status == 503
+  let assert Ok(body) = bit_array.to_string(response.body)
+  assert string.contains(body, "Cluster health unavailable")
+  assert !string.contains(body, "admin:secret")
+  assert !string.contains(body, "private-message")
+}
+
+pub fn admin_can_retry_and_purge_dead_letter_delivery_jobs_test() {
+  let #(runtime, setup_token) = managed_runtime()
+  complete_setup(runtime, setup_token)
+  let assert Some(outbox) = runtime.deliveries
+  let assert Ok(_) =
+    outbox.enqueue(delivery.NewJob(
+      id: "job-manage",
+      kind: delivery.MobileRelay,
+      endpoint: "https://relay.example/private",
+      payload: <<"private body":utf8>>,
+      message_id: "Message001",
+      topic_hash: "safe-hash",
+      available_at: 1000,
+    ))
+  let assert Ok([claimed]) =
+    outbox.claim(delivery.MobileRelay, "worker", 1001, 30, 1)
+  let assert Ok(_) = outbox.fail(claimed.id, "worker", 1001, "HTTP 503", 1, 10)
+
+  let retried =
+    admin_request(http.Post, "/api/v1/delivery-jobs/job-manage/retry", "")
+    |> router.handle(runtime)
+  assert retried.status == 200
+  let assert Ok(retried_body) = bit_array.to_string(retried.body)
+  assert string.contains(retried_body, "\"state\":\"pending\"")
+  assert string.contains(retried_body, "\"attempts\":0")
+  assert !string.contains(retried_body, "private body")
+  assert !string.contains(retried_body, "relay.example")
+
+  let assert Ok([claimed_again]) =
+    outbox.claim(delivery.MobileRelay, "worker", 1001, 30, 1)
+  let assert Ok(_) =
+    outbox.fail(claimed_again.id, "worker", 1001, "HTTP 503", 1, 10)
+  let purged =
+    admin_request(http.Delete, "/api/v1/delivery-jobs/job-manage", "")
+    |> router.handle(runtime)
+  assert purged.status == 204
+  assert outbox.list(delivery.MobileRelay) == Ok([])
+}
+
 pub fn deleting_a_user_removes_their_webpush_subscriptions_test() {
   let #(initial, setup_token) = managed_runtime()
   let assert Ok(subscriptions) = webpush_memory.start(max_endpoints_per_ip: 10)
@@ -314,6 +486,258 @@ pub fn admin_can_list_and_delete_attachments_without_reading_the_body_test() {
     |> router.handle(runtime)
   assert deleted.status == 204
   assert attachments.head(stored.key) == Error(attachment_store.NotFound)
+}
+
+pub fn every_management_collection_rejects_invalid_paging_parameters_test() {
+  let #(runtime, setup_token) = managed_runtime()
+  complete_setup(runtime, setup_token)
+  let collections = [
+    #("/api/v1/users", []),
+    #("/api/v1/tokens", [#("username", "admin")]),
+    #("/api/v1/acl", []),
+    #("/api/v1/delivery-jobs", []),
+    #("/api/v1/attachments", []),
+    #("/api/v1/cluster", []),
+  ]
+
+  list.each(collections, fn(collection) {
+    let #(path, base_query) = collection
+    let invalid_limit =
+      admin_request(http.Get, path, "")
+      |> request.set_query(list.append(base_query, [#("limit", "101")]))
+      |> router.handle(runtime)
+    assert invalid_limit.status == 400
+
+    let invalid_cursor =
+      admin_request(http.Get, path, "")
+      |> request.set_query(list.append(base_query, [#("cursor", "not+base64")]))
+      |> router.handle(runtime)
+    assert invalid_cursor.status == 400
+  })
+}
+
+pub fn management_collections_use_filter_scoped_keyset_pages_test() {
+  let #(initial, setup_token) = managed_runtime()
+  let assert Ok(attachments) =
+    attachment_memory.start(max_file_bytes: 1024, max_total_bytes: 4096)
+  let runtime =
+    runtime.with_attachments(
+      initial,
+      attachments,
+      base_url: "https://notify.example",
+      retention_seconds: 3600,
+    )
+  complete_setup(runtime, setup_token)
+
+  list.each(["pat", "sam"], fn(username) {
+    let created =
+      admin_request(
+        http.Post,
+        "/api/v1/users",
+        "{\"username\":\""
+          <> username
+          <> "\",\"password\":\"a different secure password\",\"role\":\"user\"}",
+      )
+      |> router.handle(runtime)
+    assert created.status == 201
+  })
+  list.each(["first", "second"], fn(label) {
+    let created =
+      admin_request(
+        http.Post,
+        "/api/v1/tokens",
+        "{\"username\":\"pat\",\"label\":\"" <> label <> "\"}",
+      )
+      |> router.handle(runtime)
+    assert created.status == 201
+  })
+  list.each(["jobs-a", "jobs-b"], fn(pattern) {
+    let granted =
+      admin_request(
+        http.Put,
+        "/api/v1/acl",
+        "{\"username\":\"pat\",\"topic_pattern\":\""
+          <> pattern
+          <> "\",\"permission\":\"read\"}",
+      )
+      |> router.handle(runtime)
+    assert granted.status == 200
+  })
+  let assert Some(outbox) = runtime.deliveries
+  list.each(["job-a", "job-b"], fn(id) {
+    let assert Ok(_) =
+      outbox.enqueue(delivery.NewJob(
+        id:,
+        kind: delivery.MobileRelay,
+        endpoint: "https://relay.example/private",
+        payload: <<"private":utf8>>,
+        message_id: "Message001",
+        topic_hash: "safe-hash",
+        available_at: 1000,
+      ))
+  })
+  let assert Ok(_) =
+    attachments.put(attachment_store.Upload(<<"attachment-a":utf8>>, 5000))
+  let assert Ok(_) =
+    attachments.put(attachment_store.Upload(<<"attachment-b":utf8>>, 5000))
+
+  let users_cursor = assert_first_page(runtime, "/api/v1/users", [])
+  assert users_cursor != "admin"
+  let tokens_cursor =
+    assert_first_page(runtime, "/api/v1/tokens", [#("username", "pat")])
+  let acl_cursor =
+    assert_first_page(runtime, "/api/v1/acl", [#("username", "pat")])
+  let delivery_cursor =
+    assert_first_page(runtime, "/api/v1/delivery-jobs", [
+      #("kind", "mobile_relay"),
+    ])
+  let attachments_cursor = assert_first_page(runtime, "/api/v1/attachments", [])
+
+  assert_second_page(runtime, "/api/v1/users", [], users_cursor)
+  assert_second_page(
+    runtime,
+    "/api/v1/tokens",
+    [#("username", "pat")],
+    tokens_cursor,
+  )
+  assert_second_page(runtime, "/api/v1/acl", [#("username", "pat")], acl_cursor)
+  assert_second_page(
+    runtime,
+    "/api/v1/delivery-jobs",
+    [#("kind", "mobile_relay")],
+    delivery_cursor,
+  )
+  assert_second_page(runtime, "/api/v1/attachments", [], attachments_cursor)
+
+  let cross_resource =
+    admin_request(http.Get, "/api/v1/attachments", "")
+    |> request.set_query([#("cursor", users_cursor)])
+    |> router.handle(runtime)
+  assert cross_resource.status == 400
+  let cross_filter =
+    admin_request(http.Get, "/api/v1/tokens", "")
+    |> request.set_query([
+      #("username", "admin"),
+      #("cursor", tokens_cursor),
+    ])
+    |> router.handle(runtime)
+  assert cross_filter.status == 400
+  let cross_delivery_filter =
+    admin_request(http.Get, "/api/v1/delivery-jobs", "")
+    |> request.set_query([
+      #("kind", "webpush"),
+      #("cursor", delivery_cursor),
+    ])
+    |> router.handle(runtime)
+  assert cross_delivery_filter.status == 400
+  let malformed_acl_position =
+    admin_request(http.Get, "/api/v1/acl", "")
+    |> request.set_query([
+      #("username", "pat"),
+      #("cursor", cursor.encode_key("acl:user:pat", "missing-separator")),
+    ])
+    |> router.handle(runtime)
+  assert malformed_acl_position.status == 400
+  let malformed_attachment_position =
+    admin_request(http.Get, "/api/v1/attachments", "")
+    |> request.set_query([
+      #("cursor", cursor.encode_key("attachments", "not-a-content-key")),
+    ])
+    |> router.handle(runtime)
+  assert malformed_attachment_position.status == 400
+}
+
+pub fn management_collection_default_is_fifty_and_maximum_is_one_hundred_test() {
+  let #(runtime, setup_token) = managed_runtime()
+  complete_setup(runtime, setup_token)
+  let assert Some(outbox) = runtime.deliveries
+  int.range(from: 1, to: 52, with: Nil, run: fn(_, index) {
+    let id = "job-" <> int.to_string(index)
+    let assert Ok(_) =
+      outbox.enqueue(delivery.NewJob(
+        id:,
+        kind: delivery.MobileRelay,
+        endpoint: "https://relay.example/private",
+        payload: <<"private":utf8>>,
+        message_id: "Message001",
+        topic_hash: "safe-hash",
+        available_at: 1000,
+      ))
+    Nil
+  })
+
+  let default_page =
+    admin_request(http.Get, "/api/v1/delivery-jobs", "")
+    |> router.handle(runtime)
+  assert default_page.status == 200
+  let assert Ok(default_body) = bit_array.to_string(default_page.body)
+  assert page_item_count(default_body) == 50
+  assert string.contains(default_body, "\"next_cursor\":\"")
+
+  let maximum_page =
+    admin_request(http.Get, "/api/v1/delivery-jobs", "")
+    |> request.set_query([#("limit", "100")])
+    |> router.handle(runtime)
+  assert maximum_page.status == 200
+  let assert Ok(maximum_body) = bit_array.to_string(maximum_page.body)
+  assert page_item_count(maximum_body) == 51
+  assert string.contains(maximum_body, "\"next_cursor\":null")
+}
+
+fn assert_first_page(
+  runtime: runtime.Runtime,
+  path: String,
+  base_query: List(#(String, String)),
+) -> String {
+  let response =
+    admin_request(http.Get, path, "")
+    |> request.set_query(list.append(base_query, [#("limit", "1")]))
+    |> router.handle(runtime)
+  assert response.status == 200
+  let assert Ok(body) = bit_array.to_string(response.body)
+  let assert Ok(#(items, next_cursor)) =
+    json.parse(body, {
+      use items <- decode.field("items", decode.list(decode.dynamic))
+      use next_cursor <- decode.field("next_cursor", decode.string)
+      decode.success(#(items, next_cursor))
+    })
+  assert list.length(items) == 1
+  assert !string.contains(next_cursor, ":")
+  next_cursor
+}
+
+fn assert_second_page(
+  runtime: runtime.Runtime,
+  path: String,
+  base_query: List(#(String, String)),
+  cursor: String,
+) {
+  let response =
+    admin_request(http.Get, path, "")
+    |> request.set_query(
+      list.append(base_query, [
+        #("limit", "1"),
+        #("cursor", cursor),
+      ]),
+    )
+    |> router.handle(runtime)
+  assert response.status == 200
+  let assert Ok(body) = bit_array.to_string(response.body)
+  let assert Ok(items) =
+    json.parse(body, {
+      use items <- decode.field("items", decode.list(decode.dynamic))
+      decode.success(items)
+    })
+  assert list.length(items) == 1
+}
+
+fn page_item_count(body: String) -> Int {
+  let assert Ok(items) =
+    json.parse(body, {
+      use items <- decode.field("items", decode.list(decode.dynamic))
+      decode.success(items)
+    })
+  list.length(items)
 }
 
 fn list_first(values: List(String)) -> String {

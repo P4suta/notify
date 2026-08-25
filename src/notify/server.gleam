@@ -17,6 +17,9 @@ import notify/attachment_store
 import notify/attachment_store/filesystem as attachment_filesystem
 import notify/attachment_store/postgres as attachment_postgres
 import notify/attachment_store/s3 as attachment_s3
+import notify/audit
+import notify/audit/postgres as audit_postgres
+import notify/audit/sqlite as audit_sqlite
 import notify/broker
 import notify/cluster/postgres_bus
 import notify/config.{type Config}
@@ -26,11 +29,13 @@ import notify/delivery/relay as delivery_relay
 import notify/delivery/sqlite as delivery_sqlite
 import notify/delivery/worker as delivery_worker
 import notify/http/live
+import notify/http/rate_policy
 import notify/http/router
 import notify/identity
 import notify/identity/postgres as identity_postgres
 import notify/identity/sqlite as identity_sqlite
 import notify/log as notify_log
+import notify/network
 import notify/proxy
 import notify/rate_limit
 import notify/runtime
@@ -57,6 +62,7 @@ pub type Error {
   DeliveryStartError(delivery.Error)
   WebPushStartError(webpush.Error)
   RateLimitStartError(rate_limit.Error)
+  AuditStartError(audit.Error)
   SQLiteLockError(sqlite_lock.Error)
 }
 
@@ -77,6 +83,7 @@ type Persistence {
 }
 
 pub fn start(config: Config) -> Result(Started, Error) {
+  network.configure_tcp_clients()
   let previously_trapping_exits = set_trap_exits(True)
   let existing_processes = linked_processes()
   let outcome = case start_sqlite_process_lock(config) {
@@ -119,6 +126,7 @@ fn start_after_lock(
   use webpush_runtime <- result.try(start_webpush(config))
   use access_started <- result.try(start_access(config))
   use limiter <- result.try(start_rate_limiter(config))
+  use audit_store <- result.try(start_audit(config))
   let #(access_control, setup_token) = access_started
   let runtime =
     runtime.new(
@@ -127,7 +135,6 @@ fn start_after_lock(
       ids: runtime.secure_ids(),
       retention_seconds: config.retention_seconds,
     )
-    |> runtime.with_broadcast(bus.broadcast)
     |> runtime.with_access(access_control)
     |> runtime.with_attachments(
       attachment_files,
@@ -141,6 +148,17 @@ fn start_after_lock(
     |> runtime.with_deliveries(delivery_store)
     |> runtime.with_atomic_commit(atomic_commit)
     |> runtime.with_rate_limiter(limiter)
+    |> runtime.with_audit(audit_store)
+    |> runtime.with_template_directory(config.template_directory)
+  let runtime = case config.cluster_enabled {
+    True -> runtime
+    False -> runtime.with_broadcast(runtime, bus.broadcast)
+  }
+  let runtime = case config.cluster_enabled, postgres_adapter {
+    True, Some(adapter) ->
+      runtime.with_cluster_health(runtime, adapter.cluster_health)
+    _, _ -> runtime
+  }
   let runtime = case webpush_runtime {
     None -> runtime
     Some(configured) -> runtime.with_webpush(runtime, configured)
@@ -175,17 +193,23 @@ fn start_after_lock(
         |> request.set_header("x-request-id", request_id)
         |> request.set_header("x-notify-client-ip", client_ip)
       let reply =
-        enforce_rate_limit(request, runtime, client_ip, fn() {
-          case live.route(request, runtime, bus, 128) {
-            Some(response) -> response
-            None ->
-              case mist.read_body(request, config.max_request_bytes) {
-                Ok(request) ->
-                  request |> router.handle(runtime) |> to_mist_response
-                Error(_) -> body_too_large
-              }
-          }
-        })
+        enforce_rate_limit(
+          request,
+          runtime,
+          client_ip,
+          config.max_request_bytes,
+          fn() {
+            case live.route(request, runtime, bus, 128) {
+              Some(response) -> response
+              None ->
+                case mist.read_body(request, config.max_request_bytes) {
+                  Ok(request) ->
+                    request |> router.handle(runtime) |> to_mist_response
+                  Error(_) -> body_too_large
+                }
+            }
+          },
+        )
       let runtime.Clock(now) = runtime.clock
       notify_log.request(
         log_format(config.log_format),
@@ -223,7 +247,10 @@ fn start_after_lock(
           postgres_config(config),
           adapter,
           config.node_id,
-          bus.broadcast,
+          fn(message) {
+            bus.dispatch(message)
+            Ok(Nil)
+          },
         ),
       )
     _, _ -> supervision
@@ -327,22 +354,105 @@ fn enforce_rate_limit(
   request: request.Request(mist.Connection),
   runtime: runtime.Runtime,
   client_key: String,
+  maximum_request_bytes: Int,
   continue: fn() -> Response(mist.ResponseData),
 ) -> Response(mist.ResponseData) {
-  case rate_limit_exempt(request), runtime.rate_limiter {
-    True, _ | _, None -> continue()
-    False, Some(limiter) -> {
+  case runtime.rate_limiter {
+    None -> continue()
+    Some(limiter) -> {
       let runtime.Clock(now) = runtime.clock
       let checked_at = now()
-      case limiter.check(client_key, checked_at) {
-        Ok(rate_limit.Allowed(remaining, reset_at)) ->
-          continue()
-          |> rate_limit_headers(
-            limiter.limit,
+      enforce_rate_charges(
+        rate_policy.preflight(request, maximum_request_bytes),
+        limiter,
+        client_key,
+        checked_at,
+        fn() {
+          let reply = continue()
+          enforce_rate_charges(
+            rate_policy.after_response(
+              request,
+              reply.status,
+              response_content_length(reply),
+            ),
+            limiter,
+            client_key,
+            checked_at,
+            fn() { reply },
+          )
+        },
+      )
+    }
+  }
+}
+
+fn enforce_rate_charges(
+  charges: List(rate_policy.Charge),
+  limiter: rate_limit.Limiter,
+  client_key: String,
+  checked_at: Int,
+  continue: fn() -> Response(mist.ResponseData),
+) -> Response(mist.ResponseData) {
+  case charges {
+    [] -> continue()
+    [rate_policy.Charge(first_bucket, _), ..] ->
+      case
+        limiter.check_many(
+          charges
+            |> list.map(fn(charge) {
+              let rate_policy.Charge(bucket, cost) = charge
+              #(bucket, cost)
+            }),
+          client_key,
+          checked_at,
+        )
+      {
+        Ok(decisions) ->
+          apply_rate_decisions(decisions, limiter, checked_at, continue)
+        Error(_) ->
+          response.new(503)
+          |> response.set_header(
+            "content-type",
+            "application/json; charset=utf-8",
+          )
+          |> response.set_header("retry-after", "1")
+          |> response.set_header(
+            "x-notify-ratelimit-bucket",
+            rate_limit.bucket_name(first_bucket),
+          )
+          |> response.set_body(
+            mist.Bytes(bytes_tree.from_string(
+              "{\"code\":50301,\"http\":503,\"error\":\"temporarily unavailable: rate limiter\"}",
+            )),
+          )
+      }
+  }
+}
+
+fn apply_rate_decisions(
+  decisions: List(#(rate_limit.Bucket, rate_limit.Decision)),
+  limiter: rate_limit.Limiter,
+  checked_at: Int,
+  continue: fn() -> Response(mist.ResponseData),
+) -> Response(mist.ResponseData) {
+  case decisions {
+    [] -> continue()
+    [#(bucket, decision), ..remaining_decisions] ->
+      case decision {
+        rate_limit.Allowed(remaining, reset_at) ->
+          apply_rate_decisions(
+            remaining_decisions,
+            limiter,
+            checked_at,
+            continue,
+          )
+          |> rate_limit_headers_if_missing(
+            limiter.limit(bucket),
             remaining,
             int.max(0, reset_at - checked_at),
+            bucket,
           )
-        Ok(rate_limit.Limited(retry_after, reset_at)) ->
+        rate_limit.Limited(retry_after, reset_at) ->
           response.new(429)
           |> response.set_header(
             "content-type",
@@ -355,24 +465,32 @@ fn enforce_rate_limit(
             )),
           )
           |> rate_limit_headers(
-            limiter.limit,
+            limiter.limit(bucket),
             0,
             int.max(1, reset_at - checked_at),
-          )
-        Error(_) ->
-          response.new(503)
-          |> response.set_header(
-            "content-type",
-            "application/json; charset=utf-8",
-          )
-          |> response.set_header("retry-after", "1")
-          |> response.set_body(
-            mist.Bytes(bytes_tree.from_string(
-              "{\"code\":50301,\"http\":503,\"error\":\"temporarily unavailable: rate limiter\"}",
-            )),
+            bucket,
           )
       }
-    }
+  }
+}
+
+fn rate_limit_headers_if_missing(
+  reply: Response(mist.ResponseData),
+  limit: Int,
+  remaining: Int,
+  reset_after: Int,
+  bucket: rate_limit.Bucket,
+) -> Response(mist.ResponseData) {
+  case response.get_header(reply, "x-notify-ratelimit-bucket") {
+    Ok(_) -> reply
+    Error(_) -> rate_limit_headers(reply, limit, remaining, reset_after, bucket)
+  }
+}
+
+fn response_content_length(reply: Response(mist.ResponseData)) -> Option(Int) {
+  case response.get_header(reply, "content-length") {
+    Error(_) -> None
+    Ok(value) -> value |> int.parse |> option.from_result
   }
 }
 
@@ -381,30 +499,16 @@ fn rate_limit_headers(
   limit: Int,
   remaining: Int,
   reset_after: Int,
+  bucket: rate_limit.Bucket,
 ) -> Response(mist.ResponseData) {
   reply
   |> response.set_header("ratelimit-limit", int.to_string(limit))
   |> response.set_header("ratelimit-remaining", int.to_string(remaining))
   |> response.set_header("ratelimit-reset", int.to_string(reset_after))
-}
-
-fn rate_limit_exempt(request: request.Request(body)) -> Bool {
-  case request.path_segments(request) {
-    []
-    | ["healthz"]
-    | ["readyz"]
-    | ["metrics"]
-    | ["styles.css"]
-    | ["notify_web.js"]
-    | ["setup.js"]
-    | ["sw.js"]
-    | ["manifest.webmanifest"]
-    | ["api", "openapi.json"]
-    | ["v1", "health"]
-    | ["v1", "version"]
-    | ["v1", "config"] -> True
-    _ -> False
-  }
+  |> response.set_header(
+    "x-notify-ratelimit-bucket",
+    rate_limit.bucket_name(bucket),
+  )
 }
 
 fn public_base_url(config: Config) -> String {
@@ -443,20 +547,37 @@ fn effective_client_ip(
 }
 
 fn start_rate_limiter(config: Config) -> Result(rate_limit.Limiter, Error) {
+  let policies =
+    rate_limit.Policies(
+      requests: config.rate_limit_requests,
+      subscriptions: config.rate_limit_subscriptions,
+      topic_creations: config.rate_limit_topic_creations,
+      auth_failures: config.rate_limit_auth_failures,
+      attachment_mebibytes: config.rate_limit_attachment_mebibytes,
+      attachment_uploads: config.rate_limit_attachment_uploads,
+    )
   case config.cluster_enabled {
     True ->
-      rate_limit.postgres(
+      rate_limit.postgres_with_policies(
         postgres_config(config),
-        requests: config.rate_limit_requests,
+        policies,
         window_seconds: config.rate_limit_window_seconds,
       )
     False ->
-      rate_limit.memory(
-        requests: config.rate_limit_requests,
+      rate_limit.memory_with_policies(
+        policies,
         window_seconds: config.rate_limit_window_seconds,
       )
   }
   |> result.map_error(RateLimitStartError)
+}
+
+fn start_audit(config: Config) -> Result(audit.Store, Error) {
+  case config.database_backend {
+    config.SQLite -> audit_sqlite.start(config.database_path)
+    config.PostgreSQL -> audit_postgres.start(postgres_config(config))
+  }
+  |> result.map_error(AuditStartError)
 }
 
 fn start_access(
@@ -642,6 +763,8 @@ pub fn error_message(error: Error) -> String {
     StorageError(storage.Corrupt(detail)) -> "storage corrupt: " <> detail
     StorageError(storage.MigrationRequired(version)) ->
       "database migration required: " <> int.to_string(version)
+    StorageError(storage.UnsupportedSchema(detail)) ->
+      "unsupported database schema: " <> detail
     BrokerStartError(_) -> "live subscription broker could not start"
     HttpStartError(_) -> "HTTP listener could not start"
     DatabaseDirectoryError(path) ->
@@ -656,6 +779,8 @@ pub fn error_message(error: Error) -> String {
     IdentityStartError(identity.InvalidSetupToken) -> "invalid setup token"
     IdentityStartError(identity.SetupAlreadyComplete) ->
       "server setup is already complete"
+    IdentityStartError(identity.InvalidPage) ->
+      "identity page configuration is invalid"
     AccessStartError(_) -> "Argon2id password subsystem failed to initialise"
     AttachmentStartError(attachment_store.TooLarge(_, _)) ->
       "invalid attachment size limit"
@@ -665,11 +790,14 @@ pub fn error_message(error: Error) -> String {
       "attachment storage directory not found"
     AttachmentStartError(attachment_store.InvalidRange) ->
       "invalid attachment storage range"
+    AttachmentStartError(attachment_store.InvalidPage) ->
+      "invalid attachment storage page"
     AttachmentStartError(attachment_store.Unavailable(detail)) ->
       "attachment storage unavailable: " <> detail
     DeliveryStartError(delivery.NotFound) -> "delivery outbox record not found"
     DeliveryStartError(delivery.Conflict) -> "delivery outbox conflict"
     DeliveryStartError(delivery.LeaseLost) -> "delivery outbox lease lost"
+    DeliveryStartError(delivery.InvalidPage) -> "delivery outbox page invalid"
     DeliveryStartError(delivery.Unavailable(detail)) ->
       "delivery outbox unavailable: " <> detail
     WebPushStartError(webpush.InvalidSubscription) ->
@@ -686,6 +814,13 @@ pub fn error_message(error: Error) -> String {
       "Web Push storage unavailable: " <> detail
     RateLimitStartError(rate_limit.Unavailable(detail)) ->
       "rate limiter unavailable: " <> detail
+    AuditStartError(audit.InvalidEvent(field)) ->
+      "audit configuration produced an invalid " <> field <> " field"
+    AuditStartError(audit.InvalidPage) -> "audit page configuration is invalid"
+    AuditStartError(audit.Unavailable(detail)) ->
+      "audit storage unavailable: " <> detail
+    AuditStartError(audit.Corrupt(detail)) ->
+      "audit storage corrupt: " <> detail
     SQLiteLockError(sqlite_lock.AlreadyRunning(path)) ->
       "SQLite database "
       <> path

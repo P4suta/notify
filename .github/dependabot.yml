@@ -9,6 +9,8 @@ updates:
       day: monday
       time: "04:00"
       timezone: Asia/Tokyo
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns:
@@ -27,6 +29,8 @@ updates:
       day: monday
       time: "04:15"
       timezone: Asia/Tokyo
+    cooldown:
+      default-days: 7
     groups:
       browser-tests:
         patterns:
@@ -47,6 +51,8 @@ updates:
       day: monday
       time: "04:45"
       timezone: Asia/Tokyo
+    cooldown:
+      default-days: 7
     groups:
       containers:
         patterns:

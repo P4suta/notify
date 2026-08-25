@@ -61,7 +61,7 @@ pub fn message_json_round_trip_property_test() {
     let assert Ok(parsed_topic) = topic.parse(topic_name)
     let original =
       message.Message(
-        id: "AbCdEf1234",
+        id: "AbCdEf1234XY",
         time: 1_725_000_000,
         expires: None,
         event: message.MessageEvent,

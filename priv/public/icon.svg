@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">Notify</title>
+  <rect width="512" height="512" fill="#176b4d"/>
+  <circle cx="256" cy="256" r="184" fill="#1d7d5a"/>
+  <path fill="#fff" d="M256 104c-19 0-34 15-34 34v18c-58 15-96 68-96 128v41l-24 35c-5 8 0 18 10 18h288c10 0 15-10 10-18l-24-35v-41c0-60-38-113-96-128v-18c0-19-15-34-34-34Zm0 304c28 0 51-18 59-43H197c8 25 31 43 59 43Z"/>
+</svg>

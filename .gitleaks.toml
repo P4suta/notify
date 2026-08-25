@@ -4,6 +4,12 @@ title = "Notify secret scanning policy"
 useDefault = true
 
 [[allowlists]]
+description = "Generated dependency and build trees excluded from source scans"
+paths = [
+  '''(^|/)(build|node_modules|_build|deps|burrito_out)/''',
+]
+
+[[allowlists]]
 description = "Deterministic, public Web Push and token fixtures used only by isolated tests"
 regexTarget = "secret"
 regexes = [

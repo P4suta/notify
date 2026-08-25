@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  browser:
+  chromium:
     name: Browser E2E
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -31,12 +31,58 @@ jobs:
         working-directory: test/e2e
         run: npx playwright install --with-deps chromium
       - name: Run isolated browser acceptance test
+        env:
+          NOTIFY_E2E_BROWSER: chromium
+          NOTIFY_E2E_DEVICE: desktop
         run: test/e2e/run.sh
       - name: Upload failure traces
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: playwright-failure-${{ github.run_id }}
+          path: test/e2e/test-results
+          if-no-files-found: ignore
+          retention-days: 7
+
+  browser-matrix:
+    name: ${{ matrix.browser }} ${{ matrix.device }}
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - browser: chromium
+            device: mobile
+          - browser: firefox
+            device: desktop
+          - browser: firefox
+            device: mobile
+          - browser: webkit
+            device: desktop
+          - browser: webkit
+            device: mobile
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install test dependencies
+        run: npm ci --prefix test/e2e
+      - name: Install selected browser
+        working-directory: test/e2e
+        run: npx playwright install --with-deps "${{ matrix.browser }}"
+      - name: Run isolated browser acceptance test
+        env:
+          NOTIFY_E2E_BROWSER: ${{ matrix.browser }}
+          NOTIFY_E2E_DEVICE: ${{ matrix.device }}
+        run: test/e2e/run.sh
+      - name: Upload failure traces
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: playwright-${{ matrix.browser }}-${{ matrix.device }}-${{ github.run_id }}
           path: test/e2e/test-results
           if-no-files-found: ignore
           retention-days: 7

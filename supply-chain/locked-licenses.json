@@ -1,0 +1,617 @@
+{
+  "components": {
+    "pkg:github/P4suta/gleam-mutants@21f2798f5b7eaebe6cdbb2067f38e35dac2b6b1d": {
+      "commit": "21f2798f5b7eaebe6cdbb2067f38e35dac2b6b1d",
+      "licenses": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "source": "https://raw.githubusercontent.com/P4suta/gleam-mutants/21f2798f5b7eaebe6cdbb2067f38e35dac2b6b1d/gleam.toml"
+    },
+    "pkg:hex/argus@1.0.4": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "MIT"
+      ],
+      "sha256": "44c454d51b89969761e8a0925c2d04a9c9cf474ad0b206c1346277ede894bfba",
+      "source": "https://repo.hex.pm/tarballs/argus-1.0.4.tar"
+    },
+    "pkg:hex/argv@1.1.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "3277d100448bdb4a29b6d58c0f36f631cbc349e8bdd09766c6309df202831140",
+      "source": "https://repo.hex.pm/tarballs/argv-1.1.0.tar"
+    },
+    "pkg:hex/bcrypt@1.2.2": {
+      "license_source": "reviewed:LICENSE",
+      "licenses": [
+        "BSD-3-Clause",
+        "BSD-4-Clause",
+        "ISC"
+      ],
+      "sha256": "6428d68bb2608490e150be406a7ab75b5bce4a2b5a3b0c3f36a12e367a141561",
+      "source": "https://repo.hex.pm/tarballs/bcrypt-1.2.2.tar"
+    },
+    "pkg:hex/beecrypt@0.4.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "6b4791012d46f88ef63caefeb122d28174f6c1c382ae851cb3151ae5e1b5362a",
+      "source": "https://repo.hex.pm/tarballs/beecrypt-0.4.0.tar"
+    },
+    "pkg:hex/birdie@1.5.5": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "abb86b0fa88dabcdde93edf6921060bb74502a5b410c3f35960cd539ec98ad37",
+      "source": "https://repo.hex.pm/tarballs/birdie-1.5.5.tar"
+    },
+    "pkg:hex/booklet@1.1.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "BSD-3-Clause"
+      ],
+      "sha256": "08e0fdb78dc4d8a5d3c80295b021505c7d2a2e7b6c6d5eab7286c36f4a53c851",
+      "source": "https://repo.hex.pm/tarballs/booklet-1.1.0.tar"
+    },
+    "pkg:hex/burrito@1.5.0": {
+      "license_source": "contents.tar.gz/mix.exs",
+      "licenses": [
+        "MIT"
+      ],
+      "sha256": "3861abda7bffa733862b48da3e03df0b4cd41abf6fd24b91745f5c16d971e5fa",
+      "source": "https://repo.hex.pm/tarballs/burrito-1.5.0.tar"
+    },
+    "pkg:hex/child_process@2.1.2": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "BSD-3-Clause"
+      ],
+      "sha256": "ed9c4751b92d039158e9c7344525f46fe1d68ff19787b282055ff1e67df9de56",
+      "source": "https://repo.hex.pm/tarballs/child_process-2.1.2.tar"
+    },
+    "pkg:hex/directories@1.2.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "d13090cfcdf6759b87217e8ddd73a75903a700148a82c1d33799f333e249bf9e",
+      "source": "https://repo.hex.pm/tarballs/directories-1.2.0.tar"
+    },
+    "pkg:hex/edit_distance@3.0.1": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "de588bc3483ed6dba717211b59f3178891a5fc6f1c00d415ae8c4233eafb94b1",
+      "source": "https://repo.hex.pm/tarballs/edit_distance-3.0.1.tar"
+    },
+    "pkg:hex/envoy@1.2.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "9c6fbb6bfa02a52798beec5977a738cad6e4a057f4b67fd0c8061ad2502c191a",
+      "source": "https://repo.hex.pm/tarballs/envoy-1.2.0.tar"
+    },
+    "pkg:hex/esqlite@0.9.0": {
+      "license_source": "reviewed:LICENSE",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "ccf72258a4ee152ec7ad92aa9a03552eb6ca1b06b65c93ad5b6e55c302e05855",
+      "source": "https://repo.hex.pm/tarballs/esqlite-0.9.0.tar"
+    },
+    "pkg:hex/exception@2.1.1": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "6bdea95248093599391c3b5df1835c5c6a86c353c2f99ce539b450e3432fe117",
+      "source": "https://repo.hex.pm/tarballs/exception-2.1.1.tar"
+    },
+    "pkg:hex/filepath@1.1.2": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "b06a9af0bf10e51401d64b98e4b627f1d2e48c154967da7af4d0914780a6d40a",
+      "source": "https://repo.hex.pm/tarballs/filepath-1.1.2.tar"
+    },
+    "pkg:hex/finch@0.23.0": {
+      "license_source": "contents.tar.gz/mix.exs",
+      "licenses": [
+        "MIT"
+      ],
+      "sha256": "80e58d3f936f57e3fdf404f83a3642897ae6d9fb642934e46da4d8fe761b99d5",
+      "source": "https://repo.hex.pm/tarballs/finch-0.23.0.tar"
+    },
+    "pkg:hex/glance@6.1.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "9037ebbad2a220cd46dadedcdf9dfac7406fd2959535334473e60c32f170622a",
+      "source": "https://repo.hex.pm/tarballs/glance-6.1.0.tar"
+    },
+    "pkg:hex/glance@7.0.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "ea52986965408d43003a1760e41457493eb96098de193e6ad8646930ec190cb9",
+      "source": "https://repo.hex.pm/tarballs/glance-7.0.0.tar"
+    },
+    "pkg:hex/gleam_community_ansi@1.5.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "b5aa433af84313e23fdf90ccff752b9380fe9ffce02b2949d49b7aaccc77b16d",
+      "source": "https://repo.hex.pm/tarballs/gleam_community_ansi-1.5.0.tar"
+    },
+    "pkg:hex/gleam_community_colour@2.0.4": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "6db4665555d7d2b27f0ea32ef47e8bebc4303821765f9c73d483f38ee24894f0",
+      "source": "https://repo.hex.pm/tarballs/gleam_community_colour-2.0.4.tar"
+    },
+    "pkg:hex/gleam_crypto@1.6.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "2de9e4ef53cf6fee049d4f765731f7178f7a11aefae00eee63bf7536b354ad3f",
+      "source": "https://repo.hex.pm/tarballs/gleam_crypto-1.6.0.tar"
+    },
+    "pkg:hex/gleam_erlang@1.3.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "1124ad3aa21143e5af0fc5cf3d9529f6db8ca03e43a55711b60b6b7b3874375c",
+      "source": "https://repo.hex.pm/tarballs/gleam_erlang-1.3.0.tar"
+    },
+    "pkg:hex/gleam_http@4.3.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "82ea6a717c842456188c190afb372665ea56ce13d8559bf3b1dd9e40f619ee0c",
+      "source": "https://repo.hex.pm/tarballs/gleam_http-4.3.0.tar"
+    },
+    "pkg:hex/gleam_httpc@5.0.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "c545172618d07811494e97aaa4a0fb34da6f6d0061fdc8041c2f8e3be2b2e48f",
+      "source": "https://repo.hex.pm/tarballs/gleam_httpc-5.0.0.tar"
+    },
+    "pkg:hex/gleam_json@3.1.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "44fdaa8847be8fc48ca7a1c089706bd54badcc4c45b237a992eddf9f2cdb2836",
+      "source": "https://repo.hex.pm/tarballs/gleam_json-3.1.0.tar"
+    },
+    "pkg:hex/gleam_otp@1.3.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "de4ca6850842f0266ee95317a25dd6a0a0f20cdfab7c0adc2e63251d7c3c72ec",
+      "source": "https://repo.hex.pm/tarballs/gleam_otp-1.3.0.tar"
+    },
+    "pkg:hex/gleam_regexp@1.1.1": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "9c215c6ca84a5b35bb934a9b61a9a306ec743153be2b0425a0d032e477b062a9",
+      "source": "https://repo.hex.pm/tarballs/gleam_regexp-1.1.1.tar"
+    },
+    "pkg:hex/gleam_stdlib@1.0.5": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "cee5b6c076a85b45f60c585f4316c63ec8b7127c119d5738c3958a9c4d50404e",
+      "source": "https://repo.hex.pm/tarballs/gleam_stdlib-1.0.5.tar"
+    },
+    "pkg:hex/gleam_time@1.10.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "56539216e4c4b1748714652ab38f0bd16b9101f61db62769fdc7cd42a8e5e833",
+      "source": "https://repo.hex.pm/tarballs/gleam_time-1.10.0.tar"
+    },
+    "pkg:hex/gleam_yielder@1.1.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "8e4e4ecfa7982859f430c57f549200c7749823c106759f4a19a78aea6687717a",
+      "source": "https://repo.hex.pm/tarballs/gleam_yielder-1.1.0.tar"
+    },
+    "pkg:hex/gleeunit@1.11.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "ec31aba74256aea531edf8169931d775bbb384fed0a8a1bdc4dd9354e3e21826",
+      "source": "https://repo.hex.pm/tarballs/gleeunit-1.11.0.tar"
+    },
+    "pkg:hex/glexer@2.5.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "MIT"
+      ],
+      "sha256": "d423cf63b8d4f9654ef53d0af4904b249eb0679bd41c63440170ac508c9cc65e",
+      "source": "https://repo.hex.pm/tarballs/glexer-2.5.0.tar"
+    },
+    "pkg:hex/glint@1.3.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "26cca9bc3acb56cd9d754acf598f49b4c281c4fdd81ae61fa21c8e92e9c8218e",
+      "source": "https://repo.hex.pm/tarballs/glint-1.3.0.tar"
+    },
+    "pkg:hex/glinter@2.19.2": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "MIT"
+      ],
+      "sha256": "19cbb4d78e58e54d6b0e8554c389dc01071334fb11e9140c9487c9a4bbca6158",
+      "source": "https://repo.hex.pm/tarballs/glinter-2.19.2.tar"
+    },
+    "pkg:hex/glisten@9.0.1": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "7795aa50830656f3a0316a6b26595f893c83272da901b3405e31339caa31a10b",
+      "source": "https://repo.hex.pm/tarballs/glisten-9.0.1.tar"
+    },
+    "pkg:hex/global_value@1.0.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "23f74c91a7b819c43abccbf49dad5bb8799d81f2a3736ba9a534bd47f309ff4f",
+      "source": "https://repo.hex.pm/tarballs/global_value-1.0.0.tar"
+    },
+    "pkg:hex/gramps@6.0.1": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "d55636072dee173f6586a5679d3c02ec7a0de3f8646b78c351b72908ff223df7",
+      "source": "https://repo.hex.pm/tarballs/gramps-6.0.1.tar"
+    },
+    "pkg:hex/group_registry@1.0.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "bc798a53d6f2406db94e27cb45c57052cb56b32acf7cc16ea20f6baec7e36b90",
+      "source": "https://repo.hex.pm/tarballs/group_registry-1.0.0.tar"
+    },
+    "pkg:hex/houdini@1.2.1": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "6f8ac2f12974567fb744bea66ac93ceb76aaea19ad28564623f76cda9bc26a85",
+      "source": "https://repo.hex.pm/tarballs/houdini-1.2.1.tar"
+    },
+    "pkg:hex/hpack_erl@0.3.0": {
+      "license_source": "reviewed:LICENSE",
+      "licenses": [
+        "MIT"
+      ],
+      "sha256": "d6137d7079169d8c485c6962dfe261af5b9ef60fbc557344511c1e65e3d95fb0",
+      "source": "https://repo.hex.pm/tarballs/hpack_erl-0.3.0.tar"
+    },
+    "pkg:hex/hpax@1.0.4": {
+      "license_source": "contents.tar.gz/mix.exs",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "afc7cb142ebcc2d01ce7816190b98ce5dd49e799111b24249f3443d730f377ca",
+      "source": "https://repo.hex.pm/tarballs/hpax-1.0.4.tar"
+    },
+    "pkg:hex/jargon@1.1.0": {
+      "license_source": "reviewed:LICENSE",
+      "licenses": [
+        "MIT"
+      ],
+      "sha256": "963fcd2e851f5fcf3821638c088ea1ef07365187319b9145a1d12dd3980162ca",
+      "source": "https://repo.hex.pm/tarballs/jargon-1.1.0.tar"
+    },
+    "pkg:hex/jason@1.4.5": {
+      "license_source": "contents.tar.gz/mix.exs",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "b0c823996102bcd0239b3c2444eb00409b72f6a140c1950bc8b457d836b30684",
+      "source": "https://repo.hex.pm/tarballs/jason-1.4.5.tar"
+    },
+    "pkg:hex/justin@1.1.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "8b1c62269e8607d0a0ed698b7903984ce0bf7b6b3c0dea3c6c8302b39402837b",
+      "source": "https://repo.hex.pm/tarballs/justin-1.1.0.tar"
+    },
+    "pkg:hex/logging@1.5.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "bc5f18ce5dd9686100229fe5409bdc3dd5c46d5a7df2f804ad2d8f0dd6c5060e",
+      "source": "https://repo.hex.pm/tarballs/logging-1.5.0.tar"
+    },
+    "pkg:hex/lustre@5.7.1": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "MIT"
+      ],
+      "sha256": "663a2d1a3458914ca537a42ac07e601dd3fd85415ebdaf4717f2dff6e86f90f9",
+      "source": "https://repo.hex.pm/tarballs/lustre-5.7.1.tar"
+    },
+    "pkg:hex/lustre_dev_tools@2.3.6": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "MIT"
+      ],
+      "sha256": "7a650a107c7e767d902a8cb608460b927de0cdd47d5ba04ded71f9f622fe6ad9",
+      "source": "https://repo.hex.pm/tarballs/lustre_dev_tools-2.3.6.tar"
+    },
+    "pkg:hex/marceau@1.3.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "2d1c27504bef45005f5dfb18591f8610fb4bfa91744878210bdc464412ec44e9",
+      "source": "https://repo.hex.pm/tarballs/marceau-1.3.0.tar"
+    },
+    "pkg:hex/mime@2.0.7": {
+      "license_source": "contents.tar.gz/mix.exs",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "6171188e399ee16023ffc5b76ce445eb6d9672e2e241d2df6050f3c771e80ccd",
+      "source": "https://repo.hex.pm/tarballs/mime-2.0.7.tar"
+    },
+    "pkg:hex/mint@1.9.3": {
+      "license_source": "contents.tar.gz/mix.exs",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "5f7c9342480c069dbbc4eeac3490303c9e01870ff01a7f1d29b6107054fc1e74",
+      "source": "https://repo.hex.pm/tarballs/mint-1.9.3.tar"
+    },
+    "pkg:hex/mist@6.0.3": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "1b07f321d5fa0cb162d81496f2de96aeb6ef8980f4f38230a4cc3f849497e020",
+      "source": "https://repo.hex.pm/tarballs/mist-6.0.3.tar"
+    },
+    "pkg:hex/mix_gleam@0.6.2": {
+      "license_source": "contents.tar.gz/mix.exs",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "d354680229729387d329248eabf10739748ebe3c0b2781c79f98ec772a62af6e",
+      "source": "https://repo.hex.pm/tarballs/mix_gleam-0.6.2.tar"
+    },
+    "pkg:hex/mug@3.1.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "c01279d98e40371da23461774b63f0e3581b8f1396049d881b0c7eb32799d93f",
+      "source": "https://repo.hex.pm/tarballs/mug-3.1.0.tar"
+    },
+    "pkg:hex/nimble_options@1.1.1": {
+      "license_source": "contents.tar.gz/mix.exs",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "821b2470ca9442c4b6984882fe9bb0389371b8ddec4d45a9504f00a66f650b44",
+      "source": "https://repo.hex.pm/tarballs/nimble_options-1.1.1.tar"
+    },
+    "pkg:hex/nimble_pool@1.1.0": {
+      "license_source": "contents.tar.gz/mix.exs",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "af2e4e6b34197db81f7aad230c1118eac993acc0dae6bc83bac0126d4ae0813a",
+      "source": "https://repo.hex.pm/tarballs/nimble_pool-1.1.0.tar"
+    },
+    "pkg:hex/platform@1.0.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "8339420a95ad89aac0f82f4c3db8dd401041742d6c3f46132a8739f6aeb75391",
+      "source": "https://repo.hex.pm/tarballs/platform-1.0.0.tar"
+    },
+    "pkg:hex/polly@3.1.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "BSD-3-Clause"
+      ],
+      "sha256": "51fb565d81ff6212fdf3306d44419601f2a7c4edd1f00fc9da5c376a00aed4fe",
+      "source": "https://repo.hex.pm/tarballs/polly-3.1.0.tar"
+    },
+    "pkg:hex/poolboy@1.5.2": {
+      "license_source": "reviewed:LICENSE",
+      "licenses": [
+        "ISC"
+      ],
+      "sha256": "dad79704ce5440f3d5a3681c8590b9dc25d1a561e8f5a9c995281012860901e3",
+      "source": "https://repo.hex.pm/tarballs/poolboy-1.5.2.tar"
+    },
+    "pkg:hex/postgleam@0.8.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "a4d9e321268106e55aad7ebd4be51243710342f0ccc296414005366984c70df6",
+      "source": "https://repo.hex.pm/tarballs/postgleam-0.8.0.tar"
+    },
+    "pkg:hex/prng@6.0.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "7fe3879e13150248bd370469205ed07b9404dd90670febb8cd0e7643707c420e",
+      "source": "https://repo.hex.pm/tarballs/prng-6.0.0.tar"
+    },
+    "pkg:hex/qcheck@1.0.5": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "sha256": "d27c12074776ec95f082ee56e0fc74685506b6ee26176f194d10f0322a39ac11",
+      "source": "https://repo.hex.pm/tarballs/qcheck-1.0.5.tar"
+    },
+    "pkg:hex/rank@1.1.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "b846d54d1512fb83a3994a07a8c7915fe74335a99bce1edc7943ea31ed710dfd",
+      "source": "https://repo.hex.pm/tarballs/rank-1.1.0.tar"
+    },
+    "pkg:hex/req@0.7.3": {
+      "license_source": "contents.tar.gz/mix.exs",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "73b303030dccc2b6d023ee5ada380825ab3a7cd3863aead493db09ec420ffdf2",
+      "source": "https://repo.hex.pm/tarballs/req-0.7.3.tar"
+    },
+    "pkg:hex/simplifile@2.6.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "a33c345f0a4ffb91dccd4220114534a58c387964a5f17b3e472cebd1ada9ffb4",
+      "source": "https://repo.hex.pm/tarballs/simplifile-2.6.0.tar"
+    },
+    "pkg:hex/simplifile@2.7.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "a2727627b063e87351934c7f7f008f2d1fdb16f6de0b8c79f9e46459cfc9c164",
+      "source": "https://repo.hex.pm/tarballs/simplifile-2.7.0.tar"
+    },
+    "pkg:hex/snag@1.2.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "274f41d6c3ecf99f7686fdce54183333e41d2c1ca5a3a673f9a8b2c7a4401077",
+      "source": "https://repo.hex.pm/tarballs/snag-1.2.0.tar"
+    },
+    "pkg:hex/splitter@1.2.0": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "3dfd6b6c49e61edaf6f7b27a42054a17cff6ca2135ff553d0cb61c234d281dd0",
+      "source": "https://repo.hex.pm/tarballs/splitter-1.2.0.tar"
+    },
+    "pkg:hex/sqlight@1.2.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "841768d0a81107ee2db46b949354f284a68b2e8098315c28a1fe3c07d206c17a",
+      "source": "https://repo.hex.pm/tarballs/sqlight-1.2.0.tar"
+    },
+    "pkg:hex/telemetry@1.4.2": {
+      "license_source": "reviewed:LICENSE",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "928f6495066506077862c0d1646609eed891a4326bee3126ba54b60af61febb1",
+      "source": "https://repo.hex.pm/tarballs/telemetry-1.4.2.tar"
+    },
+    "pkg:hex/term_size@1.0.1": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "d00bd2bc8fb3ebb7e6ae076f3f1ff2ac9d5ed1805f004d0896c784d06c6645f1",
+      "source": "https://repo.hex.pm/tarballs/term_size-1.0.1.tar"
+    },
+    "pkg:hex/tom@2.1.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "dcf04cb7ab35d58cfc598c66ea2e1816d160759802c89b2ba6238780d59bc256",
+      "source": "https://repo.hex.pm/tarballs/tom-2.1.0.tar"
+    },
+    "pkg:hex/tomlet@1.3.0": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "sha256": "332e7e02253accc0341ee80efed5d6c5e8259919d6134e6a1e0fa47052a08722",
+      "source": "https://repo.hex.pm/tarballs/tomlet-1.3.0.tar"
+    },
+    "pkg:hex/trie_again@1.1.4": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "e3bd66b4e126ef567ea8c4944eab216413392adf6c16c36047af79ee5ef13466",
+      "source": "https://repo.hex.pm/tarballs/trie_again-1.1.4.tar"
+    },
+    "pkg:hex/typed_struct@0.3.0": {
+      "license_source": "contents.tar.gz/mix.exs",
+      "licenses": [
+        "MIT"
+      ],
+      "sha256": "c50bd5c3a61fe4e198a8504f939be3d3c85903b382bde4865579bc23111d1b6d",
+      "source": "https://repo.hex.pm/tarballs/typed_struct-0.3.0.tar"
+    },
+    "pkg:hex/william@1.0.1": {
+      "license_source": "metadata.config",
+      "licenses": [
+        "BSD-3-Clause"
+      ],
+      "sha256": "f5d71b18791b728387b08bc8d56ef73ef35e6450dedce151e071904b5a02d90c",
+      "source": "https://repo.hex.pm/tarballs/william-1.0.1.tar"
+    },
+    "pkg:hex/wisp@2.2.2": {
+      "license_source": "contents.tar.gz/gleam.toml",
+      "licenses": [
+        "Apache-2.0"
+      ],
+      "sha256": "5ff5f1e288c3437252abb93d8f9cf42ff652ce7ad54480cfe736038dc09c4f22",
+      "source": "https://repo.hex.pm/tarballs/wisp-2.2.2.tar"
+    }
+  },
+  "schema_version": 1
+}

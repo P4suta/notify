@@ -1,7 +1,7 @@
 import gleam/dynamic/decode
 import gleam/erlang/process.{type Subject}
 import gleam/list
-import gleam/option.{None, Some}
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
 import notify/delivery.{type Job, type Store}
@@ -27,7 +27,16 @@ type Command {
     Int,
     Subject(Result(Job, delivery.Error)),
   )
+  Requeue(String, Int, Subject(Result(Job, delivery.Error)))
+  Purge(String, Subject(Result(Nil, delivery.Error)))
   List(delivery.Kind, Subject(Result(List(Job), delivery.Error)))
+  Page(
+    Option(delivery.Kind),
+    Option(String),
+    Int,
+    Subject(Result(delivery.Page(delivery.Summary), delivery.Error)),
+  )
+  Stats(Subject(Result(delivery.Stats, delivery.Error)))
   Health(Subject(Result(Nil, delivery.Error)))
 }
 
@@ -52,6 +61,8 @@ CREATE TABLE IF NOT EXISTS delivery_outbox (
 );
 CREATE INDEX IF NOT EXISTS delivery_outbox_claim
   ON delivery_outbox(kind, state, available_at, lease_until, created_at);
+CREATE INDEX IF NOT EXISTS delivery_outbox_kind_id
+  ON delivery_outbox(kind, id);
 "
 
 pub fn start(path: String) -> Result(Store, delivery.Error) {
@@ -95,9 +106,21 @@ fn start_actor(connection: Connection) -> Result(Store, delivery.Error) {
           Fail(id, owner, now, detail, max_attempts, base_delay, reply)
         })
       },
+      requeue: fn(id, now) {
+        process.call(subject, 10_000, fn(reply) { Requeue(id, now, reply) })
+      },
+      purge: fn(id) {
+        process.call(subject, 10_000, fn(reply) { Purge(id, reply) })
+      },
       list: fn(kind) {
         process.call(subject, 10_000, fn(reply) { List(kind, reply) })
       },
+      page: fn(kind, after, limit) {
+        process.call(subject, 10_000, fn(reply) {
+          Page(kind, after, limit, reply)
+        })
+      },
+      stats: fn() { process.call(subject, 10_000, Stats) },
       health: fn() { process.call(subject, 10_000, Health) },
     ),
   )
@@ -121,7 +144,12 @@ fn handle(
         reply,
         fail(connection, id, owner, now, detail, max_attempts, base_delay),
       )
+    Requeue(id, now, reply) -> process.send(reply, requeue(connection, id, now))
+    Purge(id, reply) -> process.send(reply, purge(connection, id))
     List(kind, reply) -> process.send(reply, list_jobs(connection, kind))
+    Page(kind, after, limit, reply) ->
+      process.send(reply, page_jobs(connection, kind, after, limit))
+    Stats(reply) -> process.send(reply, stats(connection))
     Health(reply) -> process.send(reply, health(connection))
   }
   actor.continue(connection)
@@ -240,7 +268,7 @@ fn fail(
           True -> #(delivery.DeadLetter, job.available_at)
           False -> #(
             delivery.Pending,
-            now + delivery.retry_delay(base_delay, attempts),
+            now + delivery.retry_delay_with_jitter(base_delay, attempts, job.id),
           )
         }
         let updated =
@@ -274,6 +302,58 @@ fn fail(
   })
 }
 
+fn requeue(
+  connection: Connection,
+  id: String,
+  now: Int,
+) -> Result(Job, delivery.Error) {
+  transaction(connection, fn() {
+    use job <- result.try(find_job(connection, id))
+    case job.state {
+      delivery.DeadLetter -> {
+        let requeued =
+          delivery.Job(
+            ..job,
+            state: delivery.Pending,
+            attempts: 0,
+            available_at: now,
+            lease_owner: None,
+            lease_until: None,
+          )
+        use _ <- result.try(
+          sqlight.query(
+            "UPDATE delivery_outbox SET state = 'pending', attempts = 0, available_at = ?, lease_owner = NULL, lease_until = NULL WHERE id = ? AND state = 'dead_letter'",
+            on: connection,
+            with: [sqlight.int(now), sqlight.text(id)],
+            expecting: decode.dynamic,
+          )
+          |> result.map_error(map_error),
+        )
+        Ok(requeued)
+      }
+      _ -> Error(delivery.Conflict)
+    }
+  })
+}
+
+fn purge(connection: Connection, id: String) -> Result(Nil, delivery.Error) {
+  transaction(connection, fn() {
+    use job <- result.try(find_job(connection, id))
+    case job.state {
+      delivery.DeadLetter ->
+        sqlight.query(
+          "DELETE FROM delivery_outbox WHERE id = ? AND state = 'dead_letter'",
+          on: connection,
+          with: [sqlight.text(id)],
+          expecting: decode.dynamic,
+        )
+        |> result.map(fn(_) { Nil })
+        |> result.map_error(map_error)
+      _ -> Error(delivery.Conflict)
+    }
+  })
+}
+
 fn find_job(connection: Connection, id: String) -> Result(Job, delivery.Error) {
   use jobs <- result.try(
     sqlight.query(
@@ -298,6 +378,146 @@ fn list_jobs(
     expecting: job_decoder(),
   )
   |> result.map_error(map_error)
+}
+
+fn page_jobs(
+  connection: Connection,
+  kind: Option(delivery.Kind),
+  after: Option(String),
+  limit: Int,
+) -> Result(delivery.Page(delivery.Summary), delivery.Error) {
+  use _ <- result.try(valid_page_limit(limit))
+  let rows = case kind, after {
+    None, None ->
+      sqlight.query(
+        "SELECT id, kind, message_id, topic_hash, state, attempts, available_at, lease_owner, lease_until, last_error FROM delivery_outbox ORDER BY id LIMIT ?",
+        on: connection,
+        with: [sqlight.int(limit + 1)],
+        expecting: summary_decoder(),
+      )
+    None, Some(after) ->
+      sqlight.query(
+        "SELECT id, kind, message_id, topic_hash, state, attempts, available_at, lease_owner, lease_until, last_error FROM delivery_outbox WHERE id > ? ORDER BY id LIMIT ?",
+        on: connection,
+        with: [sqlight.text(after), sqlight.int(limit + 1)],
+        expecting: summary_decoder(),
+      )
+    Some(kind), None ->
+      sqlight.query(
+        "SELECT id, kind, message_id, topic_hash, state, attempts, available_at, lease_owner, lease_until, last_error FROM delivery_outbox WHERE kind = ? ORDER BY id LIMIT ?",
+        on: connection,
+        with: [sqlight.text(kind_string(kind)), sqlight.int(limit + 1)],
+        expecting: summary_decoder(),
+      )
+    Some(kind), Some(after) ->
+      sqlight.query(
+        "SELECT id, kind, message_id, topic_hash, state, attempts, available_at, lease_owner, lease_until, last_error FROM delivery_outbox WHERE kind = ? AND id > ? ORDER BY id LIMIT ?",
+        on: connection,
+        with: [
+          sqlight.text(kind_string(kind)),
+          sqlight.text(after),
+          sqlight.int(limit + 1),
+        ],
+        expecting: summary_decoder(),
+      )
+  }
+  rows
+  |> result.map(fn(rows) { bounded_page(rows, limit) })
+  |> result.map_error(map_error)
+}
+
+fn valid_page_limit(limit: Int) -> Result(Nil, delivery.Error) {
+  case limit >= 1 && limit <= 100 {
+    True -> Ok(Nil)
+    False -> Error(delivery.InvalidPage)
+  }
+}
+
+fn bounded_page(rows: List(a), limit: Int) -> delivery.Page(a) {
+  delivery.Page(
+    items: list.take(rows, limit),
+    has_more: list.length(rows) > limit,
+  )
+}
+
+fn stats(connection: Connection) -> Result(delivery.Stats, delivery.Error) {
+  use values <- result.try(
+    sqlight.query(
+      "SELECT COUNT(CASE WHEN kind = 'webpush' AND state = 'pending' THEN 1 END), COUNT(CASE WHEN kind = 'webpush' AND state = 'leased' THEN 1 END), COUNT(CASE WHEN kind = 'webpush' AND state = 'dead_letter' THEN 1 END), COUNT(CASE WHEN kind = 'mobile_relay' AND state = 'pending' THEN 1 END), COUNT(CASE WHEN kind = 'mobile_relay' AND state = 'leased' THEN 1 END), COUNT(CASE WHEN kind = 'mobile_relay' AND state = 'dead_letter' THEN 1 END) FROM delivery_outbox",
+      on: connection,
+      with: [],
+      expecting: stats_decoder(),
+    )
+    |> result.map_error(map_error),
+  )
+  case values {
+    [statistics] -> Ok(statistics)
+    _ ->
+      Error(delivery.Unavailable(
+        "delivery statistics query returned an invalid row count",
+      ))
+  }
+}
+
+fn stats_decoder() -> decode.Decoder(delivery.Stats) {
+  use webpush_pending <- decode.field(0, decode.int)
+  use webpush_leased <- decode.field(1, decode.int)
+  use webpush_dead_letter <- decode.field(2, decode.int)
+  use mobile_relay_pending <- decode.field(3, decode.int)
+  use mobile_relay_leased <- decode.field(4, decode.int)
+  use mobile_relay_dead_letter <- decode.field(5, decode.int)
+  decode.success(delivery.Stats(
+    webpush_pending:,
+    webpush_leased:,
+    webpush_dead_letter:,
+    mobile_relay_pending:,
+    mobile_relay_leased:,
+    mobile_relay_dead_letter:,
+  ))
+}
+
+fn summary_decoder() -> decode.Decoder(delivery.Summary) {
+  use id <- decode.field(0, decode.string)
+  use raw_kind <- decode.field(1, decode.string)
+  use message_id <- decode.field(2, decode.string)
+  use topic_hash <- decode.field(3, decode.string)
+  use raw_state <- decode.field(4, decode.string)
+  use attempts <- decode.field(5, decode.int)
+  use available_at <- decode.field(6, decode.int)
+  use lease_owner <- decode.field(7, decode.optional(decode.string))
+  use lease_until <- decode.field(8, decode.optional(decode.int))
+  use last_error <- decode.field(9, decode.optional(decode.string))
+  case parse_kind(raw_kind), parse_state(raw_state) {
+    Ok(kind), Ok(state) ->
+      decode.success(delivery.Summary(
+        id:,
+        kind:,
+        message_id:,
+        topic_hash:,
+        state:,
+        attempts:,
+        available_at:,
+        lease_owner:,
+        lease_until:,
+        last_error:,
+      ))
+    _, _ ->
+      decode.failure(
+        delivery.Summary(
+          id: "",
+          kind: delivery.WebPush,
+          message_id: "",
+          topic_hash: "",
+          state: delivery.DeadLetter,
+          attempts: 0,
+          available_at: 0,
+          lease_owner: None,
+          lease_until: None,
+          last_error: None,
+        ),
+        expected: "delivery outbox summary enum",
+      )
+  }
 }
 
 fn job_decoder() -> decode.Decoder(Job) {

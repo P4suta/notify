@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 
 cd "$root"
 gleam run -m glinter

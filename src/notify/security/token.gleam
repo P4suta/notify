@@ -1,3 +1,4 @@
+import gleam/crypto
 import gleam/list
 import gleam/string
 
@@ -47,6 +48,11 @@ pub fn secure_entropy() -> String {
 
 pub fn digest(value: String) -> String {
   sha256_hex(value)
+}
+
+/// Compares secret-derived strings without data-dependent early exit.
+pub fn secure_equal(left: String, right: String) -> Bool {
+  crypto.secure_compare(<<left:utf8>>, <<right:utf8>>)
 }
 
 fn ascii_alphanumeric(value: String) -> Bool {

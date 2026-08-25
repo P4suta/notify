@@ -73,6 +73,20 @@ pub fn memory_storage_cleanup_removes_only_expired_messages_test() {
   assert messages == [current]
 }
 
+pub fn memory_scheduler_release_appends_a_durable_event_test() {
+  let assert Ok(store) = memory.start()
+  let scheduled =
+    message.Message(..fixture("A000000012XY", 200, "one"), scheduled: True)
+  assert store.save(scheduled) == Ok(scheduled)
+  let assert Ok(before) = store.stats()
+  assert before.events == 1
+
+  let assert Ok([released]) = store.release_due(200, 10)
+  assert !released.scheduled
+  let assert Ok(after) = store.stats()
+  assert after.events == 2
+}
+
 pub fn since_latest_returns_latest_published_message_for_each_topic_test() {
   let values = [
     fixture("A000000006", 100, "one"),

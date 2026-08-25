@@ -8,7 +8,7 @@ import notify/core/topic
 fn fixture_message() -> message.Message {
   let assert Ok(topic) = topic.parse("backups")
   message.Message(
-    id: "AbCdEf1234",
+    id: "AbCdEf1234XY",
     time: 1_725_000_000,
     expires: Some(1_725_043_200),
     event: message.MessageEvent,
@@ -31,14 +31,14 @@ fn fixture_message() -> message.Message {
 pub fn encodes_ntfy_message_without_null_fields_test() {
   let encoded = fixture_message() |> message_json.encode |> json.to_string
   assert encoded
-    == "{\"id\":\"AbCdEf1234\",\"time\":1725000000,\"expires\":1725043200,\"event\":\"message\",\"topic\":\"backups\",\"message\":\"Backup complete\",\"title\":\"Nightly\",\"priority\":4,\"tags\":[\"white_check_mark\",\"backup\"],\"content_type\":\"text/markdown\",\"click\":\"https://example.test/backups/42\",\"sequence_id\":\"backup-42\"}"
+    == "{\"id\":\"AbCdEf1234XY\",\"time\":1725000000,\"expires\":1725043200,\"event\":\"message\",\"topic\":\"backups\",\"message\":\"Backup complete\",\"title\":\"Nightly\",\"priority\":4,\"tags\":[\"white_check_mark\",\"backup\"],\"content_type\":\"text/markdown\",\"click\":\"https://example.test/backups/42\",\"sequence_id\":\"backup-42\"}"
 }
 
 pub fn decodes_current_content_type_and_legacy_markdown_wire_fields_test() {
   let current =
-    "{\"id\":\"AbCdEf1234\",\"time\":1725000000,\"event\":\"message\",\"topic\":\"backups\",\"message\":\"ok\",\"content_type\":\"text/markdown\"}"
+    "{\"id\":\"AbCdEf1234XY\",\"time\":1725000000,\"event\":\"message\",\"topic\":\"backups\",\"message\":\"ok\",\"content_type\":\"text/markdown\"}"
   let legacy =
-    "{\"id\":\"AbCdEf1234\",\"time\":1725000000,\"event\":\"message\",\"topic\":\"backups\",\"message\":\"ok\",\"markdown\":true}"
+    "{\"id\":\"AbCdEf1234XY\",\"time\":1725000000,\"event\":\"message\",\"topic\":\"backups\",\"message\":\"ok\",\"markdown\":true}"
   let assert Ok(current_message) = json.parse(current, message_json.decoder())
   let assert Ok(legacy_message) = json.parse(legacy, message_json.decoder())
   assert current_message.markdown
@@ -69,7 +69,8 @@ pub fn defaults_missing_json_message_to_triggered_test() {
 }
 
 pub fn rejects_invalid_topic_or_priority_in_json_test() {
-  assert message_json.decode_publish("{") == Error(message_json.InvalidJson)
+  assert message_json.decode_publish("{") == Error(message_json.MalformedJson)
+  assert message_json.decode_publish("{}") == Error(message_json.InvalidJson)
   let assert Error(message_json.InvalidTopic(_)) =
     message_json.decode_publish("{\"topic\":\"bad/topic\",\"message\":\"x\"}")
   let assert Error(message_json.InvalidPriority(7)) =
@@ -87,14 +88,14 @@ pub fn encodes_multi_topic_open_control_event_test() {
   let assert Ok(two) = topic.parse("two")
   let encoded =
     message_json.encode_control(
-      id: "AbCdEf1234",
+      id: "AbCdEf1234XY",
       time: 1_725_000_000,
       event: message.OpenEvent,
       topics: [one, two],
     )
     |> json.to_string
   assert encoded
-    == "{\"id\":\"AbCdEf1234\",\"time\":1725000000,\"event\":\"open\",\"topic\":\"one,two\"}"
+    == "{\"id\":\"AbCdEf1234XY\",\"time\":1725000000,\"event\":\"open\",\"topic\":\"one,two\"}"
 }
 
 pub fn stored_message_round_trips_actions_and_attachment_test() {
@@ -106,6 +107,7 @@ pub fn stored_message_round_trips_actions_and_attachment_test() {
           label: "Open",
           url: "https://example.test/42",
           clear: True,
+          id: None,
         ),
         message.HttpAction(
           label: "Acknowledge",
@@ -114,8 +116,14 @@ pub fn stored_message_round_trips_actions_and_attachment_test() {
           headers: [#("authorization", "Bearer test")],
           body: Some("{\"ok\":true}"),
           clear: False,
+          id: Some("ActionHttp01"),
         ),
-        message.CopyAction(label: "Copy", value: "incident-42", clear: False),
+        message.CopyAction(
+          label: "Copy",
+          value: "incident-42",
+          clear: False,
+          id: None,
+        ),
       ],
       attachment: Some(message.Attachment(
         name: "report.pdf",
@@ -141,8 +149,9 @@ pub fn json_publish_decodes_structured_actions_test() {
         label: "Open",
         url: "https://example.test",
         clear: True,
+        id: None,
       ),
-      message.CopyAction(label: "Copy", value: "42", clear: False),
+      message.CopyAction(label: "Copy", value: "42", clear: False, id: None),
     ]
 }
 
@@ -164,7 +173,7 @@ pub fn storage_codec_preserves_private_delivery_flags_and_icon_test() {
 
 pub fn message_decoder_defaults_are_explicit_and_content_type_is_exact_test() {
   let minimal =
-    "{\"id\":\"AbCdEf1234\",\"time\":1725000000,\"event\":\"open\",\"topic\":\"backups\"}"
+    "{\"id\":\"AbCdEf1234XY\",\"time\":1725000000,\"event\":\"open\",\"topic\":\"backups\"}"
   let assert Ok(decoded) = json.parse(minimal, message_json.decoder())
   assert decoded.message == ""
   assert !decoded.markdown
@@ -173,7 +182,7 @@ pub fn message_decoder_defaults_are_explicit_and_content_type_is_exact_test() {
   assert decoded.icon == None
 
   let other_content =
-    "{\"id\":\"AbCdEf1234\",\"time\":1725000000,\"event\":\"message\",\"topic\":\"backups\",\"message\":\"ok\",\"content_type\":\"application/json\",\"icon\":\"https://example.test/icon.png\"}"
+    "{\"id\":\"AbCdEf1234XY\",\"time\":1725000000,\"event\":\"message\",\"topic\":\"backups\",\"message\":\"ok\",\"content_type\":\"application/json\",\"icon\":\"https://example.test/icon.png\"}"
   let assert Ok(other) = json.parse(other_content, message_json.decoder())
   assert !other.markdown
   assert other.icon == Some("https://example.test/icon.png")
@@ -189,6 +198,7 @@ pub fn action_json_defaults_and_clear_fields_round_trip_exactly_test() {
         label: "Open",
         url: "https://example.test",
         clear: False,
+        id: None,
       ),
       message.HttpAction(
         label: "Send",
@@ -197,8 +207,9 @@ pub fn action_json_defaults_and_clear_fields_round_trip_exactly_test() {
         headers: [],
         body: None,
         clear: False,
+        id: None,
       ),
-      message.CopyAction(label: "Copy", value: "42", clear: True),
+      message.CopyAction(label: "Copy", value: "42", clear: True, id: None),
     ]
 
   let with_clear =
@@ -210,8 +221,9 @@ pub fn action_json_defaults_and_clear_fields_round_trip_exactly_test() {
         headers: [],
         body: None,
         clear: True,
+        id: None,
       ),
-      message.CopyAction(label: "Copy", value: "42", clear: True),
+      message.CopyAction(label: "Copy", value: "42", clear: True, id: None),
     ])
   let encoded = with_clear |> message_json.encode |> json.to_string
   let assert Ok(round_trip) = json.parse(encoded, message_json.decoder())
@@ -230,7 +242,7 @@ pub fn full_json_publish_maps_every_optional_field_test() {
   assert draft.icon == Some("https://example.test/icon.png")
   assert draft.click == Some("https://example.test/jobs/42")
   assert draft.actions
-    == [message.CopyAction(label: "Copy", value: "42", clear: False)]
+    == [message.CopyAction(label: "Copy", value: "42", clear: False, id: None)]
   assert draft.delay == Some("10m")
   assert draft.sequence_id == Some("nightly-42")
   assert !draft.cache
@@ -262,7 +274,7 @@ pub fn remote_attachment_without_filename_uses_compatible_default_test() {
 pub fn decoder_failures_name_the_invalid_wire_contract_test() {
   let invalid_topic =
     json.parse(
-      "{\"id\":\"AbCdEf1234\",\"time\":1,\"event\":\"message\",\"topic\":\"bad/topic\"}",
+      "{\"id\":\"AbCdEf1234XY\",\"time\":1,\"event\":\"message\",\"topic\":\"bad/topic\"}",
       message_json.decoder(),
     )
     |> string.inspect
@@ -270,7 +282,7 @@ pub fn decoder_failures_name_the_invalid_wire_contract_test() {
 
   let invalid_priority =
     json.parse(
-      "{\"id\":\"AbCdEf1234\",\"time\":1,\"event\":\"message\",\"topic\":\"backups\",\"priority\":9}",
+      "{\"id\":\"AbCdEf1234XY\",\"time\":1,\"event\":\"message\",\"topic\":\"backups\",\"priority\":9}",
       message_json.decoder(),
     )
     |> string.inspect
@@ -278,7 +290,7 @@ pub fn decoder_failures_name_the_invalid_wire_contract_test() {
 
   let invalid_event =
     json.parse(
-      "{\"id\":\"AbCdEf1234\",\"time\":1,\"event\":\"unknown\",\"topic\":\"backups\"}",
+      "{\"id\":\"AbCdEf1234XY\",\"time\":1,\"event\":\"unknown\",\"topic\":\"backups\"}",
       message_json.decoder(),
     )
     |> string.inspect
@@ -286,7 +298,7 @@ pub fn decoder_failures_name_the_invalid_wire_contract_test() {
 
   let invalid_action =
     json.parse(
-      "{\"id\":\"AbCdEf1234\",\"time\":1,\"event\":\"message\",\"topic\":\"backups\",\"actions\":[{\"action\":\"unknown\"}]}",
+      "{\"id\":\"AbCdEf1234XY\",\"time\":1,\"event\":\"message\",\"topic\":\"backups\",\"actions\":[{\"action\":\"unknown\"}]}",
       message_json.decoder(),
     )
     |> string.inspect

@@ -46,6 +46,11 @@ pub type Config {
     retention_seconds: Int,
     max_request_bytes: Int,
     rate_limit_requests: Int,
+    rate_limit_subscriptions: Int,
+    rate_limit_topic_creations: Int,
+    rate_limit_auth_failures: Int,
+    rate_limit_attachment_mebibytes: Int,
+    rate_limit_attachment_uploads: Int,
     rate_limit_window_seconds: Int,
     dev_open: Bool,
     cluster_enabled: Bool,
@@ -54,6 +59,7 @@ pub type Config {
     attachment_file_size_bytes: Int,
     attachment_total_size_bytes: Int,
     attachment_retention_seconds: Int,
+    template_directory: String,
     s3_endpoint: String,
     s3_bucket: String,
     s3_region: String,
@@ -89,6 +95,11 @@ pub type Partial {
     retention_seconds: Option(Int),
     max_request_bytes: Option(Int),
     rate_limit_requests: Option(Int),
+    rate_limit_subscriptions: Option(Int),
+    rate_limit_topic_creations: Option(Int),
+    rate_limit_auth_failures: Option(Int),
+    rate_limit_attachment_mebibytes: Option(Int),
+    rate_limit_attachment_uploads: Option(Int),
     rate_limit_window_seconds: Option(Int),
     dev_open: Option(Bool),
     cluster_enabled: Option(Bool),
@@ -97,6 +108,7 @@ pub type Partial {
     attachment_file_size_bytes: Option(Int),
     attachment_total_size_bytes: Option(Int),
     attachment_retention_seconds: Option(Int),
+    template_directory: Option(String),
     s3_endpoint: Option(String),
     s3_bucket: Option(String),
     s3_region: Option(String),
@@ -156,6 +168,11 @@ pub fn defaults() -> Config {
     retention_seconds: 43_200,
     max_request_bytes: 16_777_216,
     rate_limit_requests: 120,
+    rate_limit_subscriptions: 30,
+    rate_limit_topic_creations: 60,
+    rate_limit_auth_failures: 10,
+    rate_limit_attachment_mebibytes: 120,
+    rate_limit_attachment_uploads: 20,
     rate_limit_window_seconds: 60,
     dev_open: False,
     cluster_enabled: False,
@@ -164,6 +181,7 @@ pub fn defaults() -> Config {
     attachment_file_size_bytes: 15_728_640,
     attachment_total_size_bytes: 104_857_600,
     attachment_retention_seconds: 10_800,
+    template_directory: "data/templates",
     s3_endpoint: "",
     s3_bucket: "",
     s3_region: "us-east-1",
@@ -199,6 +217,11 @@ pub fn empty_partial() -> Partial {
     retention_seconds: None,
     max_request_bytes: None,
     rate_limit_requests: None,
+    rate_limit_subscriptions: None,
+    rate_limit_topic_creations: None,
+    rate_limit_auth_failures: None,
+    rate_limit_attachment_mebibytes: None,
+    rate_limit_attachment_uploads: None,
     rate_limit_window_seconds: None,
     dev_open: None,
     cluster_enabled: None,
@@ -207,6 +230,7 @@ pub fn empty_partial() -> Partial {
     attachment_file_size_bytes: None,
     attachment_total_size_bytes: None,
     attachment_retention_seconds: None,
+    template_directory: None,
     s3_endpoint: None,
     s3_bucket: None,
     s3_region: None,
@@ -310,6 +334,36 @@ pub fn resolve(
       toml.rate_limit_requests,
       defaults.rate_limit_requests,
     ),
+    rate_limit_subscriptions: choose(
+      flags.rate_limit_subscriptions,
+      environment.rate_limit_subscriptions,
+      toml.rate_limit_subscriptions,
+      defaults.rate_limit_subscriptions,
+    ),
+    rate_limit_topic_creations: choose(
+      flags.rate_limit_topic_creations,
+      environment.rate_limit_topic_creations,
+      toml.rate_limit_topic_creations,
+      defaults.rate_limit_topic_creations,
+    ),
+    rate_limit_auth_failures: choose(
+      flags.rate_limit_auth_failures,
+      environment.rate_limit_auth_failures,
+      toml.rate_limit_auth_failures,
+      defaults.rate_limit_auth_failures,
+    ),
+    rate_limit_attachment_mebibytes: choose(
+      flags.rate_limit_attachment_mebibytes,
+      environment.rate_limit_attachment_mebibytes,
+      toml.rate_limit_attachment_mebibytes,
+      defaults.rate_limit_attachment_mebibytes,
+    ),
+    rate_limit_attachment_uploads: choose(
+      flags.rate_limit_attachment_uploads,
+      environment.rate_limit_attachment_uploads,
+      toml.rate_limit_attachment_uploads,
+      defaults.rate_limit_attachment_uploads,
+    ),
     rate_limit_window_seconds: choose(
       flags.rate_limit_window_seconds,
       environment.rate_limit_window_seconds,
@@ -357,6 +411,12 @@ pub fn resolve(
       environment.attachment_retention_seconds,
       toml.attachment_retention_seconds,
       defaults.attachment_retention_seconds,
+    ),
+    template_directory: choose(
+      flags.template_directory,
+      environment.template_directory,
+      toml.template_directory,
+      defaults.template_directory,
     ),
     s3_endpoint: choose(
       flags.s3_endpoint,
@@ -464,14 +524,31 @@ fn choose(
 }
 
 pub fn validate(config: Config) -> Result(Config, Error) {
-  case
-    config.max_request_bytes,
-    config.rate_limit_requests,
-    config.rate_limit_window_seconds
-  {
-    size, _, _ if size < 1 -> Error(InvalidRequestSize(size))
-    _, requests, window if requests < 1 || window < 1 -> Error(InvalidRateLimit)
-    _, _, _ -> validate_runtime(config)
+  case config.max_request_bytes < 1, valid_rate_limits(config) {
+    True, _ -> Error(InvalidRequestSize(config.max_request_bytes))
+    _, False -> Error(InvalidRateLimit)
+    _, True -> validate_runtime(config)
+  }
+}
+
+fn valid_rate_limits(config: Config) -> Bool {
+  case config.rate_limit_window_seconds > 0 {
+    False -> False
+    True -> {
+      let largest_safe_capacity =
+        9_223_372_036_854_775_807 / config.rate_limit_window_seconds
+      [
+        config.rate_limit_requests,
+        config.rate_limit_subscriptions,
+        config.rate_limit_topic_creations,
+        config.rate_limit_auth_failures,
+        config.rate_limit_attachment_mebibytes,
+        config.rate_limit_attachment_uploads,
+      ]
+      |> list.all(fn(capacity) {
+        capacity > 0 && capacity <= largest_safe_capacity
+      })
+    }
   }
 }
 
@@ -740,6 +817,32 @@ fn set_toml_value(
       use value <- result.try(parse_int("rate_limit.requests", raw_value))
       Ok(Partial(..partial, rate_limit_requests: Some(value)))
     }
+    "rate_limit.subscriptions" -> {
+      use value <- result.try(parse_int("rate_limit.subscriptions", raw_value))
+      Ok(Partial(..partial, rate_limit_subscriptions: Some(value)))
+    }
+    "rate_limit.topic_creations" -> {
+      use value <- result.try(parse_int("rate_limit.topic_creations", raw_value))
+      Ok(Partial(..partial, rate_limit_topic_creations: Some(value)))
+    }
+    "rate_limit.auth_failures" -> {
+      use value <- result.try(parse_int("rate_limit.auth_failures", raw_value))
+      Ok(Partial(..partial, rate_limit_auth_failures: Some(value)))
+    }
+    "rate_limit.attachment_mebibytes" -> {
+      use value <- result.try(parse_int(
+        "rate_limit.attachment_mebibytes",
+        raw_value,
+      ))
+      Ok(Partial(..partial, rate_limit_attachment_mebibytes: Some(value)))
+    }
+    "rate_limit.attachment_uploads" -> {
+      use value <- result.try(parse_int(
+        "rate_limit.attachment_uploads",
+        raw_value,
+      ))
+      Ok(Partial(..partial, rate_limit_attachment_uploads: Some(value)))
+    }
     "rate_limit.window_seconds" -> {
       use value <- result.try(parse_int("rate_limit.window_seconds", raw_value))
       Ok(Partial(..partial, rate_limit_window_seconds: Some(value)))
@@ -782,6 +885,8 @@ fn set_toml_value(
       ))
       Ok(Partial(..partial, attachment_retention_seconds: Some(value)))
     }
+    "templates.directory" ->
+      Ok(Partial(..partial, template_directory: Some(unquote(raw_value))))
     "s3.endpoint" ->
       Ok(Partial(..partial, s3_endpoint: Some(unquote(raw_value))))
     "s3.bucket" -> Ok(Partial(..partial, s3_bucket: Some(unquote(raw_value))))
@@ -844,6 +949,21 @@ fn from_environment() -> Result(Partial, Error) {
   use rate_limit_requests <- result.try(optional_env_int(
     "NOTIFY_RATE_LIMIT_REQUESTS",
   ))
+  use rate_limit_subscriptions <- result.try(optional_env_int(
+    "NOTIFY_RATE_LIMIT_SUBSCRIPTIONS",
+  ))
+  use rate_limit_topic_creations <- result.try(optional_env_int(
+    "NOTIFY_RATE_LIMIT_TOPIC_CREATIONS",
+  ))
+  use rate_limit_auth_failures <- result.try(optional_env_int(
+    "NOTIFY_RATE_LIMIT_AUTH_FAILURES",
+  ))
+  use rate_limit_attachment_mebibytes <- result.try(optional_env_int(
+    "NOTIFY_RATE_LIMIT_ATTACHMENT_MEBIBYTES",
+  ))
+  use rate_limit_attachment_uploads <- result.try(optional_env_int(
+    "NOTIFY_RATE_LIMIT_ATTACHMENT_UPLOADS",
+  ))
   use rate_limit_window_seconds <- result.try(optional_env_int(
     "NOTIFY_RATE_LIMIT_WINDOW_SECONDS",
   ))
@@ -903,6 +1023,11 @@ fn from_environment() -> Result(Partial, Error) {
     retention_seconds: retention,
     max_request_bytes:,
     rate_limit_requests:,
+    rate_limit_subscriptions:,
+    rate_limit_topic_creations:,
+    rate_limit_auth_failures:,
+    rate_limit_attachment_mebibytes:,
+    rate_limit_attachment_uploads:,
     rate_limit_window_seconds:,
     dev_open:,
     cluster_enabled:,
@@ -912,6 +1037,8 @@ fn from_environment() -> Result(Partial, Error) {
     attachment_file_size_bytes: attachment_file_size,
     attachment_total_size_bytes: attachment_total_size,
     attachment_retention_seconds: attachment_retention,
+    template_directory: getenv("NOTIFY_TEMPLATE_DIRECTORY")
+      |> option.from_result,
     s3_endpoint: getenv("NOTIFY_S3_ENDPOINT") |> option.from_result,
     s3_bucket: getenv("NOTIFY_S3_BUCKET") |> option.from_result,
     s3_region: getenv("NOTIFY_S3_REGION") |> option.from_result,
@@ -1019,6 +1146,50 @@ fn parse_flag_loop(
         Partial(..partial, rate_limit_requests: Some(requests)),
       )
     }
+    ["--rate-limit-subscriptions", value, ..rest] -> {
+      use capacity <- result.try(parse_int("--rate-limit-subscriptions", value))
+      parse_flag_loop(
+        rest,
+        Partial(..partial, rate_limit_subscriptions: Some(capacity)),
+      )
+    }
+    ["--rate-limit-topic-creations", value, ..rest] -> {
+      use capacity <- result.try(parse_int(
+        "--rate-limit-topic-creations",
+        value,
+      ))
+      parse_flag_loop(
+        rest,
+        Partial(..partial, rate_limit_topic_creations: Some(capacity)),
+      )
+    }
+    ["--rate-limit-auth-failures", value, ..rest] -> {
+      use capacity <- result.try(parse_int("--rate-limit-auth-failures", value))
+      parse_flag_loop(
+        rest,
+        Partial(..partial, rate_limit_auth_failures: Some(capacity)),
+      )
+    }
+    ["--rate-limit-attachment-mebibytes", value, ..rest] -> {
+      use capacity <- result.try(parse_int(
+        "--rate-limit-attachment-mebibytes",
+        value,
+      ))
+      parse_flag_loop(
+        rest,
+        Partial(..partial, rate_limit_attachment_mebibytes: Some(capacity)),
+      )
+    }
+    ["--rate-limit-attachment-uploads", value, ..rest] -> {
+      use capacity <- result.try(parse_int(
+        "--rate-limit-attachment-uploads",
+        value,
+      ))
+      parse_flag_loop(
+        rest,
+        Partial(..partial, rate_limit_attachment_uploads: Some(capacity)),
+      )
+    }
     ["--rate-limit-window", value, ..rest] -> {
       use window <- result.try(parse_int("--rate-limit-window", value))
       parse_flag_loop(
@@ -1066,6 +1237,8 @@ fn parse_flag_loop(
         Partial(..partial, attachment_retention_seconds: Some(expiry)),
       )
     }
+    ["--template-dir", value, ..rest] ->
+      parse_flag_loop(rest, Partial(..partial, template_directory: Some(value)))
     ["--s3-endpoint", value, ..rest] ->
       parse_flag_loop(rest, Partial(..partial, s3_endpoint: Some(value)))
     ["--s3-bucket", value, ..rest] ->
@@ -1218,6 +1391,16 @@ pub fn to_toml(config: Config) -> String {
   <> int.to_string(config.retention_seconds)
   <> "\n\n[rate_limit]\nrequests = "
   <> int.to_string(config.rate_limit_requests)
+  <> "\nsubscriptions = "
+  <> int.to_string(config.rate_limit_subscriptions)
+  <> "\ntopic_creations = "
+  <> int.to_string(config.rate_limit_topic_creations)
+  <> "\nauth_failures = "
+  <> int.to_string(config.rate_limit_auth_failures)
+  <> "\nattachment_mebibytes = "
+  <> int.to_string(config.rate_limit_attachment_mebibytes)
+  <> "\nattachment_uploads = "
+  <> int.to_string(config.rate_limit_attachment_uploads)
   <> "\nwindow_seconds = "
   <> int.to_string(config.rate_limit_window_seconds)
   <> "\n\n[cluster]\nenabled = "
@@ -1235,6 +1418,9 @@ pub fn to_toml(config: Config) -> String {
   <> int.to_string(config.attachment_total_size_bytes)
   <> "\nretention_seconds = "
   <> int.to_string(config.attachment_retention_seconds)
+  <> "\n\n[templates]\ndirectory = \""
+  <> config.template_directory
+  <> "\""
   <> "\n\n[s3]\nendpoint = \""
   <> config.s3_endpoint
   <> "\"\nbucket = \""
@@ -1323,7 +1509,7 @@ pub fn error_message(error: Error) -> String {
     InvalidRequestSize(value) ->
       "server.max_request_bytes " <> int.to_string(value) <> " must be positive"
     InvalidRateLimit ->
-      "rate_limit.requests and rate_limit.window_seconds must be positive"
+      "all rate_limit capacities and rate_limit.window_seconds must be positive and fit PostgreSQL BIGINT"
     DevOpenRequiresLoopback ->
       "--dev-open is only allowed with localhost, 127.0.0.1, or ::1"
     ActiveActiveRequiresPostgres ->

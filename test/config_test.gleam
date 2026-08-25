@@ -227,7 +227,7 @@ pub fn tls_and_trusted_proxy_configuration_is_typed_test() {
 pub fn request_limits_follow_toml_environment_flag_precedence_test() {
   let assert Ok(toml) =
     config.parse_toml(
-      "[server]\nmax_request_bytes = 4096\n[rate_limit]\nrequests = 40\nwindow_seconds = 30\n",
+      "[server]\nmax_request_bytes = 4096\n[rate_limit]\nrequests = 40\nsubscriptions = 12\ntopic_creations = 20\nauth_failures = 5\nattachment_mebibytes = 80\nattachment_uploads = 8\nwindow_seconds = 30\n",
     )
   let environment =
     config.Partial(..config.empty_partial(), rate_limit_requests: Some(50))
@@ -236,9 +236,18 @@ pub fn request_limits_follow_toml_environment_flag_precedence_test() {
   let resolved = config.resolve(config.defaults(), toml, environment, flags)
   assert resolved.max_request_bytes == 4096
   assert resolved.rate_limit_requests == 60
+  assert resolved.rate_limit_subscriptions == 12
+  assert resolved.rate_limit_topic_creations == 20
+  assert resolved.rate_limit_auth_failures == 5
+  assert resolved.rate_limit_attachment_mebibytes == 80
+  assert resolved.rate_limit_attachment_uploads == 8
   assert resolved.rate_limit_window_seconds == 30
 
-  let invalid = config.Config(..resolved, rate_limit_window_seconds: 0)
+  let shown = config.to_toml(resolved)
+  assert string.contains(shown, "subscriptions = 12")
+  assert string.contains(shown, "attachment_mebibytes = 80")
+
+  let invalid = config.Config(..resolved, rate_limit_auth_failures: 0)
   assert config.validate(invalid) == Error(config.InvalidRateLimit)
 }
 
@@ -253,4 +262,21 @@ pub fn logging_format_is_typed_and_configurable_test() {
     )
   assert resolved.log_format == config.JsonLogs
   assert string.contains(config.to_toml(resolved), "format = \"json\"")
+}
+
+pub fn custom_template_directory_is_typed_and_printed_test() {
+  let assert Ok(partial) =
+    config.parse_toml("[templates]\ndirectory = \"/srv/notify/templates\"\n")
+  let resolved =
+    config.resolve(
+      config.defaults(),
+      partial,
+      config.empty_partial(),
+      config.empty_partial(),
+    )
+  assert resolved.template_directory == "/srv/notify/templates"
+  assert string.contains(
+    config.to_toml(resolved),
+    "[templates]\ndirectory = \"/srv/notify/templates\"",
+  )
 }

@@ -152,7 +152,7 @@ pub fn token_command(action: String, args: List(String)) -> Nil {
           case
             access.create_token_for_username(
               control,
-              "tok_" <> next_id(),
+              fn() { "tok_" <> next_id() },
               username,
               label,
               expires,
@@ -696,12 +696,18 @@ fn is_config_value_flag(flag: String) -> Bool {
       "--retention-seconds",
       "--max-request-bytes",
       "--rate-limit-requests",
+      "--rate-limit-subscriptions",
+      "--rate-limit-topic-creations",
+      "--rate-limit-auth-failures",
+      "--rate-limit-attachment-mebibytes",
+      "--rate-limit-attachment-uploads",
       "--rate-limit-window",
       "--attachment-backend",
       "--attachment-dir",
       "--attachment-file-size",
       "--attachment-total-size",
       "--attachment-retention-seconds",
+      "--template-dir",
       "--s3-endpoint",
       "--s3-bucket",
       "--s3-region",
@@ -883,6 +889,7 @@ fn attachment_error(error: attachment_store.Error) -> String {
       "quota exceeded (" <> int.to_string(limit) <> " bytes)"
     attachment_store.NotFound -> "object not found"
     attachment_store.InvalidRange -> "invalid byte range"
+    attachment_store.InvalidPage -> "invalid attachment page"
     attachment_store.Unavailable(detail) -> detail
   }
 }
@@ -903,6 +910,7 @@ fn identity_failure(error: identity.Error) -> Nil {
     identity.NotFound -> fail("identity record not found")
     identity.InvalidSetupToken -> fail("invalid setup token")
     identity.SetupAlreadyComplete -> fail("setup is already complete")
+    identity.InvalidPage -> fail("identity page is invalid")
   }
 }
 

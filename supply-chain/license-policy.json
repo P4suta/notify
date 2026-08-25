@@ -1,0 +1,26 @@
+{
+  "allowed_licenses": [
+    "Apache-2.0",
+    "BSD-3-Clause",
+    "BSD-4-Clause",
+    "ISC",
+    "MIT",
+    "MPL-2.0"
+  ],
+  "notice_requirements": {
+    "pkg:hex/bcrypt@1.2.2": [
+      "Hunter Morris",
+      "This product includes software developed by Niels Provos.",
+      "Konstantin V. Sorokin"
+    ],
+    "pkg:hex/telemetry@1.4.2": [
+      "Chris McCord and Erlang Solutions"
+    ]
+  },
+  "project_notice_phrases": [
+    "ntfy is Copyright Philipp C. Heckel and contributors",
+    "No ntfy source code or web assets are included in Notify",
+    "not endorsed by or affiliated with the ntfy project"
+  ],
+  "schema_version": 1
+}

@@ -1,13 +1,50 @@
+---
 services:
+  ntfy-auth-init:
+    image: binwiederhier/ntfy:v2.27.0
+    entrypoint: /bin/sh
+    command:
+      - -ec
+      - timeout -s TERM 2 ntfy serve || test -s /var/lib/ntfy/auth.db
+    environment:
+      NTFY_AUTH_FILE: /var/lib/ntfy/auth.db
+      NTFY_AUTH_DEFAULT_ACCESS: read-write
+      NTFY_LISTEN_HTTP: :8089
+    volumes:
+      - ntfy-compat-auth:/var/lib/ntfy
+
+  ntfy-auth-setup:
+    image: binwiederhier/ntfy:v2.27.0
+    command:
+      - user
+      - add
+      - --role=admin
+      - --ignore-exists
+      - admin
+    environment:
+      NTFY_AUTH_FILE: /var/lib/ntfy/auth.db
+      NTFY_PASSWORD: compat-only-password
+    depends_on:
+      ntfy-auth-init:
+        condition: service_completed_successfully
+    volumes:
+      - ntfy-compat-auth:/var/lib/ntfy
+
   ntfy-v227:
     image: binwiederhier/ntfy:v2.27.0
     command: serve
+    depends_on:
+      ntfy-auth-setup:
+        condition: service_completed_successfully
     environment:
       NTFY_BASE_URL: http://127.0.0.1:18080
       NTFY_LISTEN_HTTP: :80
+      NTFY_AUTH_FILE: /var/lib/ntfy/auth.db
       NTFY_AUTH_DEFAULT_ACCESS: read-write
     ports:
       - "18080:80"
+    volumes:
+      - ntfy-compat-auth:/var/lib/ntfy
 
   notify-setup:
     build: .
@@ -49,4 +86,5 @@ services:
       - notify-compat-data:/data
 
 volumes:
+  ntfy-compat-auth:
   notify-compat-data:

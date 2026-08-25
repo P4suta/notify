@@ -1,6 +1,6 @@
 import gleam/bit_array
 import gleam/list
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleam/string
 import notify/delivery
 import notify/delivery/memory
@@ -37,11 +37,13 @@ pub fn lease_expiry_retry_and_dead_letter_contract_test() {
     outbox.fail("job-1", "worker-b", 131, "upstream unavailable", 2, 10)
   assert retry.state == delivery.Pending
   assert retry.attempts == 1
-  assert retry.available_at == 141
-  assert outbox.claim(delivery.MobileRelay, "worker-a", 140, 30, 10) == Ok([])
+  let retry_at = 131 + delivery.retry_delay_with_jitter(10, 1, "job-1")
+  assert retry.available_at == retry_at
+  assert outbox.claim(delivery.MobileRelay, "worker-a", retry_at - 1, 30, 10)
+    == Ok([])
 
   let assert Ok([second]) =
-    outbox.claim(delivery.MobileRelay, "worker-a", 141, 30, 10)
+    outbox.claim(delivery.MobileRelay, "worker-a", retry_at, 30, 10)
   let assert Ok(dead) =
     outbox.fail(second.id, "worker-a", 142, "still unavailable", 2, 10)
   assert dead.state == delivery.DeadLetter
@@ -70,6 +72,94 @@ pub fn sqlite_outbox_implements_lease_and_completion_contract_test() {
   assert outbox.complete(claimed.id, "sqlite-worker") == Ok(Nil)
   assert outbox.list(delivery.MobileRelay) == Ok([])
   assert outbox.health() == Ok(Nil)
+}
+
+fn management_contract(outbox: delivery.Store) {
+  let assert Ok(_) = outbox.enqueue(pending("managed-job"))
+  let assert Ok([claimed]) =
+    outbox.claim(delivery.MobileRelay, "worker", 100, 30, 1)
+  let assert Ok(dead) =
+    outbox.fail(claimed.id, "worker", 101, "permanent failure", 1, 10)
+  assert dead.state == delivery.DeadLetter
+
+  let assert Ok(before) = outbox.stats()
+  assert before.mobile_relay_dead_letter == 1
+  assert before.mobile_relay_pending == 0
+
+  let assert Ok(requeued) = outbox.requeue("managed-job", 200)
+  assert requeued.state == delivery.Pending
+  assert requeued.attempts == 0
+  assert requeued.available_at == 200
+  assert requeued.lease_owner == None
+  assert requeued.lease_until == None
+  assert requeued.last_error == Some("permanent failure")
+  assert outbox.purge("managed-job") == Error(delivery.Conflict)
+
+  let assert Ok([retried]) =
+    outbox.claim(delivery.MobileRelay, "worker", 200, 30, 1)
+  let assert Ok(_) =
+    outbox.fail(retried.id, "worker", 201, "failed again", 1, 10)
+  assert outbox.purge("managed-job") == Ok(Nil)
+  assert outbox.purge("managed-job") == Error(delivery.NotFound)
+  let assert Ok(after) = outbox.stats()
+  assert after.mobile_relay_dead_letter == 0
+}
+
+pub fn memory_outbox_supports_manual_requeue_purge_and_stats_test() {
+  let assert Ok(outbox) = memory.start()
+  management_contract(outbox)
+}
+
+pub fn sqlite_outbox_supports_manual_requeue_purge_and_stats_test() {
+  let assert Ok(outbox) = sqlite.start(":memory:")
+  management_contract(outbox)
+}
+
+fn management_page_contract(outbox: delivery.Store) {
+  let fixtures = [
+    delivery.NewJob(..pending("job-c"), kind: delivery.MobileRelay),
+    delivery.NewJob(..pending("job-a"), kind: delivery.MobileRelay),
+    delivery.NewJob(..pending("job-b"), kind: delivery.WebPush),
+  ]
+  list.each(fixtures, fn(job) {
+    let assert Ok(_) = outbox.enqueue(job)
+  })
+
+  let assert Ok(delivery.Page([first, second], True)) =
+    outbox.page(None, None, 2)
+  assert [first.id, second.id] == ["job-a", "job-b"]
+  let assert Ok(delivery.Page([last], False)) =
+    outbox.page(None, Some(second.id), 2)
+  assert last.id == "job-c"
+
+  let assert Ok(delivery.Page([first_relay], True)) =
+    outbox.page(Some(delivery.MobileRelay), None, 1)
+  assert first_relay.id == "job-a"
+  let assert Ok(delivery.Page([second_relay], False)) =
+    outbox.page(Some(delivery.MobileRelay), Some(first_relay.id), 1)
+  assert second_relay.id == "job-c"
+
+  assert outbox.page(None, None, 0) == Error(delivery.InvalidPage)
+  assert outbox.page(None, None, 101) == Error(delivery.InvalidPage)
+}
+
+pub fn memory_outbox_management_pages_are_bounded_keysets_test() {
+  let assert Ok(outbox) = memory.start()
+  management_page_contract(outbox)
+}
+
+pub fn sqlite_outbox_management_pages_are_bounded_keysets_test() {
+  let assert Ok(outbox) = sqlite.start(":memory:")
+  management_page_contract(outbox)
+}
+
+pub fn retry_backoff_has_bounded_deterministic_jitter_test() {
+  let first = delivery.retry_delay_with_jitter(10, 1, "job-a")
+  assert first == delivery.retry_delay_with_jitter(10, 1, "job-a")
+  assert first >= 5
+  assert first <= 10
+  assert delivery.retry_delay_with_jitter(10, 20, "job-a") <= 3600
+  assert delivery.retry_delay_with_jitter(10, 20, "job-a") >= 1800
 }
 
 pub fn relay_payload_contains_no_message_content_or_topic_url_test() {

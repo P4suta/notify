@@ -1,4 +1,7 @@
+import gleam/int
+import gleam/list
 import gleam/option.{type Option}
+import gleam/string
 
 pub type Kind {
   WebPush
@@ -40,11 +43,42 @@ pub type Job {
   )
 }
 
+pub type Summary {
+  Summary(
+    id: String,
+    kind: Kind,
+    message_id: String,
+    topic_hash: String,
+    state: State,
+    attempts: Int,
+    available_at: Int,
+    lease_owner: Option(String),
+    lease_until: Option(Int),
+    last_error: Option(String),
+  )
+}
+
+pub type Page(a) {
+  Page(items: List(a), has_more: Bool)
+}
+
 pub type Error {
   NotFound
   Conflict
   LeaseLost
+  InvalidPage
   Unavailable(String)
+}
+
+pub type Stats {
+  Stats(
+    webpush_pending: Int,
+    webpush_leased: Int,
+    webpush_dead_letter: Int,
+    mobile_relay_pending: Int,
+    mobile_relay_leased: Int,
+    mobile_relay_dead_letter: Int,
+  )
 }
 
 pub type Store {
@@ -53,7 +87,11 @@ pub type Store {
     claim: fn(Kind, String, Int, Int, Int) -> Result(List(Job), Error),
     complete: fn(String, String) -> Result(Nil, Error),
     fail: fn(String, String, Int, String, Int, Int) -> Result(Job, Error),
+    requeue: fn(String, Int) -> Result(Job, Error),
+    purge: fn(String) -> Result(Nil, Error),
     list: fn(Kind) -> Result(List(Job), Error),
+    page: fn(Option(Kind), Option(String), Int) -> Result(Page(Summary), Error),
+    stats: fn() -> Result(Stats, Error),
     health: fn() -> Result(Nil, Error),
   )
 }
@@ -75,8 +113,87 @@ pub fn job_from_new(job: NewJob) -> Job {
   )
 }
 
+pub fn summary(job: Job) -> Summary {
+  Summary(
+    id: job.id,
+    kind: job.kind,
+    message_id: job.message_id,
+    topic_hash: job.topic_hash,
+    state: job.state,
+    attempts: job.attempts,
+    available_at: job.available_at,
+    lease_owner: job.lease_owner,
+    lease_until: job.lease_until,
+    last_error: job.last_error,
+  )
+}
+
 pub fn retry_delay(base_seconds: Int, attempts: Int) -> Int {
-  min(base_seconds * power_of_two(attempts - 1), 3600)
+  let base = int.max(1, base_seconds)
+  let exponent = attempts - 1 |> int.max(0) |> int.min(12)
+  min(base * power_of_two(exponent), 3600)
+}
+
+/// Equal jitter keeps retries from synchronising across nodes while retaining
+/// a lower bound of half the exponential delay. The stable seed makes the
+/// persisted schedule reproducible after a transaction retry.
+pub fn retry_delay_with_jitter(
+  base_seconds: Int,
+  attempts: Int,
+  seed: String,
+) -> Int {
+  let ceiling = retry_delay(base_seconds, attempts)
+  let assert Ok(half) = int.floor_divide(ceiling, 2)
+  let floor = int.max(1, half)
+  let span = ceiling - floor + 1
+  let hash =
+    string.to_utf_codepoints(seed)
+    |> list.fold(attempts, fn(accumulator, codepoint) {
+      let assert Ok(reduced) =
+        int.modulo(
+          accumulator * 33 + string.utf_codepoint_to_int(codepoint),
+          2_147_483_647,
+        )
+      reduced
+    })
+  let assert Ok(offset) = int.modulo(hash, span)
+  floor + offset
+}
+
+pub fn empty_stats() -> Stats {
+  Stats(0, 0, 0, 0, 0, 0)
+}
+
+pub fn count(jobs: List(Job)) -> Stats {
+  jobs
+  |> list.fold(empty_stats(), fn(statistics, job) {
+    case job.kind, job.state {
+      WebPush, Pending ->
+        Stats(..statistics, webpush_pending: statistics.webpush_pending + 1)
+      WebPush, Leased ->
+        Stats(..statistics, webpush_leased: statistics.webpush_leased + 1)
+      WebPush, DeadLetter ->
+        Stats(
+          ..statistics,
+          webpush_dead_letter: statistics.webpush_dead_letter + 1,
+        )
+      MobileRelay, Pending ->
+        Stats(
+          ..statistics,
+          mobile_relay_pending: statistics.mobile_relay_pending + 1,
+        )
+      MobileRelay, Leased ->
+        Stats(
+          ..statistics,
+          mobile_relay_leased: statistics.mobile_relay_leased + 1,
+        )
+      MobileRelay, DeadLetter ->
+        Stats(
+          ..statistics,
+          mobile_relay_dead_letter: statistics.mobile_relay_dead_letter + 1,
+        )
+    }
+  })
 }
 
 fn power_of_two(exponent: Int) -> Int {

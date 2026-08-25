@@ -1,7 +1,9 @@
 import gleam/dynamic/decode
 import gleam/erlang/process.{type Subject}
+import gleam/int
 import gleam/json
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
 import notify/core/message.{type Message}
@@ -19,6 +21,7 @@ type Command {
     Subject(Result(Message, storage.Error)),
   )
   RunQuery(Query, Subject(Result(List(Message), storage.Error)))
+  HasAttachment(topic.Topic, String, Subject(Result(Bool, storage.Error)))
   ReleaseDue(Int, Int, Subject(Result(List(Message), storage.Error)))
   CleanupExpired(Int, Subject(Result(Int, storage.Error)))
   Stats(Subject(Result(storage.Stats, storage.Error)))
@@ -64,6 +67,8 @@ CREATE TABLE IF NOT EXISTS event_log (
 
 CREATE INDEX IF NOT EXISTS event_log_topic_sequence
   ON event_log(topic, sequence);
+CREATE INDEX IF NOT EXISTS event_log_message_sequence
+  ON event_log(message_id, sequence);
 
 CREATE TABLE IF NOT EXISTS delivery_outbox (
   id TEXT PRIMARY KEY,
@@ -84,6 +89,62 @@ CREATE INDEX IF NOT EXISTS delivery_outbox_claim
   ON delivery_outbox(kind, state, available_at, lease_until, created_at);
 
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
+"
+
+const query_page_size = 256
+
+const supported_schema_version = 2
+
+const schema_recovery = "the source was not modified; for an ntfy database run `notify migrate ntfy --dry-run` and import into a new Notify database, or move this file aside before reset"
+
+const page_query = "
+SELECT m.position, m.payload, m.scheduled
+FROM messages AS m
+WHERE m.position > ?
+  AND m.topic IN (SELECT value FROM json_each(?))
+  AND COALESCE(json_extract(m.payload, '$._notify_cached'), 1) = 1
+  AND (? = 1 OR m.scheduled = 0)
+  AND (? = 0 OR m.time >= ?)
+  AND (? = 0 OR m.id = ?)
+  AND (? = 0 OR json_extract(m.payload, '$.message') = ?)
+  AND (? = 0 OR json_extract(m.payload, '$.title') = ?)
+  AND (
+    ? = 0
+    OR COALESCE(json_extract(m.payload, '$.priority'), 3) IN (
+      SELECT CAST(value AS INTEGER) FROM json_each(?)
+    )
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM json_each(?) AS required_tag
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM json_each(COALESCE(json_extract(m.payload, '$.tags'), '[]')) AS actual_tag
+      WHERE actual_tag.value = required_tag.value
+    )
+  )
+  AND (
+    ? = 0
+    OR m.position = (
+      SELECT MAX(latest.position)
+      FROM messages AS latest
+      WHERE latest.topic = m.topic
+        AND latest.scheduled = 0
+        AND COALESCE(json_extract(latest.payload, '$._notify_cached'), 1) = 1
+    )
+  )
+ORDER BY m.position ASC
+LIMIT ?
+"
+
+const after_id_cursor_query = "
+SELECT position
+FROM messages
+WHERE id = ?
+  AND topic IN (SELECT value FROM json_each(?))
+  AND COALESCE(json_extract(payload, '$._notify_cached'), 1) = 1
+  AND (? = 1 OR scheduled = 0)
+LIMIT 1
 "
 
 pub type Adapter {
@@ -138,6 +199,11 @@ fn start_actor(connection: Connection) -> Result(Adapter, storage.Error) {
       query: fn(query) {
         process.call(subject, 10_000, fn(reply) { RunQuery(query, reply) })
       },
+      has_attachment: fn(topic, key) {
+        process.call(subject, 10_000, fn(reply) {
+          HasAttachment(topic, key, reply)
+        })
+      },
       release_due: fn(now, limit) {
         process.call(subject, 10_000, fn(reply) {
           ReleaseDue(now, limit, reply)
@@ -174,6 +240,10 @@ fn handle(
       process.send(reply, run_query(connection, query))
       actor.continue(connection)
     }
+    HasAttachment(topic, key, reply) -> {
+      process.send(reply, has_attachment(connection, topic, key))
+      actor.continue(connection)
+    }
     ReleaseDue(now, limit, reply) -> {
       process.send(reply, release_due(connection, now, limit))
       actor.continue(connection)
@@ -198,7 +268,133 @@ fn handle(
 }
 
 fn migrate(connection: Connection) -> Result(Nil, storage.Error) {
+  use _ <- result.try(validate_existing_schema(connection))
   sqlight.exec(migration, connection) |> result.map_error(map_error)
+}
+
+fn validate_existing_schema(
+  connection: Connection,
+) -> Result(Nil, storage.Error) {
+  use tables <- result.try(user_tables(connection))
+  case tables {
+    [] -> Ok(Nil)
+    _ ->
+      case list.contains(tables, "schema_migrations") {
+        False ->
+          Error(storage.UnsupportedSchema(
+            "unrecognised SQLite schema; " <> schema_recovery,
+          ))
+        True -> {
+          use migration_columns <- result.try(table_columns(
+            connection,
+            "schema_migrations",
+          ))
+          use _ <- result.try(
+            require_columns("schema_migrations", migration_columns, [
+              "version",
+              "applied_at",
+            ]),
+          )
+          use version <- result.try(schema_version(connection))
+          case version > supported_schema_version {
+            True ->
+              Error(storage.UnsupportedSchema(
+                "SQLite schema version "
+                <> int.to_string(version)
+                <> " is newer than this Notify binary supports; "
+                <> schema_recovery,
+              ))
+            False ->
+              case list.contains(tables, "messages") {
+                False -> Ok(Nil)
+                True -> {
+                  use columns <- result.try(table_columns(
+                    connection,
+                    "messages",
+                  ))
+                  require_columns("messages", columns, [
+                    "position",
+                    "id",
+                    "topic",
+                    "time",
+                    "expires",
+                    "scheduled",
+                    "sequence_id",
+                    "payload",
+                  ])
+                }
+              }
+          }
+        }
+      }
+  }
+}
+
+fn user_tables(connection: Connection) -> Result(List(String), storage.Error) {
+  sqlight.query(
+    "SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+    on: connection,
+    with: [],
+    expecting: {
+      use name <- decode.field(0, decode.string)
+      decode.success(name)
+    },
+  )
+  |> result.map_error(map_error)
+}
+
+fn table_columns(
+  connection: Connection,
+  table: String,
+) -> Result(List(String), storage.Error) {
+  let statement = case table {
+    "schema_migrations" -> "PRAGMA table_info(schema_migrations)"
+    _ -> "PRAGMA table_info(messages)"
+  }
+  sqlight.query(statement, on: connection, with: [], expecting: {
+    use name <- decode.field(1, decode.string)
+    decode.success(name)
+  })
+  |> result.map_error(map_error)
+}
+
+fn schema_version(connection: Connection) -> Result(Int, storage.Error) {
+  use versions <- result.try(
+    sqlight.query(
+      "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",
+      on: connection,
+      with: [],
+      expecting: {
+        use version <- decode.field(0, decode.int)
+        decode.success(version)
+      },
+    )
+    |> result.map_error(map_error),
+  )
+  case versions {
+    [version] -> Ok(version)
+    _ ->
+      Error(storage.UnsupportedSchema(
+        "schema_migrations has no readable version; " <> schema_recovery,
+      ))
+  }
+}
+
+fn require_columns(
+  table: String,
+  actual: List(String),
+  required: List(String),
+) -> Result(Nil, storage.Error) {
+  case list.all(required, fn(column) { list.contains(actual, column) }) {
+    True -> Ok(Nil)
+    False ->
+      Error(storage.UnsupportedSchema(
+        "SQLite table `"
+        <> table
+        <> "` does not match the Notify storage contract; "
+        <> schema_recovery,
+      ))
+  }
 }
 
 fn save(
@@ -338,20 +534,23 @@ fn do_release_due(
     |> result.map_error(map_error),
   )
   list.try_map(rows, fn(row) {
-    use _ <- result.try(
-      sqlight.query(
-        "UPDATE messages SET scheduled = 0 WHERE position = ? AND scheduled = 1",
-        on: connection,
-        with: [sqlight.int(row.0)],
-        expecting: decode.dynamic,
-      )
-      |> result.map_error(map_error),
-    )
     use decoded <- result.try(
       json.parse(row.1, message_json.decoder())
       |> result.map_error(fn(_) { storage.Corrupt("invalid message payload") }),
     )
-    Ok(message.Message(..decoded, scheduled: False))
+    let released = message.Message(..decoded, scheduled: False)
+    let payload = message_json.encode_storage(released) |> json.to_string
+    use _ <- result.try(
+      sqlight.query(
+        "UPDATE messages SET scheduled = 0, payload = ? WHERE position = ? AND scheduled = 1",
+        on: connection,
+        with: [sqlight.text(payload), sqlight.int(row.0)],
+        expecting: decode.dynamic,
+      )
+      |> result.map_error(map_error),
+    )
+    use _ <- result.try(insert_event(connection, released, payload))
+    Ok(released)
   })
 }
 
@@ -387,15 +586,56 @@ fn run_query(
   connection: Connection,
   selection: Query,
 ) -> Result(List(Message), storage.Error) {
+  case selection.since {
+    storage.NoneSince -> Ok([])
+    _ -> {
+      use cursor <- result.try(initial_query_cursor(connection, selection))
+      query_pages(connection, selection, cursor, [])
+    }
+  }
+}
+
+fn initial_query_cursor(
+  connection: Connection,
+  selection: Query,
+) -> Result(Int, storage.Error) {
+  case selection.since {
+    storage.AfterId(id) ->
+      sqlight.query(
+        after_id_cursor_query,
+        on: connection,
+        with: [
+          sqlight.text(id),
+          sqlight.text(json_strings(topic.many_to_strings(selection.topics))),
+          sqlight.bool(selection.include_scheduled),
+        ],
+        expecting: {
+          use position <- decode.field(0, decode.int)
+          decode.success(position)
+        },
+      )
+      |> result.map(fn(rows) { rows |> list.first |> result.unwrap(0) })
+      |> result.map_error(map_error)
+    _ -> Ok(0)
+  }
+}
+
+fn query_pages(
+  connection: Connection,
+  selection: Query,
+  cursor: Int,
+  pages: List(List(Message)),
+) -> Result(List(Message), storage.Error) {
   use rows <- result.try(
     sqlight.query(
-      "SELECT payload, scheduled FROM messages ORDER BY position ASC",
+      page_query,
       on: connection,
-      with: [],
+      with: page_parameters(selection, cursor),
       expecting: {
-        use payload <- decode.field(0, decode.string)
-        use scheduled <- decode.field(1, decode.int)
-        decode.success(#(payload, scheduled != 0))
+        use position <- decode.field(0, decode.int)
+        use payload <- decode.field(1, decode.string)
+        use scheduled <- decode.field(2, decode.int)
+        decode.success(#(position, payload, scheduled != 0))
       },
     )
     |> result.map_error(map_error),
@@ -403,13 +643,74 @@ fn run_query(
   use messages <- result.try(
     list.try_map(rows, fn(row) {
       use decoded <- result.try(
-        json.parse(row.0, message_json.decoder())
+        json.parse(row.1, message_json.decoder())
         |> result.map_error(fn(_) { storage.Corrupt("invalid message payload") }),
       )
-      Ok(message.Message(..decoded, scheduled: row.1))
+      Ok(message.Message(..decoded, scheduled: row.2))
     }),
   )
-  Ok(storage.apply_query(messages, selection))
+  let pages = [messages, ..pages]
+  case list.length(rows) < query_page_size {
+    True -> Ok(pages |> list.reverse |> list.flatten)
+    False -> {
+      let next_cursor =
+        rows
+        |> list.last
+        |> result.map(fn(row) { row.0 })
+        |> result.unwrap(cursor)
+      query_pages(connection, selection, next_cursor, pages)
+    }
+  }
+}
+
+fn page_parameters(selection: Query, cursor: Int) -> List(sqlight.Value) {
+  let criteria = selection.criteria
+  let #(after_time_enabled, after_time) = case selection.since {
+    storage.AfterTime(time) -> #(True, time)
+    _ -> #(False, 0)
+  }
+  [
+    sqlight.int(cursor),
+    sqlight.text(json_strings(topic.many_to_strings(selection.topics))),
+    sqlight.bool(selection.include_scheduled),
+    sqlight.bool(after_time_enabled),
+    sqlight.int(after_time),
+    sqlight.bool(is_some(criteria.id)),
+    sqlight.text(optional_string(criteria.id)),
+    sqlight.bool(is_some(criteria.message)),
+    sqlight.text(optional_string(criteria.message)),
+    sqlight.bool(is_some(criteria.title)),
+    sqlight.text(optional_string(criteria.title)),
+    sqlight.bool(criteria.priorities != []),
+    sqlight.text(
+      json_ints(list.map(criteria.priorities, message.priority_to_int)),
+    ),
+    sqlight.text(json_strings(criteria.tags)),
+    sqlight.bool(selection.since == storage.Latest),
+    sqlight.int(query_page_size),
+  ]
+}
+
+fn json_strings(values: List(String)) -> String {
+  json.array(values, json.string) |> json.to_string
+}
+
+fn json_ints(values: List(Int)) -> String {
+  json.array(values, json.int) |> json.to_string
+}
+
+fn is_some(value: Option(a)) -> Bool {
+  case value {
+    Some(_) -> True
+    None -> False
+  }
+}
+
+fn optional_string(value: Option(String)) -> String {
+  case value {
+    Some(value) -> value
+    None -> ""
+  }
 }
 
 fn health(connection: Connection) -> Result(Nil, storage.Error) {
@@ -419,6 +720,35 @@ fn health(connection: Connection) -> Result(Nil, storage.Error) {
   })
   |> result.map(fn(_) { Nil })
   |> result.map_error(map_error)
+}
+
+fn has_attachment(
+  connection: Connection,
+  attached_topic: topic.Topic,
+  key: String,
+) -> Result(Bool, storage.Error) {
+  let path = "/file/" <> topic.to_string(attached_topic) <> "/" <> key
+  use rows <- result.try(
+    sqlight.query(
+      "SELECT EXISTS(SELECT 1 FROM messages WHERE topic = ? AND (instr(COALESCE(json_extract(payload, '$.attachment.url'), ''), ? || '/') > 0 OR substr(COALESCE(json_extract(payload, '$.attachment.url'), ''), -length(?)) = ?))",
+      on: connection,
+      with: [
+        sqlight.text(topic.to_string(attached_topic)),
+        sqlight.text(path),
+        sqlight.text(path),
+        sqlight.text(path),
+      ],
+      expecting: {
+        use found <- decode.field(0, decode.int)
+        decode.success(found != 0)
+      },
+    )
+    |> result.map_error(map_error),
+  )
+  case rows {
+    [found] -> Ok(found)
+    _ -> Error(storage.Corrupt("attachment reference query returned no row"))
+  }
 }
 
 fn cleanup_expired(

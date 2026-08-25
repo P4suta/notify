@@ -6,3 +6,57 @@
 {"name":"json_poll","method":"GET","path":"/__TOPIC___json/json?poll=1","body":"","content_type":"","normalizer":"ndjson"}
 {"name":"webhook_alias","method":"GET","path":"/__TOPIC___hook/trigger?message=triggered&title=Hook","body":"","content_type":"","normalizer":"message"}
 {"name":"invalid_topic","method":"POST","path":"/invalid.topic","body":"bad","content_type":"text/plain","normalizer":"error"}
+{"name":"header_precedence_publish","method":"POST","path":"/__TOPIC___precedence?title=query-title&message=query-message&priority=low","body":"body-message","content_type":"text/plain","headers":{"X-Title":"header-title","X-Message":"header-message","X-Priority":"high"},"normalizer":"message"}
+{"name":"header_precedence_poll","method":"GET","path":"/__TOPIC___precedence/json?poll=1","body":"","content_type":"","normalizer":"ndjson"}
+{"name":"actions_publish","method":"POST","path":"/__TOPIC___actions","body":"act now","content_type":"text/plain","headers":{"X-Actions":"view, Open, https://example.test, clear=true; copy, Copy code, 123456"},"normalizer":"message"}
+{"name":"actions_poll","method":"GET","path":"/__TOPIC___actions/json?poll=1","body":"","content_type":"","normalizer":"ndjson"}
+{"name":"raw_poll","method":"GET","path":"/__TOPIC__/raw?poll=1","body":"","content_type":"","normalizer":"raw"}
+{"name":"sse_poll","method":"GET","path":"/__TOPIC__/sse?poll=1","body":"","content_type":"","normalizer":"sse"}
+{"name":"multi_topic_poll","method":"GET","path":"/__TOPIC__,__TOPIC___meta/json?poll=1","body":"","content_type":"","normalizer":"ndjson"}
+{"name":"latest_poll","method":"GET","path":"/__TOPIC__/json?poll=1&since=latest","body":"","content_type":"","normalizer":"ndjson"}
+{"name":"invalid_since","method":"GET","path":"/__TOPIC__/json?poll=1&since=INVALID","body":"","content_type":"","normalizer":"error"}
+{"name":"invalid_priority","method":"POST","path":"/__TOPIC___bad_priority","body":"bad","content_type":"text/plain","headers":{"X-Priority":"impossible"},"normalizer":"error"}
+{"name":"rfc_9218_priority_falls_back_to_query","method":"POST","path":"/__TOPIC___rfc_priority?priority=high","body":"browser priority","content_type":"text/plain","headers":{"Priority":"u=4, i"},"normalizer":"message"}
+{"name":"rfc_9218_shape_is_not_ignored_for_x_priority","method":"POST","path":"/__TOPIC___rfc_x_priority","body":"bad","content_type":"text/plain","headers":{"X-Priority":"u=4"},"normalizer":"error"}
+{"name":"invalid_json","method":"POST","path":"/","body":"{not-json","content_type":"application/json","normalizer":"error"}
+{"name":"delay_unparseable","method":"POST","path":"/__TOPIC___delay_parse","body":"later","content_type":"text/plain","headers":{"X-Delay":"eventually"},"normalizer":"error"}
+{"name":"delay_too_short","method":"POST","path":"/__TOPIC___delay_short","body":"later","content_type":"text/plain","headers":{"X-Delay":"9s"},"normalizer":"error"}
+{"name":"delay_too_long","method":"POST","path":"/__TOPIC___delay_long","body":"later","content_type":"text/plain","headers":{"X-Delay":"259201s"},"normalizer":"error"}
+{"name":"cors_options","method":"OPTIONS","path":"/__TOPIC__","body":"","content_type":"","normalizer":"empty","response_headers":["Access-Control-Allow-Methods","Access-Control-Allow-Origin","Access-Control-Allow-Headers"]}
+{"name":"invalid_bearer","method":"GET","path":"/__TOPIC__/json?poll=1","body":"","content_type":"","headers":{"Authorization":"Bearer invalid-token"},"normalizer":"error"}
+{"name":"account_anonymous","method":"GET","path":"/v1/account","body":"","content_type":"","normalizer":"account"}
+{"name":"account_basic","method":"GET","path":"/v1/account","body":"","content_type":"","headers":{"Authorization":"Basic YWRtaW46Y29tcGF0LW9ubHktcGFzc3dvcmQ="},"normalizer":"account"}
+{"name":"account_login","method":"POST","path":"/v1/account/login","body":"","content_type":"","headers":{"Authorization":"Basic YWRtaW46Y29tcGF0LW9ubHktcGFzc3dvcmQ="},"normalizer":"login","capture":"login_token"}
+{"name":"account_bearer","method":"GET","path":"/v1/account","body":"","content_type":"","headers":{"Authorization":"Bearer __CAPTURE_login_token__"},"normalizer":"account"}
+{"name":"account_token_create","method":"POST","path":"/v1/account/token","body":"{\"label\":\"phone\"}","content_type":"application/json","headers":{"Authorization":"Bearer __CAPTURE_login_token__"},"normalizer":"issued_token","capture":"api_token"}
+{"name":"account_after_token_create","method":"GET","path":"/v1/account","body":"","content_type":"","headers":{"Authorization":"Bearer __CAPTURE_login_token__"},"normalizer":"account"}
+{"name":"account_token_revoke","method":"DELETE","path":"/v1/account/token","body":"","content_type":"","headers":{"Authorization":"Bearer __CAPTURE_login_token__","X-Token":"__CAPTURE_api_token__"},"normalizer":"json"}
+{"name":"account_after_token_revoke","method":"GET","path":"/v1/account","body":"","content_type":"","headers":{"Authorization":"Bearer __CAPTURE_login_token__"},"normalizer":"account"}
+{"name":"account_revoked_token","method":"GET","path":"/v1/account","body":"","content_type":"","headers":{"Authorization":"Bearer __CAPTURE_api_token__"},"normalizer":"error"}
+{"name":"account_wrong_login","method":"POST","path":"/v1/account/login","body":"","content_type":"","headers":{"Authorization":"Basic YWRtaW46d3JvbmctcGFzc3dvcmQ="},"normalizer":"error"}
+{"name":"topic_auth_basic","method":"GET","path":"/__TOPIC___authenticated/auth","body":"","content_type":"","headers":{"Authorization":"Basic YWRtaW46Y29tcGF0LW9ubHktcGFzc3dvcmQ="},"normalizer":"json"}
+{"name":"authenticated_publish","method":"POST","path":"/__TOPIC___authenticated","body":"authenticated message","content_type":"text/plain","headers":{"Authorization":"Basic YWRtaW46Y29tcGF0LW9ubHktcGFzc3dvcmQ="},"normalizer":"message"}
+{"name":"authenticated_poll","method":"GET","path":"/__TOPIC___authenticated/json?poll=1","body":"","content_type":"","headers":{"Authorization":"Basic YWRtaW46Y29tcGF0LW9ubHktcGFzc3dvcmQ="},"normalizer":"ndjson"}
+{"name":"sequence_path_publish","method":"POST","path":"/__TOPIC___sequence/job_42-nightly","body":"download started","content_type":"text/plain","normalizer":"message"}
+{"name":"sequence_path_precedence","method":"POST","path":"/__TOPIC___sequence/job_42-nightly","body":"download 25%","content_type":"text/plain","headers":{"X-Sequence-ID":"ignored-header-sequence"},"normalizer":"message"}
+{"name":"sequence_x_header_update","method":"POST","path":"/__TOPIC___sequence","body":"download 40%","content_type":"text/plain","headers":{"X-Sequence-ID":"job_42-nightly"},"normalizer":"message"}
+{"name":"sequence_header_name_alias_update","method":"POST","path":"/__TOPIC___sequence","body":"download 45%","content_type":"text/plain","headers":{"Sequence-ID":"job_42-nightly"},"normalizer":"message"}
+{"name":"sequence_header_alias_update","method":"POST","path":"/__TOPIC___sequence","body":"download 50%","content_type":"text/plain","headers":{"SID":"job_42-nightly"},"normalizer":"message"}
+{"name":"sequence_query_update","method":"POST","path":"/__TOPIC___sequence?sequence-id=job_42-nightly","body":"download complete","content_type":"text/plain","normalizer":"message"}
+{"name":"sequence_query_short_alias_update","method":"POST","path":"/__TOPIC___sequence?sid=job_42-nightly","body":"checksum complete","content_type":"text/plain","normalizer":"message"}
+{"name":"sequence_json_publish","method":"POST","path":"/","body":"{\"topic\":\"__TOPIC___sequence_json\",\"message\":\"json sequence\",\"sequence_id\":\"json-sequence_42\"}","content_type":"application/json","normalizer":"message"}
+{"name":"sequence_clear_put","method":"PUT","path":"/__TOPIC___sequence/job_42-nightly/clear","body":"","content_type":"","normalizer":"message"}
+{"name":"sequence_read_get_alias","method":"GET","path":"/__TOPIC___sequence/job_42-nightly/read","body":"","content_type":"","normalizer":"message"}
+{"name":"sequence_delete","method":"DELETE","path":"/__TOPIC___sequence/job_42-nightly","body":"","content_type":"","normalizer":"message"}
+{"name":"sequence_delete_get_alias","method":"GET","path":"/__TOPIC___sequence/job_42-nightly/delete","body":"","content_type":"","normalizer":"message"}
+{"name":"sequence_poll","method":"GET","path":"/__TOPIC___sequence/json?poll=1","body":"","content_type":"","normalizer":"ndjson"}
+{"name":"invalid_sequence_header_length","method":"POST","path":"/__TOPIC___invalid_sequence_header_length","body":"bad sequence","content_type":"text/plain","headers":{"X-Sequence-ID":"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},"normalizer":"error"}
+{"name":"invalid_sequence_header_charset","method":"POST","path":"/__TOPIC___invalid_sequence_header_charset","body":"bad sequence","content_type":"text/plain","headers":{"Sequence-ID":"invalid*sequence"},"normalizer":"error"}
+{"name":"invalid_sequence_path_length","method":"DELETE","path":"/__TOPIC___invalid_sequence_path/xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx","body":"","content_type":"","normalizer":"error"}
+{"name":"invalid_sequence_path_charset","method":"DELETE","path":"/__TOPIC___invalid_sequence_path/invalid*sequence","body":"","content_type":"","normalizer":"error"}
+{"name":"inline_template_publish","method":"POST","path":"/__TOPIC___template","body":"{\"service\":\"database\",\"severity\":\"high\"}","content_type":"application/json","headers":{"Template":"yes","Message":"{{.service | upper}} is down","Title":"Alert: {{.service}}","Priority":"{{.severity}}"},"normalizer":"message"}
+{"name":"inline_template_default_message","method":"POST","path":"/__TOPIC___template_default","body":"{\"service\":\"database\"}","content_type":"application/json","headers":{"Template":"yes","Title":"Alert: {{.service}}"},"normalizer":"message"}
+{"name":"template_safe_function_values","method":"POST","path":"/__TOPIC___template_functions","body":"{\"n\":1,\"obj\":{\"b\":2,\"a\":1},\"list\":[3,1,2],\"html\":\"<tag>&\"}","content_type":"application/json","headers":{"Template":"yes","Message":"{{typeOf .n}}|{{kindOf .n}}|{{toPrettyJSON .obj}}|{{round 1.25 1 0.6}}|{{keys .obj | sortAlpha | join \",\"}}|{{b32enc \"hi\"}}|{{toJSON .html}}|{{toRawJSON .html}}"},"normalizer":"message"}
+{"name":"root_inline_template_publish","method":"POST","path":"/","body":"{\"topic\":\"__TOPIC___root_template\",\"message\":\"{\\\"name\\\":\\\"api\\\"}\"}","content_type":"application/json","headers":{"Tpl":"1","M":"{{.name}} failed"},"normalizer":"message"}
+{"name":"template_disallowed","method":"POST","path":"/__TOPIC___template_disallowed","body":"{}","content_type":"application/json","headers":{"Template":"yes","Message":"{{call .fn}}"},"normalizer":"error"}
+{"name":"grafana_template","method":"POST","path":"/__TOPIC___grafana","body":"{\"status\":\"resolved\",\"title\":\"Database recovered\",\"message\":\"Connections are healthy\"}","content_type":"application/json","headers":{"Template":"grafana","Priority":"{{.severity}}"},"normalizer":"message"}
