@@ -116,7 +116,7 @@ pub fn stored_message_round_trips_actions_and_attachment_test() {
           headers: [#("authorization", "Bearer test")],
           body: Some("{\"ok\":true}"),
           clear: False,
-          id: None,
+          id: Some("ActionHttp01"),
         ),
         message.CopyAction(
           label: "Copy",

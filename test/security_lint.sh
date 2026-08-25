@@ -5,7 +5,7 @@ set -euo pipefail
 root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 cd "$root"
 
-for required_command in docker rg yamllint; do
+for required_command in docker git yamllint; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     echo "required command not found: $required_command" >&2
     exit 127
@@ -33,14 +33,17 @@ docker run "${container_options[@]}" "$actionlint_image"
 docker run "${container_options[@]}" "$hadolint_image" /bin/hadolint Dockerfile
 
 mapfile -d '' -t shell_files \
-  < <(rg --files src test packages packaging web -g '*.sh' -g '*.bash' -0)
+  < <(git ls-files --cached --others --exclude-standard -z -- '*.sh' '*.bash')
 if ((${#shell_files[@]} > 0)); then
-  docker run "${container_options[@]}" "$shellcheck_image" "${shell_files[@]}"
+  docker run "${container_options[@]}" "$shellcheck_image" -- "${shell_files[@]}"
 fi
 
 docker run "${container_options[@]}" "$zizmor_image" --offline .
 docker run "${container_options[@]}" "$gitleaks_image" \
   dir --no-banner --redact .
 
-mapfile -d '' -t yaml_files < <(rg --files -g '*.yml' -g '*.yaml' -0)
-yamllint "${yaml_files[@]}"
+mapfile -d '' -t yaml_files \
+  < <(git ls-files --cached --others --exclude-standard -z -- '*.yml' '*.yaml')
+if ((${#yaml_files[@]} > 0)); then
+  yamllint -- "${yaml_files[@]}"
+fi
