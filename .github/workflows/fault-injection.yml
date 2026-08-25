@@ -1,0 +1,29 @@
+---
+name: Cluster fault injection
+
+on:
+  schedule:
+    - cron: "23 19 * * 2"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cluster-fault-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cluster:
+    name: Three-node crash recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Exercise three-node crash recovery
+        env:
+          NOTIFY_CLUSTER_FAULT_PROJECT_NAME: notify-cluster-fault-${{ github.run_id }}
+        run: test/cluster_fault.sh

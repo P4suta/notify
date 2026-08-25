@@ -1,6 +1,7 @@
 ---
 x-notify: &notify
   build: .
+  image: ${NOTIFY_CLUSTER_IMAGE:-notify:cluster-local}
   depends_on:
     postgres:
       condition: service_healthy
@@ -78,6 +79,14 @@ services:
       NOTIFY_NODE_ID: notify-b
     ports:
       - "8081:8080"
+
+  notify-c:
+    <<: *notify
+    environment:
+      <<: *notify-environment
+      NOTIFY_NODE_ID: notify-c
+    ports:
+      - "8082:8080"
 
 volumes:
   postgres-data:

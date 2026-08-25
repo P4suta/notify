@@ -192,11 +192,11 @@ attachments, idempotency, and attachment rollback after a database conflict.
 docker compose -f compose.cluster.yml up --build
 ```
 
-This starts two Notify nodes, PostgreSQL 17, and a development MinIO bucket.
-Node A is exposed on port 8080 and node B on 8081. The development-only
-PostgreSQL and MinIO APIs are bound to loopback ports 15432 and 19000; the MinIO
-console is on loopback port 19001. Replace all example
-credentials, place both nodes behind a trusted reverse proxy, and set the public
+This starts three Notify nodes, PostgreSQL 17, and a development MinIO bucket.
+Nodes A, B, and C are exposed on ports 8080, 8081, and 8082. The
+development-only PostgreSQL and MinIO APIs are bound to loopback ports 15432
+and 19000; the MinIO console is on loopback port 19001. Replace all example
+credentials, place all nodes behind a trusted reverse proxy, and set the public
 base URL before any shared test deployment. This mode is not yet certified for
 production use.
 
@@ -218,9 +218,12 @@ event while it is disconnected, requires a new listener PID to catch up from
 the log, and proves duplicate wake-ups do not duplicate delivery. A separate
 three-node data-plane contract stops one bus actor, commits on both surviving
 origins, and requires the restarted node to resume both events in sequence from
-its durable cursor. Full server/container outage and long-duration soak
-coverage remain open. SQLite uses WAL plus a per-database live-process lock and
-is strictly single-node.
+its durable cursor. A weekly/manual full-container contract additionally
+SIGKILLs one of three nodes, publishes through both survivors, restarts the
+failed node, and verifies ordered replay plus message-ID live resume.
+Simultaneous multi-node outage and long-duration soak coverage remain open.
+SQLite uses WAL plus a per-database live-process lock and is strictly
+single-node.
 
 The PostgreSQL message adapter uses a bounded four-worker round-robin connection
 pool plus a separate dedicated LISTEN connection. Reads and cursor operations
@@ -308,6 +311,7 @@ gleam export erlang-shipment
 docker build --check .
 docker build --tag notify:security .
 test/container_smoke.sh notify:security
+test/cluster_fault.sh
 test/vulnerability_scan.sh notify:security
 test/generate_sbom.sh notify:security /tmp/notify-sbom
 ```
@@ -379,6 +383,14 @@ poll, a restart with the same SQLite data, 12-character message-ID recovery,
 and graceful SIGTERM shutdown. The test runs the image with dropped
 capabilities, `no-new-privileges`, and a read-only root filesystem, then removes
 its container and volume.
+
+`test/cluster_fault.sh` builds one local image and starts three Notify
+containers with real PostgreSQL and MinIO. It checks ordered duplicate-free
+cross-node live delivery, SIGKILLs node B, publishes through nodes A and C,
+restarts B, and verifies ordered replay plus `since=<message ID>` live resume.
+The harness uses a unique Compose project/image and removes its containers,
+volumes, temporary files, and image on every exit. The same test runs weekly
+and on manual dispatch; it is intentionally outside the pull-request fast path.
 
 Set `NOTIFY_TEST_POSTGRES_HOST` (plus optional `PORT` and `PASSWORD` variants)
 to enable the real PostgreSQL contract suite. Set `NOTIFY_TEST_S3_ENDPOINT`

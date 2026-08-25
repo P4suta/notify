@@ -257,8 +257,12 @@ without duplicate delivery. A three-node case verifies ordered cross-origin
 fan-out, stops one bus actor after its cursor is durable, commits on both
 surviving origins, and restarts the same node identity to catch up both events
 in sequence. These persistence cases run against real PostgreSQL in the
-pull-request gate. Full server/container crash and prolonged database/object-
-store outage tests remain required before production certification.
+pull-request gate. The weekly/manual container contract starts three complete
+nodes with PostgreSQL and MinIO, validates stable ordered delivery, SIGKILLs one
+node, publishes on both survivors, and requires ordered poll replay and
+message-ID live resume after restart. Simultaneous multi-node crash and
+prolonged database/object-store outage tests remain required before production
+certification.
 
 ## Durable delivery recovery
 
