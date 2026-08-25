@@ -3,7 +3,9 @@
 set -eu
 
 readonly source_root="${1:-/source}"
-compatibility_root=$(CDPATH='' cd -- "$(dirname "$0")/windows_compat" && pwd)
+native_root=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
+readonly native_root
+compatibility_root="$native_root/windows_compat"
 readonly compatibility_root
 readonly erts_include="$source_root/.native-erts-include"
 
@@ -15,6 +17,18 @@ if [ ! -f "$erts_include/erl_nif.h" ]; then
   echo "staged Erlang NIF headers are missing: $erts_include" >&2
   exit 2
 fi
+"$native_root/configure_windows_nif_headers.sh" "$erts_include"
+
+readonly abi_check_object="$source_root/.windows-nif-abi-check.o"
+zig cc \
+  -target x86_64-windows-gnu \
+  -std=c11 \
+  -c \
+  -I "$erts_include" \
+  "$compatibility_root/nif_abi_check.c" \
+  -o "$abi_check_object"
+rm -f -- "$abi_check_object"
+
 for dependency in bcrypt esqlite jargon; do
   if [ ! -d "$source_root/deps/$dependency" ]; then
     echo "native dependency source is missing: $dependency" >&2

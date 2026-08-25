@@ -52,10 +52,13 @@ embedded-mode startup valid.
 
 Burrito's supported Windows path cross-builds the wrapper on Linux. The build
 also uses Zig to produce x86-64 PE DLLs for bcrypt, SQLite, and Argon2id from
-the locked dependency sources and the selected OTP NIF headers. Its private
+the locked dependency sources and the selected OTP NIF headers. The copied
+headers remain isolated in the temporary build stage; their generated integer
+size configuration is changed from the Unix LP64 layout to Windows amd64's
+LLP64 layout before a compile-time ERTS callback-table check. Its private
 transfer artifact is retained for three days only, then a standard Windows
-runner validates setup, SQLite publish/poll, and recovery after a forced process
-stop; POSIX runners additionally validate graceful SIGTERM draining. The
-official Zig archives are verified against fixed per-host SHA-256 values before
-extraction. No workflow signs a release, uploads to a registry, or publishes a
-versioned artifact.
+runner probes every bundled NIF and validates setup, SQLite publish/poll, and
+recovery after a forced process stop; POSIX runners additionally validate
+graceful SIGTERM draining. The official Zig archives are verified against fixed
+per-host SHA-256 values before extraction. No workflow signs a release, uploads
+to a registry, or publishes a versioned artifact.

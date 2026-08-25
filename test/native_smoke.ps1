@@ -203,7 +203,7 @@ try {
         Invoke-ErlangNifProbe `
             -Application "bcrypt" `
             -LibraryName "bcrypt_nif.dll" `
-            -Expression '_ = bcrypt_nif:create_ctx(), ok'
+            -Expression 'begin _ = bcrypt_nif:create_ctx(), ok end'
     }
     catch {
         $nifProbeFailures += $_.Exception.Message
