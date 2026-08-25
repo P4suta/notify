@@ -32,7 +32,7 @@ function Invoke-Notify {
     }
     if ($exitCode -ne 0) {
         $redacted = ($output -join "`n") -replace 'tk_[A-Za-z0-9]{29}', '<redacted>'
-        throw "native command failed: $($Arguments[0])`n$redacted"
+        throw "native command failed (exit $exitCode): $($Arguments[0])`n$redacted"
     }
     return $output
 }
@@ -76,6 +76,19 @@ function Invoke-ErlangNifProbe {
     if (-not (Test-Path -LiteralPath $ebinPath -PathType Container)) {
         throw "$Application application omitted its ebin directory"
     }
+    $probeResultPath = Join-Path $script:smokeDirectory "$Application-nif-probe.txt"
+    $env:NOTIFY_NIF_PROBE_RESULT = $probeResultPath
+    $probeExpression = (
+        'ProbePath = os:getenv("NOTIFY_NIF_PROBE_RESULT"), ' +
+        'ok = file:write_file(ProbePath, <<"started">>), ' +
+        'try Outcome = (' + $Expression + '), ' +
+        'Result = unicode:characters_to_binary(io_lib:format("~tp", [Outcome])), ' +
+        'ok = file:write_file(ProbePath, Result), ' +
+        'case Outcome of ok -> erlang:halt(0); _ -> erlang:halt(2) end ' +
+        'catch Class:Reason:Stack -> ' +
+        'Failure = unicode:characters_to_binary(io_lib:format("~tp:~tp~n~tp", [Class, Reason, Stack])), ' +
+        'ok = file:write_file(ProbePath, Failure), erlang:halt(3) end.'
+    )
 
     $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
     try {
@@ -85,15 +98,24 @@ function Invoke-ErlangNifProbe {
             -boot_var RELEASE_LIB $releaseLibrary `
             -noshell `
             -pa $ebinPath `
-            -eval $Expression 2>&1 | ForEach-Object { "$_" })
+            -eval $probeExpression 2>&1 | ForEach-Object { "$_" })
         $exitCode = $LASTEXITCODE
     }
     finally {
         $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
     }
+    $probeResult = if (Test-Path -LiteralPath $probeResultPath -PathType Leaf) {
+        (Get-Content -LiteralPath $probeResultPath -Raw).Trim()
+    }
+    else {
+        "<probe did not start>"
+    }
     if ($exitCode -ne 0) {
         $redacted = ($probeOutput -join "`n") -replace 'tk_[A-Za-z0-9]{29}', '<redacted>'
-        throw "$Application NIF probe failed`n$redacted"
+        throw "$Application NIF probe failed (exit $exitCode; result: $probeResult)`n$redacted"
+    }
+    if ($probeResult -ne "ok") {
+        throw "$Application NIF probe returned an invalid result: $probeResult"
     }
 }
 
@@ -158,18 +180,37 @@ try {
     if (($help -join "`n") -notmatch "Usage: notify <command> \[options\]") {
         throw "native help contract is missing"
     }
-    Invoke-ErlangNifProbe `
-        -Application "esqlite" `
-        -LibraryName "esqlite3_nif.dll" `
-        -Expression 'case esqlite3:open(":memory:") of {ok, Connection} -> ok = esqlite3:close(Connection), halt(0); Other -> io:format("~p~n", [Other]), halt(2) end.'
-    Invoke-ErlangNifProbe `
-        -Application "jargon" `
-        -LibraryName "jargon.dll" `
-        -Expression 'case jargon:hash(<<"native-smoke-password">>, <<"0123456789abcdef0123456789abcdef">>, argon2id, 1, 1024, 1, 16) of {ok, _, _} -> halt(0); Other -> io:format("~p~n", [Other]), halt(2) end.'
-    Invoke-ErlangNifProbe `
-        -Application "bcrypt" `
-        -LibraryName "bcrypt_nif.dll" `
-        -Expression 'try _ = bcrypt_nif:create_ctx(), halt(0) catch Class:Reason:Stack -> io:format("~p:~p~n~p~n", [Class, Reason, Stack]), halt(2) end.'
+    $nifProbeFailures = @()
+    try {
+        Invoke-ErlangNifProbe `
+            -Application "esqlite" `
+            -LibraryName "esqlite3_nif.dll" `
+            -Expression 'case esqlite3:open(":memory:") of {ok, Connection} -> case esqlite3:close(Connection) of ok -> ok; CloseResult -> {unexpected_close, CloseResult} end; OpenResult -> {unexpected_open, OpenResult} end'
+    }
+    catch {
+        $nifProbeFailures += $_.Exception.Message
+    }
+    try {
+        Invoke-ErlangNifProbe `
+            -Application "jargon" `
+            -LibraryName "jargon.dll" `
+            -Expression 'case jargon:hash(<<"native-smoke-password">>, <<"0123456789abcdef0123456789abcdef">>, argon2id, 1, 1024, 1, 16) of {ok, _, _} -> ok; Other -> {unexpected, Other} end'
+    }
+    catch {
+        $nifProbeFailures += $_.Exception.Message
+    }
+    try {
+        Invoke-ErlangNifProbe `
+            -Application "bcrypt" `
+            -LibraryName "bcrypt_nif.dll" `
+            -Expression '_ = bcrypt_nif:create_ctx(), ok'
+    }
+    catch {
+        $nifProbeFailures += $_.Exception.Message
+    }
+    if ($nifProbeFailures.Count -gt 0) {
+        throw "native NIF probes failed`n$($nifProbeFailures -join "`n---`n")"
+    }
     $doctor = Invoke-Notify @("doctor")
     if (($doctor -join "`n") -notmatch "PASS doctor: all required dependencies are healthy") {
         throw "native doctor did not report healthy dependencies"
