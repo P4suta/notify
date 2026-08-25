@@ -485,6 +485,150 @@ pub fn invalid_action_header_uses_ntfy_error_code_test() {
   assert string.contains(body(response), "\"code\":40018")
 }
 
+pub fn disabled_email_and_call_aliases_match_ntfy_errors_test() {
+  let email_aliases = [
+    #("x-email", "user@example.com"),
+    #("x-e-mail", "user@example.com"),
+    #("email", "user@example.com"),
+    #("e-mail", "user@example.com"),
+  ]
+  list.each(email_aliases, fn(alias) {
+    let response =
+      request.new()
+      |> request.set_method(http.Post)
+      |> request.set_path("/alerts")
+      |> request.set_header(alias.0, alias.1)
+      |> request.set_body(<<"mail":utf8>>)
+      |> router.handle(test_runtime())
+    assert response.status == 400
+    assert string.contains(body(response), "\"code\":40001")
+    assert string.contains(
+      body(response),
+      "e-mail notifications are not enabled",
+    )
+    assert string.contains(body(response), "#e-mail-notifications")
+  })
+
+  let call =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/alerts")
+    |> request.set_header("x-call", "+12223334444")
+    |> request.set_body(<<"call":utf8>>)
+    |> router.handle(test_runtime())
+  assert call.status == 400
+  assert string.contains(body(call), "\"code\":40032")
+  assert string.contains(body(call), "invalid request: calling is disabled")
+  assert string.contains(body(call), "#phone-calls")
+}
+
+pub fn publish_parameter_validation_matches_ntfy_v2_27_test() {
+  let invalid_attachment =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/alerts")
+    |> request.set_header("x-attach", "not a URL")
+    |> request.set_body(<<"attachment":utf8>>)
+    |> router.handle(test_runtime())
+  assert invalid_attachment.status == 400
+  assert string.contains(body(invalid_attachment), "\"code\":40013")
+  assert string.contains(body(invalid_attachment), "attachment URL is invalid")
+
+  let invalid_icon =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/alerts")
+    |> request.set_header("x-icon", "not a URL")
+    |> request.set_body(<<"icon":utf8>>)
+    |> router.handle(test_runtime())
+  assert invalid_icon.status == 400
+  assert string.contains(body(invalid_icon), "\"code\":40021")
+  assert string.contains(body(invalid_icon), "icon URL is invalid")
+
+  let delayed =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/alerts")
+    |> request.set_header("delay", "10m")
+    |> request.set_header("cache", "no")
+    |> request.set_body(<<"later":utf8>>)
+    |> router.handle(test_runtime())
+  assert delayed.status == 400
+  assert !string.contains(body(delayed), "\"link\"")
+
+  let truncated =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/alerts")
+    |> request.set_header("attach", "https://example.test/reference.bin")
+    |> request.set_body(
+      string.repeat("x", times: 4097) |> bit_array.from_string,
+    )
+    |> router.handle(test_runtime())
+  assert truncated.status == 200
+  let assert Ok(truncated_message) =
+    json.parse(body(truncated), message_json.decoder())
+  assert bit_array.byte_size(bit_array.from_string(truncated_message.message))
+    == 4096
+}
+
+pub fn markdown_content_type_and_poll_id_match_ntfy_wire_test() {
+  let markdown =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/alerts")
+    |> request.set_header("content-type", "text/markdown")
+    |> request.set_body(<<"**strong**":utf8>>)
+    |> router.handle(test_runtime())
+  assert markdown.status == 200
+  let assert Ok(markdown_message) =
+    json.parse(body(markdown), message_json.decoder())
+  assert markdown_message.markdown
+
+  let poll_request =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/alerts")
+    |> request.set_header("x-poll-id", "poll-request-x")
+    |> request.set_body(<<"ignored":utf8>>)
+    |> router.handle(test_runtime())
+  assert poll_request.status == 200
+  assert string.contains(body(poll_request), "\"event\":\"poll_request\"")
+  assert string.contains(body(poll_request), "\"message\":\"New message\"")
+  assert string.contains(body(poll_request), "\"poll_id\":\"poll-request-x\"")
+  assert !string.contains(body(poll_request), "\"expires\"")
+}
+
+pub fn default_disallowed_topic_and_action_detail_match_ntfy_test() {
+  let reserved =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/docs")
+    |> request.set_body(<<"reserved":utf8>>)
+    |> router.handle(test_runtime())
+  assert reserved.status == 400
+  assert string.contains(body(reserved), "\"code\":40010")
+  assert string.contains(body(reserved), "topic name is not allowed")
+  assert !string.contains(body(reserved), "\"link\"")
+
+  let invalid_action =
+    request.new()
+    |> request.set_method(http.Post)
+    |> request.set_path("/alerts")
+    |> request.set_header("actions", "not-an-action")
+    |> request.set_body(<<"Act now":utf8>>)
+    |> router.handle(test_runtime())
+  assert invalid_action.status == 400
+  assert string.contains(
+    body(invalid_action),
+    "parameter 'action' cannot be 'not-an-action'",
+  )
+  assert string.contains(
+    body(invalid_action),
+    "valid values are 'view', 'broadcast', 'http' and 'copy'",
+  )
+}
+
 fn response_header(
   response: Response(BitArray),
   name: String,

@@ -8,6 +8,7 @@ import notify/core/message_json
 pub type Error {
   InvalidSyntax
   InvalidAction
+  InvalidActionKind(String)
   TooManyActions
 }
 
@@ -171,6 +172,9 @@ fn settings_to_action(settings: Settings) -> Result(Action, Error) {
       ))
     Some("copy"), Some(label), _, Some(value) ->
       Ok(message.CopyAction(label:, value:, clear: settings.clear, id: None))
+    Some("view"), _, _, _ | Some("http"), _, _, _ | Some("copy"), _, _, _ ->
+      Error(InvalidAction)
+    Some(kind), _, _, _ -> Error(InvalidActionKind(kind))
     _, _, _, _ -> Error(InvalidAction)
   }
 }

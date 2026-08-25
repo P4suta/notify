@@ -25,6 +25,7 @@ fn fixture_message() -> message.Message {
     scheduled: False,
     cached: True,
     sequence_id: Some("backup-42"),
+    poll_id: None,
   )
 }
 
@@ -60,7 +61,38 @@ pub fn decodes_json_publish_with_ntfy_defaults_test() {
   assert draft.attachment == None
   assert draft.delay == None
   assert draft.sequence_id == None
+  assert draft.poll_id == None
   assert draft.cache
+}
+
+pub fn poll_request_json_fields_encode_decode_and_publish_exactly_test() {
+  let poll_request =
+    message.Message(
+      ..fixture_message(),
+      expires: None,
+      event: message.PollRequestEvent,
+      message: "New message",
+      title: None,
+      priority: message.Default,
+      tags: [],
+      markdown: False,
+      click: None,
+      cached: False,
+      sequence_id: None,
+      poll_id: Some("poll-request-42"),
+    )
+  let encoded = poll_request |> message_json.encode |> json.to_string
+  assert encoded
+    == "{\"id\":\"AbCdEf1234XY\",\"time\":1725000000,\"event\":\"poll_request\",\"topic\":\"backups\",\"message\":\"New message\",\"poll_id\":\"poll-request-42\"}"
+  let assert Ok(decoded) = json.parse(encoded, message_json.decoder())
+  assert decoded.poll_id == Some("poll-request-42")
+  assert decoded.event == message.PollRequestEvent
+
+  let assert Ok(draft) =
+    message_json.decode_publish(
+      "{\"topic\":\"backups\",\"message\":\"ignored\",\"poll_id\":\"poll-request-42\"}",
+    )
+  assert draft.poll_id == Some("poll-request-42")
 }
 
 pub fn defaults_missing_json_message_to_triggered_test() {

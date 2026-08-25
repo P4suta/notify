@@ -49,6 +49,42 @@ pub fn handle(req: Request(BitArray), runtime: Runtime) -> Response(BitArray) {
   response.set_header(reply, "x-request-id", correlation_id(req))
 }
 
+/// Handles a local attachment publication without requiring the HTTP
+/// transport to materialise the complete request body. The uploader callback
+/// is invoked only after the topic, filename, publish parameters, CSRF token,
+/// credentials, and ACL have been validated.
+pub fn streamed_attachment(
+  req: Request(body),
+  runtime: Runtime,
+  upload: fn(attachment_store.Store, Int) ->
+    Result(attachment_store.Stored, attachment_store.Error),
+) -> Option(Response(BitArray)) {
+  case
+    req.method,
+    request.path_segments(req),
+    param(req, ["x-filename", "filename", "file", "f"]),
+    param(req, ["x-attach", "attach", "a"])
+  {
+    Post, [topic_name], Some(filename), None
+    | Put, [topic_name], Some(filename), None
+    ->
+      Some(case topic_or_error(topic_name) {
+        Error(reply) -> reply
+        Ok(parsed_topic) ->
+          with_authorization(req, [parsed_topic], acl.Write, runtime, fn() {
+            publish_local_attachment_with(
+              req,
+              parsed_topic,
+              filename,
+              runtime,
+              upload,
+            )
+          })
+      })
+    _, _, _, _ -> None
+  }
+}
+
 pub fn correlation_id(req: Request(body)) -> String {
   case request.get_header(req, "x-request-id") {
     Ok(value) ->
@@ -628,6 +664,29 @@ fn publish_local_attachment(
   filename: String,
   runtime: Runtime,
 ) -> Response(BitArray) {
+  publish_local_attachment_with(
+    req,
+    parsed_topic,
+    filename,
+    runtime,
+    fn(store, expires) {
+      attachment_store.put_in_chunks(
+        store,
+        attachment_store.Upload(req.body, expires:),
+        1_048_576,
+      )
+    },
+  )
+}
+
+fn publish_local_attachment_with(
+  req: Request(body),
+  parsed_topic: topic.Topic,
+  filename: String,
+  runtime: Runtime,
+  upload: fn(attachment_store.Store, Int) ->
+    Result(attachment_store.Stored, attachment_store.Error),
+) -> Response(BitArray) {
   let body =
     param(req, ["x-message", "message", "m"])
     |> option.unwrap("You received a file: " <> filename)
@@ -645,13 +704,7 @@ fn publish_local_attachment(
     True, Some(store), Ok(draft) -> {
       let runtime.Clock(now) = runtime.clock
       let expires = now() + runtime.attachment_retention_seconds
-      case
-        attachment_store.put_in_chunks(
-          store,
-          attachment_store.Upload(req.body, expires:),
-          1_048_576,
-        )
-      {
+      case upload(store, expires) {
         Error(attachment_store.TooLarge(_, _)) ->
           ntfy_error(413, 41_301, "attachment too large", ntfy_docs)
         Error(attachment_store.QuotaExceeded(_)) ->
@@ -976,15 +1029,19 @@ fn publish_json(
     Ok(body) ->
       case message_json.decode_publish(body) {
         Ok(draft) ->
-          with_authorization(req, [draft.topic], acl.Write, runtime, fn() {
-            draft
-            |> apply_template_and_publish_parameters(
-              req,
-              draft.message,
-              runtime.template_directory,
-            )
-            |> publish_parameter_result(runtime)
-          })
+          case topic.is_disallowed(draft.topic) {
+            True -> disallowed_topic()
+            False ->
+              with_authorization(req, [draft.topic], acl.Write, runtime, fn() {
+                draft
+                |> apply_template_and_publish_parameters(
+                  req,
+                  draft.message,
+                  runtime.template_directory,
+                )
+                |> publish_parameter_result(runtime)
+              })
+          }
         Error(message_json.InvalidTopic(_)) -> invalid_topic()
         Error(message_json.InvalidPriority(_)) ->
           ntfy_error(400, 40_007, "invalid priority", ntfy_docs)
@@ -1080,7 +1137,12 @@ fn delay_error(error: delay.Error) -> Response(BitArray) {
 
 type PublishParameterError {
   InvalidPublishPriority
-  InvalidPublishActions
+  InvalidPublishActions(action_parser.Error)
+  InvalidAttachmentUrl
+  InvalidIconUrl
+  InvalidMessageUtf8
+  EmailDeliveryDisabled
+  PhoneCallsDisabled
   DelayedMessageWithoutCache
   TemplateSourceTooLarge
   TemplateSourceNotJson
@@ -1142,20 +1204,50 @@ fn publish_parameter_error(error: PublishParameterError) -> Response(BitArray) {
         "invalid priority parameter",
         "https://ntfy.sh/docs/publish/#message-priority",
       )
-    InvalidPublishActions ->
+    InvalidPublishActions(error) ->
       ntfy_error(
         400,
         40_018,
-        "invalid request: actions invalid",
+        action_error_message(error),
         "https://ntfy.sh/docs/publish/#action-buttons",
       )
-    DelayedMessageWithoutCache ->
+    InvalidAttachmentUrl ->
       ntfy_error(
         400,
-        40_002,
-        "cannot disable cache for delayed message",
-        ntfy_docs,
+        40_013,
+        "invalid request: attachment URL is invalid",
+        "https://ntfy.sh/docs/publish/#attachments",
       )
+    InvalidIconUrl ->
+      ntfy_error(
+        400,
+        40_021,
+        "invalid request: icon URL is invalid",
+        "https://ntfy.sh/docs/publish/#icons",
+      )
+    InvalidMessageUtf8 ->
+      ntfy_error(
+        400,
+        40_011,
+        "invalid request: message must be UTF-8 encoded",
+        "",
+      )
+    EmailDeliveryDisabled ->
+      ntfy_error(
+        400,
+        40_001,
+        "e-mail notifications are not enabled",
+        "https://ntfy.sh/docs/config/#e-mail-notifications",
+      )
+    PhoneCallsDisabled ->
+      ntfy_error(
+        400,
+        40_032,
+        "invalid request: calling is disabled",
+        "https://ntfy.sh/docs/config/#phone-calls",
+      )
+    DelayedMessageWithoutCache ->
+      ntfy_error(400, 40_002, "cannot disable cache for delayed message", "")
     TemplateSourceTooLarge -> ntfy_error(413, 41_303, "JSON body too large", "")
     TemplateSourceNotJson ->
       template_error(
@@ -1187,6 +1279,18 @@ fn publish_parameter_error(error: PublishParameterError) -> Response(BitArray) {
   }
 }
 
+fn action_error_message(error: action_parser.Error) -> String {
+  case error {
+    action_parser.InvalidActionKind(kind) ->
+      "invalid request: actions invalid; parameter 'action' cannot be '"
+      <> kind
+      <> "', valid values are 'view', 'broadcast', 'http' and 'copy'"
+    action_parser.InvalidSyntax
+    | action_parser.InvalidAction
+    | action_parser.TooManyActions -> "invalid request: actions invalid"
+  }
+}
+
 fn template_error(code: Int, message: String) -> Response(BitArray) {
   ntfy_error(
     400,
@@ -1208,8 +1312,8 @@ fn poll(
   format: PollFormat,
   runtime: Runtime,
 ) -> Response(BitArray) {
-  case topic.parse_many(topic_names) {
-    Error(_) -> page_not_found()
+  case topics_or_error(topic_names) {
+    Error(response) -> response
     Ok(topics) ->
       with_authorization(req, topics, acl.Read, runtime, fn() {
         let runtime.Clock(now) = runtime.clock
@@ -1273,8 +1377,8 @@ fn topic_auth(
   topic_names: String,
   runtime: Runtime,
 ) -> Response(BitArray) {
-  case topic.parse_many(topic_names) {
-    Error(_) -> page_not_found()
+  case topics_or_error(topic_names) {
+    Error(response) -> response
     Ok(topics) ->
       with_authorization(req, topics, acl.Read, runtime, fn() {
         json_response(200, "{\"success\":true}")
@@ -1568,7 +1672,7 @@ fn template_field_too_large(value: String) -> Bool {
 
 fn apply_publish_parameters(
   draft: Draft,
-  req: Request(BitArray),
+  req: Request(body),
 ) -> Result(Draft, PublishParameterError) {
   let title = param(req, ["x-title", "title", "t"])
   let body = case string.is_empty(draft.message) {
@@ -1581,7 +1685,7 @@ fn apply_publish_parameters(
 
 fn apply_publish_parameter_values(
   draft: Draft,
-  req: Request(BitArray),
+  req: Request(body),
   title title: Option(String),
   body body: Option(String),
   priority priority: Option(String),
@@ -1592,6 +1696,25 @@ fn apply_publish_parameter_values(
   let actions = param(req, ["x-actions", "actions", "action"])
   let attach = param(req, ["x-attach", "attach", "a"])
   let filename = param(req, ["x-filename", "filename", "file", "f"])
+  let icon = option.or(param(req, ["x-icon", "icon"]), draft.icon)
+  let poll_id = option.or(param(req, ["x-poll-id", "poll-id"]), draft.poll_id)
+
+  use _ <- result.try(
+    case param(req, ["x-email", "x-e-mail", "email", "e-mail", "mail", "e"]) {
+      Some(_) -> Error(EmailDeliveryDisabled)
+      None -> Ok(Nil)
+    },
+  )
+  use _ <- result.try(case param(req, ["x-call", "call"]) {
+    Some(_) -> Error(PhoneCallsDisabled)
+    None -> Ok(Nil)
+  })
+  use _ <- result.try(validate_external_url(attach, InvalidAttachmentUrl))
+  use _ <- result.try(validate_external_url(
+    option.map(draft.attachment, fn(attachment) { attachment.url }),
+    InvalidAttachmentUrl,
+  ))
+  use _ <- result.try(validate_external_url(icon, InvalidIconUrl))
 
   use priority <- result.try(case priority {
     Some(value) ->
@@ -1602,35 +1725,47 @@ fn apply_publish_parameter_values(
   use actions <- result.try(case actions {
     Some(value) ->
       action_parser.parse(value)
-      |> result.map_error(fn(_) { InvalidPublishActions })
+      |> result.map_error(InvalidPublishActions)
     None -> Ok(draft.actions)
+  })
+  let attachment = case attach {
+    None -> draft.attachment
+    Some(url) ->
+      Some(message.Attachment(
+        name: option.unwrap(filename, attachment_name_from_url(url)),
+        url:,
+        mime_type: None,
+        size: None,
+        expires: None,
+      ))
+  }
+  use published_body <- result.try(case attachment {
+    None -> Ok(option.unwrap(body, draft.message))
+    Some(_) -> truncate_message(option.unwrap(body, draft.message))
   })
   let updated =
     message.Draft(
       ..draft,
-      message: option.unwrap(body, draft.message),
+      message: published_body,
       title: option.or(title, draft.title),
       priority:,
       tags: case tags {
         Some(value) -> split_csv(value)
         None -> draft.tags
       },
-      markdown: option.map(markdown, parse_bool)
-        |> option.unwrap(draft.markdown),
-      icon: option.or(param(req, ["x-icon", "icon"]), draft.icon),
+      markdown: {
+          option.map(markdown, parse_bool)
+          |> option.unwrap(draft.markdown)
+        }
+        || {
+          param(req, ["content-type", "content_type"])
+          |> option.map(string.lowercase)
+          == Some("text/markdown")
+        },
+      icon:,
       click: option.or(param(req, ["x-click", "click"]), draft.click),
       actions:,
-      attachment: case attach {
-        None -> draft.attachment
-        Some(url) ->
-          Some(message.Attachment(
-            name: option.unwrap(filename, attachment_name_from_url(url)),
-            url:,
-            mime_type: None,
-            size: None,
-            expires: None,
-          ))
-      },
+      attachment:,
       delay: option.or(
         param(req, ["x-delay", "delay", "x-at", "at", "x-in", "in"]),
         draft.delay,
@@ -1639,11 +1774,51 @@ fn apply_publish_parameter_values(
         param(req, ["x-sequence-id", "sequence-id", "sid"]),
         draft.sequence_id,
       ),
-      cache: option.map(cache, parse_bool) |> option.unwrap(draft.cache),
+      poll_id:,
+      cache: case poll_id {
+        Some(_) -> False
+        None -> option.map(cache, parse_bool) |> option.unwrap(draft.cache)
+      },
     )
-  case updated.delay, updated.cache {
+  let configured_cache =
+    option.map(cache, parse_bool) |> option.unwrap(draft.cache)
+  case updated.delay, configured_cache {
     Some(_), False -> Error(DelayedMessageWithoutCache)
     _, _ -> Ok(updated)
+  }
+}
+
+fn valid_external_url(value: String) -> Bool {
+  string.starts_with(value, "http://") || string.starts_with(value, "https://")
+}
+
+fn validate_external_url(
+  value: Option(String),
+  error: PublishParameterError,
+) -> Result(Nil, PublishParameterError) {
+  case value {
+    None -> Ok(Nil)
+    Some(value) ->
+      case valid_external_url(value) {
+        True -> Ok(Nil)
+        False -> Error(error)
+      }
+  }
+}
+
+fn truncate_message(value: String) -> Result(String, PublishParameterError) {
+  let bytes = bit_array.from_string(value)
+  case bit_array.byte_size(bytes) <= message.max_message_bytes {
+    True -> Ok(value)
+    False -> {
+      use truncated <- result.try(
+        bytes
+        |> bit_array.slice(at: 0, take: message.max_message_bytes)
+        |> result.map_error(fn(_) { InvalidMessageUtf8 }),
+      )
+      bit_array.to_string(truncated)
+      |> result.map_error(fn(_) { InvalidMessageUtf8 })
+    }
   }
 }
 
@@ -1686,11 +1861,35 @@ fn parse_bool(value: String) -> Bool {
 fn topic_or_error(
   topic_name: String,
 ) -> Result(topic.Topic, Response(BitArray)) {
-  topic.parse(topic_name) |> result.map_error(fn(_) { page_not_found() })
+  case topic.parse(topic_name) {
+    Error(_) -> Error(page_not_found())
+    Ok(parsed) ->
+      case topic.is_disallowed(parsed) {
+        True -> Error(disallowed_topic())
+        False -> Ok(parsed)
+      }
+  }
+}
+
+fn topics_or_error(
+  topic_names: String,
+) -> Result(List(topic.Topic), Response(BitArray)) {
+  case topic.parse_many(topic_names) {
+    Error(_) -> Error(page_not_found())
+    Ok(topics) ->
+      case topic.any_disallowed(topics) {
+        True -> Error(disallowed_topic())
+        False -> Ok(topics)
+      }
+  }
+}
+
+fn disallowed_topic() -> Response(BitArray) {
+  ntfy_error(400, 40_010, "invalid request: topic name is not allowed", "")
 }
 
 fn with_authorization(
-  req: Request(BitArray),
+  req: Request(body),
   topics: List(topic.Topic),
   operation: acl.Operation,
   runtime: Runtime,

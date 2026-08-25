@@ -101,8 +101,8 @@ fn chunked(
   bus: Broker,
   capacity: Int,
 ) -> Response(mist.ResponseData) {
-  case topic.parse_many(topic_names) {
-    Error(_) -> invalid_topic()
+  case parse_topics(topic_names) {
+    Error(reply) -> reply
     Ok(topics) -> {
       case authorize(request, topics, runtime) {
         Error(failure) -> access_failure(failure)
@@ -188,8 +188,8 @@ fn sse(
   bus: Broker,
   capacity: Int,
 ) -> Response(mist.ResponseData) {
-  case topic.parse_many(topic_names) {
-    Error(_) -> invalid_topic()
+  case parse_topics(topic_names) {
+    Error(reply) -> reply
     Ok(topics) ->
       case authorize(request, topics, runtime) {
         Error(failure) -> access_failure(failure)
@@ -258,8 +258,25 @@ fn websocket(
   bus: Broker,
   capacity: Int,
 ) -> Response(mist.ResponseData) {
-  case topic.parse_many(topic_names) {
-    Error(_) -> invalid_topic()
+  case request.get_header(request, "upgrade") {
+    Ok(value) ->
+      case string.lowercase(string.trim(value)) == "websocket" {
+        True -> websocket_upgraded(request, topic_names, runtime, bus, capacity)
+        False -> websocket_upgrade_missing()
+      }
+    Error(_) -> websocket_upgrade_missing()
+  }
+}
+
+fn websocket_upgraded(
+  request: Request(mist.Connection),
+  topic_names: String,
+  runtime: Runtime,
+  bus: Broker,
+  capacity: Int,
+) -> Response(mist.ResponseData) {
+  case parse_topics(topic_names) {
+    Error(reply) -> reply
     Ok(topics) ->
       case authorize(request, topics, runtime) {
         Error(failure) -> access_failure(failure)
@@ -339,6 +356,16 @@ fn websocket(
           }
       }
   }
+}
+
+fn websocket_upgrade_missing() -> Response(mist.ResponseData) {
+  response.new(400)
+  |> response.set_header("content-type", "application/json; charset=utf-8")
+  |> response.set_body(
+    mist.Bytes(bytes_tree.from_string(
+      "{\"code\":40016,\"http\":400,\"error\":\"invalid request: client not using the websocket protocol\",\"link\":\"https://ntfy.sh/docs/subscribe/api/#websockets\"}",
+    )),
+  )
 }
 
 fn initialise(
@@ -553,6 +580,29 @@ fn invalid_topic() -> Response(mist.ResponseData) {
   |> response.set_body(
     mist.Bytes(bytes_tree.from_string(
       "{\"code\":40401,\"http\":404,\"error\":\"page not found\"}",
+    )),
+  )
+}
+
+fn parse_topics(
+  names: String,
+) -> Result(List(Topic), Response(mist.ResponseData)) {
+  case topic.parse_many(names) {
+    Error(_) -> Error(invalid_topic())
+    Ok(topics) ->
+      case topic.any_disallowed(topics) {
+        True -> Error(disallowed_topic())
+        False -> Ok(topics)
+      }
+  }
+}
+
+fn disallowed_topic() -> Response(mist.ResponseData) {
+  response.new(400)
+  |> response.set_header("content-type", "application/json; charset=utf-8")
+  |> response.set_body(
+    mist.Bytes(bytes_tree.from_string(
+      "{\"code\":40010,\"http\":400,\"error\":\"invalid request: topic name is not allowed\"}",
     )),
   )
 }

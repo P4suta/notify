@@ -3,9 +3,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  decodeWebSocketFrames,
   evaluateReport,
   loadConfiguration,
+  parseSubscriptionChunk,
   percentile,
+  publishEndpointIndex,
+  subscriptionPath,
   validateEndpoints,
   validateTopicSequences,
 } from "./cluster_soak.mjs";
@@ -22,11 +26,188 @@ test("target defaults are the production-readiness acceptance values", () => {
   assert.equal(configuration.durationSeconds, 600);
   assert.equal(configuration.topics, 1_000);
   assert.equal(configuration.commitP95BudgetMs, 200);
+  assert.equal(configuration.format, "json");
   assert.deepEqual(configuration.endpoints, [
     "http://127.0.0.1:8080",
     "http://127.0.0.1:8081",
     "http://127.0.0.1:8082",
   ]);
+});
+
+test("all streaming transports are explicit validated configuration", () => {
+  for (const format of ["json", "raw", "sse", "websocket"]) {
+    const configuration = loadConfiguration({ NOTIFY_SOAK_FORMAT: format });
+    assert.equal(configuration.format, format);
+  }
+  assert.throws(
+    () => loadConfiguration({ NOTIFY_SOAK_FORMAT: "xml" }),
+    /NOTIFY_SOAK_FORMAT/,
+  );
+  assert.equal(subscriptionPath("alerts", "json"), "/alerts/json?since=none");
+  assert.equal(subscriptionPath("alerts", "raw"), "/alerts/raw?since=none");
+  assert.equal(subscriptionPath("alerts", "sse"), "/alerts/sse?since=none");
+  assert.equal(
+    subscriptionPath("alerts", "websocket"),
+    "/alerts/ws?since=none",
+  );
+});
+
+test("cluster publishes are balanced continuously and rotate topic origins", () => {
+  assert.deepEqual(
+    Array.from({ length: 12 }, (_, index) => publishEndpointIndex(index, 3)),
+    [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2],
+  );
+
+  const topicCount = 1_000;
+  assert.deepEqual(
+    Array.from({ length: 3 }, (_, round) =>
+      publishEndpointIndex(17 + round * topicCount, 3),
+    ),
+    [2, 0, 1],
+  );
+  assert.throws(() => publishEndpointIndex(0, 0), /endpoint count/);
+});
+
+test("JSON, SSE, and raw parsers accept split frames without losing identity", () => {
+  for (const [format, chunks, expected] of [
+    [
+      "json",
+      [
+        '{"event":"open","topic":"alerts","id":"Open00000001","time":1}\n{"event":"mess',
+        'age","topic":"alerts","id":"Message00001","message":"soak-0"}\n',
+      ],
+      [{ id: "Message00001", payload: "soak-0" }],
+    ],
+    [
+      "sse",
+      [
+        'event: open\ndata: {"event":"open","topic":"alerts","id":"Open00000001","time":1}\n\nevent: message\nda',
+        'ta: {"event":"message","topic":"alerts","id":"Message00001","message":"soak-0"}\n\n',
+      ],
+      [{ id: "Message00001", payload: "soak-0" }],
+    ],
+    ["raw", ["\nso", "ak-0\n"], [{ id: null, payload: "soak-0" }]],
+  ]) {
+    const state = {
+      index: 0,
+      topic: "alerts",
+      buffer: "",
+      opened: false,
+      resolveOpen() {},
+    };
+    const deliveries = [];
+    const errors = [];
+    for (const chunk of chunks) {
+      parseSubscriptionChunk(
+        format,
+        state,
+        chunk,
+        (delivery) => deliveries.push(delivery),
+        (error) => errors.push(error),
+      );
+    }
+    assert.equal(state.opened, true);
+    assert.deepEqual(deliveries, expected);
+    assert.deepEqual(errors, []);
+  }
+});
+
+test("every streaming parser records keepalives without treating them as messages", () => {
+  for (const [format, chunks] of [
+    [
+      "json",
+      [
+        '{"event":"open","topic":"alerts","id":"Open00000001","time":1}\n',
+        '{"event":"keepalive","topic":"alerts","id":"Keep00000001","time":46}\n',
+      ],
+    ],
+    [
+      "sse",
+      [
+        'event: open\ndata: {"event":"open","topic":"alerts","id":"Open00000001","time":1}\n\n',
+        'event: keepalive\ndata: {"event":"keepalive","topic":"alerts","id":"Keep00000001","time":46}\n\n',
+      ],
+    ],
+    ["raw", ["\n", "\n"]],
+  ]) {
+    const state = {
+      index: 0,
+      topic: "alerts",
+      buffer: "",
+      keepalives: 0,
+      opened: false,
+      resolveOpen() {},
+    };
+    const deliveries = [];
+    const errors = [];
+    for (const chunk of chunks) {
+      parseSubscriptionChunk(
+        format,
+        state,
+        chunk,
+        (delivery) => deliveries.push(delivery),
+        (error) => errors.push(error),
+      );
+    }
+    assert.equal(state.keepalives, 1);
+    assert.deepEqual(deliveries, []);
+    assert.deepEqual(errors, []);
+  }
+});
+
+test("WebSocket decoder handles split unmasked text frames", () => {
+  const payload = Buffer.from('{"event":"message"}', "utf8");
+  const frame = Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
+  const state = { websocketBuffer: Buffer.alloc(0) };
+  const texts = [];
+  const errors = [];
+  decodeWebSocketFrames(
+    state,
+    frame.subarray(0, 3),
+    (text) => texts.push(text),
+    (error) => errors.push(error),
+  );
+  decodeWebSocketFrames(
+    state,
+    frame.subarray(3),
+    (text) => texts.push(text),
+    (error) => errors.push(error),
+  );
+  assert.deepEqual(texts, ['{"event":"message"}']);
+  assert.deepEqual(errors, []);
+});
+
+test("WebSocket decoder drains coalesced frames and retains only a split tail", () => {
+  const frame = (text) => {
+    const payload = Buffer.from(text, "utf8");
+    return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
+  };
+  const first = frame("first");
+  const second = frame("second");
+  const third = frame("third");
+  const splitAt = 4;
+  const state = { websocketBuffer: Buffer.alloc(0) };
+  const texts = [];
+  const errors = [];
+
+  decodeWebSocketFrames(
+    state,
+    Buffer.concat([first, second, third.subarray(0, splitAt)]),
+    (text) => texts.push(text),
+    (error) => errors.push(error),
+  );
+  assert.deepEqual(texts, ["first", "second"]);
+  assert.deepEqual(state.websocketBuffer, third.subarray(0, splitAt));
+
+  decodeWebSocketFrames(
+    state,
+    third.subarray(splitAt),
+    (text) => texts.push(text),
+    (error) => errors.push(error),
+  );
+  assert.deepEqual(texts, ["first", "second", "third"]);
+  assert.equal(state.websocketBuffer.length, 0);
+  assert.deepEqual(errors, []);
 });
 
 test("configuration rejects unsafe or internally inconsistent values", () => {
@@ -191,7 +372,12 @@ test("acceptance verdict is fail-closed across every target invariant", () => {
       durationSeconds: 2,
       commitP95BudgetMs: 200,
     },
-    subscriptions: { ready: 10, disconnected: 0, errors: 0 },
+    subscriptions: {
+      ready: 10,
+      disconnected: 0,
+      errors: 0,
+      minimumKeepalives: 0,
+    },
     publishes: {
       planned: 10,
       committed: 10,
@@ -233,6 +419,20 @@ test("acceptance verdict is fail-closed across every target invariant", () => {
   assert.equal(verdict.passed, false);
   assert.ok(verdict.failures.some((failure) => failure.includes("duplicates")));
   assert.ok(verdict.failures.some((failure) => failure.includes("p95")));
+
+  const missingKeepalives = structuredClone(passing);
+  missingKeepalives.configuration.durationSeconds = 600;
+  missingKeepalives.configuration.publishRate = 1;
+  missingKeepalives.publishes.planned = 600;
+  missingKeepalives.publishes.committed = 600;
+  missingKeepalives.durableEventLog.eventsExpected = 600;
+  missingKeepalives.durableEventLog.eventsObserved = 600;
+  assert.equal(evaluateReport(missingKeepalives).passed, false);
+  assert.ok(
+    evaluateReport(missingKeepalives).failures.some((failure) =>
+      failure.includes("keepalives"),
+    ),
+  );
 
   const unverified = structuredClone(passing);
   delete unverified.durableEventLog;

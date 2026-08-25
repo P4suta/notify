@@ -1,6 +1,6 @@
 import birdie
 import gleam/json
-import gleam/option.{Some}
+import gleam/option.{None, Some}
 import gleam/string
 import notify/core/action
 import notify/core/message
@@ -46,6 +46,7 @@ pub fn complete_ntfy_message_wire_snapshot_test() {
     scheduled: False,
     cached: True,
     sequence_id: Some("incident-42"),
+    poll_id: None,
   )
   |> message_json.encode
   |> json.to_string

@@ -15,9 +15,13 @@ concurrency:
 
 jobs:
   soak:
-    name: 10k subscriptions at 500 publish/s
+    name: ${{ matrix.format }} · 10k at 500 publish/s
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        format: [json, raw, sse, websocket]
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -25,14 +29,15 @@ jobs:
           persist-credentials: false
       - name: Exercise the three-node target
         env:
-          NOTIFY_SOAK_PROJECT_NAME: notify-soak-${{ github.run_id }}-${{ github.run_attempt }}
-          NOTIFY_SOAK_REPORT_DIRECTORY: ${{ runner.temp }}/notify-soak
+          NOTIFY_SOAK_FORMAT: ${{ matrix.format }}
+          NOTIFY_SOAK_PROJECT_NAME: notify-soak-${{ matrix.format }}-${{ github.run_id }}-${{ github.run_attempt }}
+          NOTIFY_SOAK_REPORT_DIRECTORY: ${{ runner.temp }}/notify-soak-${{ matrix.format }}
         run: test/cluster_soak.sh
       - name: Upload private soak evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: cluster-soak-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ runner.temp }}/notify-soak
+          name: cluster-soak-${{ matrix.format }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/notify-soak-${{ matrix.format }}
           if-no-files-found: warn
           retention-days: 7

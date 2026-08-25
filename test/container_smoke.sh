@@ -30,6 +30,10 @@ smoke_directory=$(mktemp -d "${TMPDIR:-/tmp}/notify-container-smoke.XXXXXX")
 readonly smoke_directory
 readonly response="$smoke_directory/response.json"
 readonly poll_response="$smoke_directory/poll.ndjson"
+readonly attachment_source="$smoke_directory/attachment-source.bin"
+readonly attachment_download="$smoke_directory/attachment-download.bin"
+readonly attachment_range="$smoke_directory/attachment-range.bin"
+readonly attachment_expected_range="$smoke_directory/attachment-expected-range.bin"
 container_exists=false
 base_url=''
 
@@ -137,6 +141,31 @@ curl --fail --silent --show-error \
 jq -se --arg id "$message_id" \
   '[.[] | select(.event == "message" and .id == $id)] | length == 1' \
   "$poll_response" >/dev/null
+
+dd if=/dev/urandom of="$attachment_source" bs=1048576 count=2 status=none
+printf 'streaming-tail' >>"$attachment_source"
+curl --http1.1 --fail --silent --show-error \
+  --user "$username:$password" \
+  --header 'Transfer-Encoding: chunked' \
+  --header 'Filename: streamed-container.bin' \
+  --header 'Content-Type: application/octet-stream' \
+  --data-binary "@$attachment_source" \
+  "$base_url/$topic" >"$response"
+attachment_path=$(jq -er \
+  'select(.event == "message") | .attachment.url
+   | select(type == "string") | sub("^https?://[^/]+"; "")' \
+  "$response")
+curl --fail --silent --show-error \
+  --user "$username:$password" \
+  "$base_url$attachment_path" >"$attachment_download"
+cmp "$attachment_source" "$attachment_download"
+curl --fail --silent --show-error \
+  --user "$username:$password" \
+  --header 'Range: bytes=1048570-1048590' \
+  "$base_url$attachment_path" >"$attachment_range"
+dd if="$attachment_source" of="$attachment_expected_range" \
+  bs=1 skip=1048570 count=21 status=none
+cmp "$attachment_expected_range" "$attachment_range"
 stop_server
 
 start_server
@@ -148,4 +177,4 @@ jq -se --arg id "$message_id" \
   "$poll_response" >/dev/null
 stop_server
 
-echo "container setup, publish/poll, restart, and graceful shutdown smoke passed"
+echo "container setup, publish/poll, chunked attachment, sendfile range, restart, and graceful shutdown smoke passed"

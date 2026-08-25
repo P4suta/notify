@@ -16,7 +16,8 @@
          attachment_read_range/4,
          attachment_delete/2, attachment_list/1, attachment_page/3,
          attachment_cleanup_expired/2,
-         attachment_health/1, make_temporary_directory/0, public_asset/1,
+         attachment_health/1, attachment_blob_path/2,
+         make_temporary_directory/0, public_asset/1,
          read_password/1, http_request/4, generate_vapid_keys/0, exit_failure/0,
          webpush_encrypt_with_values/6, webpush_encrypt/3,
          webpush_vapid_header/5, webpush_verify_vapid_header/2,
@@ -1298,6 +1299,9 @@ make_temporary_directory() ->
 
 attachment_path(Directory, Key, Extension) ->
     filename:join(Directory, <<Key/binary, Extension/binary>>).
+
+attachment_blob_path(Directory, Key) ->
+    attachment_path(Directory, Key, <<".blob">>).
 
 attachment_total_size(Directory) ->
     filelib:fold_files(binary_to_list(Directory), ".*\\.blob$", false,

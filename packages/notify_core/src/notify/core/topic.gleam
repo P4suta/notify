@@ -46,6 +46,31 @@ pub fn to_string(topic: Topic) -> String {
   value
 }
 
+/// Returns whether the topic is reserved by ntfy v2.27.0's default HTTP
+/// surface. Keeping this list in the protocol package prevents a publish,
+/// poll, or live subscription from shadowing a server route.
+pub fn is_disallowed(topic: Topic) -> Bool {
+  list.contains(
+    [
+      "docs",
+      "static",
+      "file",
+      "app",
+      "metrics",
+      "account",
+      "settings",
+      "signup",
+      "login",
+      "v1",
+    ],
+    to_string(topic),
+  )
+}
+
+pub fn any_disallowed(topics: List(Topic)) -> Bool {
+  list.any(topics, is_disallowed)
+}
+
 pub fn parse_many(value: String) -> Result(List(Topic), Error) {
   value
   |> string.split(",")

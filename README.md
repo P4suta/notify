@@ -9,10 +9,10 @@ ntfy-compatible HTTP surface, durable pub/sub, a bilingual Lustre PWA, access
 control, attachments, Web Push, and an experimental PostgreSQL active-active
 mode.
 
-> **Development status:** Notify is not yet production-ready. The v2.27.0
-> differential corpus is intentionally pinned but still incomplete, the full
-> fault-injection matrix has not run, and the measured steady-state soak is not
-> a production capacity certificate. The 10,000-subscription / 500
+> **Development status:** Notify is not yet production-certified. The pinned
+> v2.27.0 differential corpus contains 153 passing cases but is deliberately
+> bounded, and the measured steady-state soak is not a portable capacity
+> certificate. The 10,000-subscription / 500
 > publish-per-second target has passed once on the environment recorded in the
 > operational limits. See the measured
 > [compatibility status](docs/compatibility.md) and
@@ -110,12 +110,15 @@ checked with constant-time binary comparison.
 
 Rate limits use continuously refilled token buckets keyed by the effective
 client IP. The default 60-second refill period has independent capacities for
-all requests (120), subscription attempts (30), publish/topic-creation
+all requests (120), live subscription attempts (30; bounded polls use only the
+request bucket), publish/topic-creation
 attempts (60), authentication failures (10), attachment transfer MiB (120),
 and attachment upload attempts (20). Configure them under `[rate_limit]`, with
 the corresponding `NOTIFY_RATE_LIMIT_*` variables, or with the documented CLI
 flags. In active-active mode PostgreSQL updates each bucket transactionally
-across nodes; limiter storage failure fails closed with HTTP 503.
+across nodes. Concurrent checks are evaluated in arrival order while each
+distinct client/bucket row is locked and written once per bounded batch;
+limiter storage failure fails closed with HTTP 503.
 
 HTTP security and administration changes use an append-only audit log in the
 same SQLite or PostgreSQL backend. A mutation is not run unless its `attempted`
@@ -208,7 +211,11 @@ single URL, after which reuse is rejected across the cluster.
 
 The durable PostgreSQL event log is authoritative. LISTEN/NOTIFY only wakes
 nodes; each node resumes from its stored cursor after lost notifications or a
-restart. A node advances its cursor only after the broker has synchronously
+restart. The listener blocks on PostgreSQL notification frames instead of
+polling with queries, coalesces queued wakes for 25 milliseconds, and still
+performs a catch-up after a one-second quiet timeout. Event cursor heartbeat
+and the next 256-row page are read in one statement. A node advances its cursor
+only after the broker has synchronously
 applied every non-scheduled event, including its own origin, in sequence; a
 dispatch or cursor-write failure leaves the batch available for at-least-once
 retry. Cursor heartbeats protect
@@ -223,12 +230,20 @@ three-node data-plane contract requires every node to consume both local- and
 remote-origin events in the same durable order, stops one bus actor, commits on
 both surviving origins, and requires the restarted node to resume both events
 in sequence from its durable cursor. A weekly/manual full-container contract
-additionally SIGKILLs one of three nodes, publishes through both survivors,
-restarts the failed node, and verifies ordered replay plus message-ID live
-resume.
-The target-scale 10-minute steady-state JSON soak has passed on one recorded
-8-CPU environment. Simultaneous multi-node outage and prolonged fault-injection
-coverage remain open.
+additionally terminates a dedicated listener, injects duplicate wake-ups,
+isolates a bounded-buffer slow subscriber, SIGKILLs two nodes simultaneously,
+and verifies ordered replay, cursor catch-up, and message-ID live resume. It
+also kills the origin of a scheduled message before its due time, stops
+PostgreSQL and MinIO independently, and kills an in-flight mobile-relay lease
+owner before requiring another node to reclaim and complete the content-blind
+job.
+The target-scale 10-minute steady-state soak has passed independently for JSON,
+raw, SSE, and WebSocket at source commit `5ecabbc`. On four separate 4-CPU
+GitHub-hosted runners, commit p95 ranged from 124.46 to 162.10 ms; every format
+committed 300,000 messages and delivered all 3,000,000 expected subscriber
+events with zero loss, duplicates, order errors, disconnects, durable-log
+mismatches, or final cursor lag. These are single-host measurements, not a
+portable capacity certificate.
 
 SQLite uses WAL plus a per-database live-process lock and is strictly
 single-node.
@@ -247,7 +262,9 @@ this avoids delayed-ACK stalls across PostgreSQL protocol round trips. A failed
 operation is returned to its caller without an ambiguous automatic write retry;
 that lane replaces its connection for subsequent operations. The fixed lanes,
 same-batch duplicate handling, forced-backend-termination recovery, and event
-sequence validation have real-PostgreSQL tests. The recorded target run is
+sequence validation have real-PostgreSQL tests. A regression assertion also
+requires an idle listener's last PostgreSQL query to remain `LISTEN`, preventing
+a query-based busy poll from returning. The recorded target run is
 summarised in [operational limits](docs/operations.md).
 
 Delivery workers share the PostgreSQL outbox using `FOR UPDATE SKIP LOCKED`.
@@ -283,8 +300,10 @@ certification; the exact evidence is recorded in
 - Attachments: filesystem/shared-filesystem, PostgreSQL chunk, and S3-compatible
   stores with `begin/write/finish/abort`, incremental SHA-256,
   content-addressed promotion, byte ranges, quotas, expiry, and one-hour staging
-  cleanup. The current HTTP server still materialises request and response
-  bodies; transport-level streaming and sendfile remain open.
+  cleanup. Mist feeds local upload bodies to every backend in bounded 1 MiB
+  chunks. Authenticated full and Range downloads from filesystem/shared-
+  filesystem backends use sendfile after reference, ETag, and range validation;
+  PostgreSQL and S3 downloads retain their bounded adapter reads.
 - Operations: liveness, readiness, Prometheus metrics, request IDs, human/JSON
   logs, effective configuration, OpenAPI, audit inspection, delivery
   inspection/retry/purge, attachment inspection, and redacted PostgreSQL
@@ -306,11 +325,11 @@ replacement instead.
 
 The intended reconnect contract is at-least-once with de-duplication by the
 12-character message ID; exactly-once delivery across reconnects is not
-promised. One recorded 10-minute target run observed zero stable-connection
-loss, duplicates, order mismatches, or disconnects; this does not strengthen
-the reconnect contract. No outbound telemetry, tracking, CDN, or external fonts
-are used. Outbound traffic is limited to explicitly configured PostgreSQL, S3,
-Web Push endpoints, and mobile relay.
+promised. Recorded 10-minute target runs in all four stream formats observed
+zero stable-connection loss, duplicates, order mismatches, or disconnects;
+this does not strengthen the reconnect contract. No outbound telemetry,
+tracking, CDN, or external fonts are used. Outbound traffic is limited to
+explicitly configured PostgreSQL, S3, Web Push endpoints, and mobile relay.
 
 ## Builds and tests
 
@@ -402,31 +421,45 @@ endpoints, cleanup, and that a raw token cannot be recovered from listings.
 
 `test/container_smoke.sh IMAGE` uses an isolated, throwaway Docker volume and a
 loopback-only ephemeral port. It performs CLI setup, authenticated publish and
-poll, a restart with the same SQLite data, 12-character message-ID recovery,
-and graceful SIGTERM shutdown. The test runs the image with dropped
+poll, an HTTP/1.1 chunked 2 MiB upload, full and Range download verification, a
+restart with the same SQLite data, 12-character message-ID recovery, and
+graceful SIGTERM shutdown. The test runs the image with dropped
 capabilities, `no-new-privileges`, and a read-only root filesystem, then removes
 its container and volume.
 
 `test/cluster_fault.sh` builds one local image and starts three Notify
-containers with real PostgreSQL and MinIO. It checks ordered duplicate-free
-cross-node live delivery, SIGKILLs node B, publishes through nodes A and C,
-restarts B, and verifies ordered replay plus `since=<message ID>` live resume.
-The harness uses a unique Compose project/image and removes its containers,
-volumes, temporary files, and image on every exit. The same test runs weekly
-and on manual dispatch; it is intentionally outside the pull-request fast path.
+containers with real PostgreSQL and MinIO. It exercises listener replacement,
+duplicate wake-ups, slow-subscriber isolation, simultaneous two-node crashes,
+scheduled-origin failover, fail-closed PostgreSQL recovery without a phantom
+commit, MinIO upload failure and cross-node recovery, and lease reclamation
+after killing an in-flight relay worker. The local relay mock rejects message
+bodies and malformed poll IDs. The harness uses a unique Compose project/image
+and removes its containers, volumes, temporary files, and image on every exit.
+The same test runs weekly and on manual dispatch; it is intentionally outside
+the pull-request fast path.
 
 `test/cluster_soak.sh` is the fail-closed target load gate. Its defaults are
-three nodes, 10,000 live JSON subscriptions, 1,000 topics, 500 publishes per
-second for 600 seconds, and a 200 ms publish-response p95 budget. It rejects
+three nodes, 10,000 live subscriptions, 1,000 topics, 500 publishes per second
+for 600 seconds, JSON format, and a 200 ms publish-response p95 budget. Setting
+`NOTIFY_SOAK_FORMAT` selects JSON, raw, SSE, or WebSocket with the same oracle.
+Publish pacing and response-latency measurement run on a dedicated Node worker
+thread, so decoding 10,000 subscriber streams cannot delay the latency clock.
+The resource observer defaults to one `docker stats --no-stream` sample per
+minute and records that interval in `environment.json`; its own multi-second
+daemon sample therefore stays outside five percent of a ten-minute latency
+population. `NOTIFY_SOAK_RESOURCE_SAMPLE_SECONDS` can shorten the interval for
+diagnosis, but such a run is separate performance evidence.
+For runs lasting at least 90 seconds it also requires every subscriber to
+receive the 45-second keepalive cadence. It rejects
 non-loopback endpoints unless explicitly overridden, records host/container/
 PostgreSQL evidence, checks every subscriber for loss, duplicates,
 disconnection, and topic order, then compares that order with the authoritative
 PostgreSQL event sequence. It also fails unless all three durable node cursors
 exist and finish at the event-log head. The harness removes its exact Compose
-project and local image on every exit. The target workflow runs weekly and
-manually and retains its private evidence for seven days; it does not publish
-an image or release artifact. The latest recorded local result and its scope are
-in [operational limits](docs/operations.md).
+project and local image on every exit. The target workflow runs all four formats
+weekly and manually and retains its private evidence for seven days; it does
+not publish an image or release artifact. The latest recorded local result and
+its scope are in [operational limits](docs/operations.md).
 
 Set `NOTIFY_TEST_POSTGRES_HOST` (plus optional `PORT` and `PASSWORD` variants)
 to enable the real PostgreSQL contract suite. Set `NOTIFY_TEST_S3_ENDPOINT`

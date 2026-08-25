@@ -5,6 +5,7 @@ import gleam/json
 import gleam/list
 import gleam/option
 import gleam/string
+import notify/attachment_store
 import notify/attachment_store/memory as attachment_memory
 import notify/core/message_json
 import notify/http/router
@@ -114,6 +115,40 @@ pub fn local_attachment_publish_download_range_and_head_test() {
     |> request.set_body(<<>>)
     |> router.handle(runtime)
   assert denied.status == 404
+}
+
+pub fn transport_can_stream_an_authorized_attachment_into_the_store_test() {
+  let runtime = test_runtime()
+  let incoming =
+    request.new()
+    |> request.set_method(http.Put)
+    |> request.set_path("/streamed-reports")
+    |> request.set_header("filename", "streamed.bin")
+    |> request.set_header("content-type", "application/octet-stream")
+    |> request.set_body(Nil)
+  let assert option.Some(upload) =
+    router.streamed_attachment(incoming, runtime, fn(store, expires) {
+      let assert Ok(handle) =
+        store.begin(attachment_store.BeginUpload(expires:))
+      let assert Ok(_) = store.write(handle, <<0, 1>>)
+      let assert Ok(_) = store.write(handle, <<2, 3, 4, 5>>)
+      store.finish(handle)
+    })
+  assert upload.status == 200
+  let assert Ok(encoded) = bit_array.to_string(upload.body)
+  let assert Ok(published) = json.parse(encoded, message_json.decoder())
+  let assert option.Some(attachment) = published.attachment
+  assert attachment.size == option.Some(6)
+
+  let path = attachment.url |> string.replace("https://notify.example", "")
+  let downloaded =
+    request.new()
+    |> request.set_method(http.Get)
+    |> request.set_path(path)
+    |> request.set_body(<<>>)
+    |> router.handle(runtime)
+  assert downloaded.status == 200
+  assert downloaded.body == <<0, 1, 2, 3, 4, 5>>
 }
 
 pub fn attachment_filename_is_percent_decoded_for_content_disposition_test() {

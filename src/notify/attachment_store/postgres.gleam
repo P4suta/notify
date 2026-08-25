@@ -14,7 +14,9 @@ import postgleam/error as pg_error
 
 type State {
   State(
+    config: Config,
     connection: postgleam.Connection,
+    reconnect: Bool,
     uploads: List(Pending),
     max_file: Int,
     max_total: Int,
@@ -122,7 +124,15 @@ pub fn start(
       postgleam.disconnect(connection)
       Error(error)
     }
-    Ok(_) -> start_actor(State(connection:, uploads: [], max_file:, max_total:))
+    Ok(_) ->
+      start_actor(State(
+        config:,
+        connection:,
+        reconnect: False,
+        uploads: [],
+        max_file:,
+        max_total:,
+      ))
   }
 }
 
@@ -177,66 +187,97 @@ fn start_actor(state: State) -> Result(Store, attachment_store.Error) {
 }
 
 fn handle(state: State, command: Command) -> actor.Next(State, Command) {
+  case ready_connection(state) {
+    Error(error) -> reject_command(state, command, error)
+    Ok(ready) -> handle_ready(ready, command)
+  }
+}
+
+fn handle_ready(state: State, command: Command) -> actor.Next(State, Command) {
   case command {
     Begin(upload, reply) -> {
       let #(next, response) = begin(state, upload, 8)
-      process.send(reply, response)
-      actor.continue(next)
+      respond(next, reply, response)
     }
     Write(handle, chunk, reply) -> {
       let #(next, response) = write(state, handle, chunk)
-      process.send(reply, response)
-      actor.continue(next)
+      respond(next, reply, response)
     }
     Finish(handle, reply) -> {
       let #(next, response) = finish(state, handle)
-      process.send(reply, response)
-      actor.continue(next)
+      respond(next, reply, response)
     }
     Abort(handle, reply) -> {
       let #(next, response) = abort(state, handle)
-      process.send(reply, response)
-      actor.continue(next)
+      respond(next, reply, response)
     }
-    Put(upload, reply) -> {
-      process.send(reply, put(state, upload))
-      actor.continue(state)
-    }
-    Head(key, reply) -> {
-      process.send(reply, head(state.connection, key))
-      actor.continue(state)
-    }
-    Get(key, range, reply) -> {
-      process.send(reply, get(state.connection, key, range))
-      actor.continue(state)
-    }
-    List(reply) -> {
-      process.send(reply, list_objects(state.connection))
-      actor.continue(state)
-    }
-    Page(after, limit, reply) -> {
-      process.send(reply, page_objects(state.connection, after, limit))
-      actor.continue(state)
-    }
-    Delete(key, reply) -> {
-      process.send(reply, delete(state.connection, key))
-      actor.continue(state)
-    }
+    Put(upload, reply) -> respond(state, reply, put(state, upload))
+    Head(key, reply) -> respond(state, reply, head(state.connection, key))
+    Get(key, range, reply) ->
+      respond(state, reply, get(state.connection, key, range))
+    List(reply) -> respond(state, reply, list_objects(state.connection))
+    Page(after, limit, reply) ->
+      respond(state, reply, page_objects(state.connection, after, limit))
+    Delete(key, reply) -> respond(state, reply, delete(state.connection, key))
     Cleanup(now, reply) -> {
-      process.send(reply, cleanup(state.connection, now))
-      actor.continue(
+      let next =
         State(
           ..state,
           uploads: list.filter(state.uploads, fn(upload) {
             upload.started_at > now - 3600
           }),
-        ),
-      )
+        )
+      respond(next, reply, cleanup(state.connection, now))
     }
-    Health(reply) -> {
-      process.send(reply, health(state.connection))
-      actor.continue(state)
-    }
+    Health(reply) -> respond(state, reply, health(state.connection))
+  }
+}
+
+fn respond(
+  state: State,
+  reply: Subject(Result(value, attachment_store.Error)),
+  outcome: Result(value, attachment_store.Error),
+) -> actor.Next(State, Command) {
+  process.send(reply, outcome)
+  actor.continue(case outcome {
+    Error(attachment_store.Unavailable(_)) -> State(..state, reconnect: True)
+    _ -> state
+  })
+}
+
+fn reject_command(
+  state: State,
+  command: Command,
+  error: attachment_store.Error,
+) -> actor.Next(State, Command) {
+  case command {
+    Begin(_, reply) -> process.send(reply, Error(error))
+    Write(_, _, reply) -> process.send(reply, Error(error))
+    Finish(_, reply) -> process.send(reply, Error(error))
+    Abort(_, reply) -> process.send(reply, Error(error))
+    Put(_, reply) -> process.send(reply, Error(error))
+    Head(_, reply) -> process.send(reply, Error(error))
+    Get(_, _, reply) -> process.send(reply, Error(error))
+    List(reply) -> process.send(reply, Error(error))
+    Page(_, _, reply) -> process.send(reply, Error(error))
+    Delete(_, reply) -> process.send(reply, Error(error))
+    Cleanup(_, reply) -> process.send(reply, Error(error))
+    Health(reply) -> process.send(reply, Error(error))
+  }
+  actor.continue(state)
+}
+
+fn ready_connection(state: State) -> Result(State, attachment_store.Error) {
+  case state.reconnect {
+    False -> Ok(state)
+    True ->
+      case postgleam.connect(state.config) {
+        Error(error) -> Error(map_error(error))
+        Ok(connection) -> {
+          postgleam.disconnect(state.connection)
+          Ok(State(..state, connection:, reconnect: False))
+        }
+      }
   }
 }
 

@@ -1188,13 +1188,11 @@ fn fetch_events(
   node_id: String,
   limit: Int,
 ) -> Result(List(ClusterEvent), storage.Error) {
-  use _ <- result.try(touch_node_cursor(connection, node_id))
-  use cursor <- result.try(node_cursor(connection, node_id))
   use response <- result.try(
     postgleam.query_with(
       connection,
-      "SELECT sequence, origin_node, payload FROM notify_event_log WHERE sequence > $1 ORDER BY sequence ASC LIMIT $2",
-      [postgleam.int(cursor), postgleam.int(max(1, limit))],
+      "WITH cursor AS (INSERT INTO notify_node_cursors(node_id, sequence) VALUES ($1, 0) ON CONFLICT(node_id) DO UPDATE SET updated_at = now() RETURNING sequence) SELECT event.sequence, event.origin_node, event.payload FROM notify_event_log AS event CROSS JOIN cursor WHERE event.sequence > cursor.sequence ORDER BY event.sequence ASC LIMIT $2",
+      [postgleam.text(node_id), postgleam.int(max(1, limit))],
       {
         use sequence <- decode.element(0, decode.int)
         use origin <- decode.element(1, decode.text)
@@ -1213,38 +1211,6 @@ fn fetch_events(
     )
     Ok(ClusterEvent(row.0, row.1, decoded))
   })
-}
-
-fn touch_node_cursor(
-  connection: postgleam.Connection,
-  node_id: String,
-) -> Result(Nil, storage.Error) {
-  postgleam.query(
-    connection,
-    "INSERT INTO notify_node_cursors(node_id, sequence) VALUES ($1, 0) ON CONFLICT(node_id) DO UPDATE SET updated_at = now()",
-    [postgleam.text(node_id)],
-  )
-  |> result.map(fn(_) { Nil })
-  |> result.map_error(map_error)
-}
-
-fn node_cursor(
-  connection: postgleam.Connection,
-  node_id: String,
-) -> Result(Int, storage.Error) {
-  use response <- result.try(
-    postgleam.query_with(
-      connection,
-      "SELECT sequence FROM notify_node_cursors WHERE node_id = $1",
-      [postgleam.text(node_id)],
-      {
-        use sequence <- decode.element(0, decode.int)
-        decode.success(sequence)
-      },
-    )
-    |> result.map_error(map_error),
-  )
-  Ok(response.rows |> list.first |> result.unwrap(0))
 }
 
 fn ack_events(

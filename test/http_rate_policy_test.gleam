@@ -56,6 +56,30 @@ pub fn subscriptions_and_publications_use_independent_buckets_test() {
     ]
 }
 
+pub fn bounded_polls_do_not_consume_live_subscription_credit_test() {
+  let poll =
+    request.new()
+    |> request.set_method(http.Get)
+    |> request.set_path("/alerts/json")
+    |> request.set_query([#("poll", "1")])
+    |> request.set_body(<<>>)
+  assert rate_policy.preflight(poll, 16_777_216)
+    == [rate_policy.Charge(rate_limit.Request, 1)]
+
+  let short_alias =
+    poll
+    |> request.set_query([#("po", "yes")])
+  assert rate_policy.preflight(short_alias, 16_777_216)
+    == [rate_policy.Charge(rate_limit.Request, 1)]
+
+  let header_alias =
+    poll
+    |> request.set_query([])
+    |> request.set_header("x-poll", "true")
+  assert rate_policy.preflight(header_alias, 16_777_216)
+    == [rate_policy.Charge(rate_limit.Request, 1)]
+}
+
 pub fn local_attachment_upload_charges_quota_and_mebibytes_test() {
   let upload =
     request.new()

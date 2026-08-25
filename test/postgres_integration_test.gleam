@@ -114,6 +114,7 @@ fn fixture(id: String, scheduled: Bool, timestamp: Int) -> message.Message {
     scheduled:,
     cached: True,
     sequence_id: None,
+    poll_id: None,
   )
 }
 
@@ -137,6 +138,125 @@ fn delivery_fixture(id: String, kind: delivery.Kind) -> delivery.NewJob {
     topic_hash: "hash",
     available_at: 100,
   )
+}
+
+fn named_configuration(
+  configuration: config.Config,
+  application_name: String,
+) -> config.Config {
+  let config.Config(extra_parameters:, ..) = configuration
+  config.extra_parameters(configuration, [
+    #("application_name", application_name),
+    ..extra_parameters
+  ])
+}
+
+fn terminate_application_connection(
+  admin: postgleam.Connection,
+  application_name: String,
+) -> Nil {
+  let assert Ok(pid) =
+    postgleam.query_one(
+      admin,
+      "SELECT COALESCE(MAX(pid), 0)::bigint FROM pg_stat_activity WHERE application_name = $1",
+      [postgleam.text(application_name)],
+      {
+        use pid <- decode.element(0, decode.int)
+        decode.success(pid)
+      },
+    )
+  assert pid > 0
+  let assert Ok(True) =
+    postgleam.query_one(
+      admin,
+      "SELECT pg_terminate_backend($1)",
+      [postgleam.int(pid)],
+      {
+        use terminated <- decode.element(0, decode.bool)
+        decode.success(terminated)
+      },
+    )
+  Nil
+}
+
+fn assert_failed_call_then_reconnects(
+  operation: fn() -> Result(value, error),
+) -> Nil {
+  let assert Error(_) = operation()
+  let assert Ok(_) = operation()
+  Nil
+}
+
+pub fn postgres_auxiliary_lanes_replace_terminated_connections_test() {
+  case test_database() {
+    Error(_) -> Nil
+    Ok(database) -> {
+      let TestDatabase(configuration:, admin:, ..) = database
+
+      let audit_name = "notify-test-audit-reconnect"
+      let assert Ok(audit_store) =
+        audit_postgres.start(named_configuration(configuration, audit_name))
+      assert audit_store.health() == Ok(Nil)
+      terminate_application_connection(admin, audit_name)
+      assert_failed_call_then_reconnects(audit_store.health)
+
+      let delivery_name = "notify-test-delivery-reconnect"
+      let assert Ok(delivery_store) =
+        delivery_postgres.start(named_configuration(
+          configuration,
+          delivery_name,
+        ))
+      assert delivery_store.health() == Ok(Nil)
+      terminate_application_connection(admin, delivery_name)
+      assert_failed_call_then_reconnects(delivery_store.health)
+
+      let identity_name = "notify-test-identity-reconnect"
+      let assert Ok(identity_store) =
+        identity_postgres.open_store(named_configuration(
+          configuration,
+          identity_name,
+        ))
+      let assert Ok(_) = identity_store.setup_required()
+      terminate_application_connection(admin, identity_name)
+      assert_failed_call_then_reconnects(identity_store.setup_required)
+
+      let rate_name = "notify-test-rate-reconnect"
+      let assert Ok(limiter) =
+        rate_limit.postgres(
+          named_configuration(configuration, rate_name),
+          requests: 100,
+          window_seconds: 60,
+        )
+      let assert Ok(_) = limiter.check(rate_limit.Request, "client", 100, 1)
+      terminate_application_connection(admin, rate_name)
+      assert_failed_call_then_reconnects(fn() {
+        limiter.check(rate_limit.Request, "client", 101, 1)
+      })
+
+      let attachment_name = "notify-test-attachment-reconnect"
+      let assert Ok(attachment_store) =
+        attachment_postgres.start(
+          named_configuration(configuration, attachment_name),
+          max_file_bytes: 1024,
+          max_total_bytes: 4096,
+        )
+      assert attachment_store.health() == Ok(Nil)
+      terminate_application_connection(admin, attachment_name)
+      assert_failed_call_then_reconnects(attachment_store.health)
+
+      let webpush_name = "notify-test-webpush-reconnect"
+      let assert Ok(webpush_store) =
+        webpush_postgres.start(
+          named_configuration(configuration, webpush_name),
+          max_endpoints_per_ip: 10,
+        )
+      assert webpush_store.health() == Ok(Nil)
+      terminate_application_connection(admin, webpush_name)
+      assert_failed_call_then_reconnects(webpush_store.health)
+
+      drop_test_database(database)
+    }
+  }
 }
 
 pub fn postgres_audit_is_shared_and_keyset_paginated_test() {
@@ -688,10 +808,16 @@ pub fn postgres_cluster_bus_recovers_listener_and_ignores_duplicate_wakes_test()
 
       let assert Ok(first_listener_pid) =
         wait_for_listener_pid(admin, listener_name, 0, 100)
+      // A healthy listener blocks on PostgreSQL NotificationResponse frames.
+      // Its last query therefore remains LISTEN; an accidental SELECT-based
+      // poll loop changes this field and is caught here.
+      process.sleep(100)
+      assert wait_for_blocking_listener(admin, first_listener_pid, 20)
       let first =
         fixture_on_topic("PgFault001XY", False, 400, "postgres-cluster-fault")
       assert origin_messages.save(first) == Ok(first)
       assert process.receive(deliveries, 10_000) == Ok(first.id)
+      assert wait_for_blocking_listener(admin, first_listener_pid, 20)
       send_duplicate_wakes(admin)
       assert process.receive(deliveries, 1500) == Error(Nil)
 
@@ -711,7 +837,10 @@ pub fn postgres_cluster_bus_recovers_listener_and_ignores_duplicate_wakes_test()
       let assert Ok(second_listener_pid) =
         wait_for_listener_pid(admin, listener_name, first_listener_pid, 100)
       assert second_listener_pid != first_listener_pid
+      process.sleep(100)
+      assert wait_for_blocking_listener(admin, second_listener_pid, 20)
       assert process.receive(deliveries, 10_000) == Ok(second.id)
+      assert wait_for_blocking_listener(admin, second_listener_pid, 20)
       send_duplicate_wakes(admin)
       assert process.receive(deliveries, 1500) == Error(Nil)
 
@@ -1279,6 +1408,34 @@ fn wait_for_node_cursor(
             minimum_sequence,
             remaining - 1,
           )
+        }
+      }
+  }
+}
+
+fn wait_for_blocking_listener(
+  connection: postgleam.Connection,
+  listener_pid: Int,
+  remaining: Int,
+) -> Bool {
+  case remaining {
+    0 -> False
+    _ ->
+      case
+        postgleam.query_one(
+          connection,
+          "SELECT COALESCE(query LIKE 'LISTEN %notify_events%', FALSE) FROM pg_stat_activity WHERE pid = $1",
+          [postgleam.int(listener_pid)],
+          {
+            use waiting <- decode.element(0, decode.bool)
+            decode.success(waiting)
+          },
+        )
+      {
+        Ok(True) -> True
+        _ -> {
+          process.sleep(20)
+          wait_for_blocking_listener(connection, listener_pid, remaining - 1)
         }
       }
   }

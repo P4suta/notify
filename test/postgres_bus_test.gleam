@@ -28,6 +28,7 @@ fn fixture(id: String, scheduled: Bool) -> message.Message {
     scheduled:,
     cached: True,
     sequence_id: None,
+    poll_id: None,
   )
 }
 

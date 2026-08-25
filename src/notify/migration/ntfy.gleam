@@ -587,6 +587,7 @@ fn normalise_source_message(
       scheduled: row.published == 0,
       cached: True,
       sequence_id: nonempty(row.sequence_id),
+      poll_id: None,
     ),
     local:,
   ))
