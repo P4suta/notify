@@ -29,6 +29,7 @@
          s3_health/1, valid_ip_address/1, same_ip_address/2,
          sqlite_backup/2, sqlite_verify/1, sqlite_restore/2,
          sqlite_process_lock/1, sqlite_process_unlock/1,
+         sqlite_windows_tasklist_has_pid/2,
          wait_for_shutdown_signal/0, linked_processes/0,
          shutdown_process/2, shutdown_processes/2,
          set_trap_exits/1, flush_exit_messages/0,
@@ -316,6 +317,7 @@ sqlite_local_pid_alive(Pid) ->
         true ->
             case os:type() of
                 {unix, _} -> sqlite_unix_pid_alive(Pid);
+                {win32, _} -> sqlite_windows_pid_alive(Pid);
                 _ -> true
             end
     end.
@@ -340,6 +342,48 @@ sqlite_wait_for_pid_probe(Port) ->
         port_close(Port),
         true
     end.
+
+sqlite_windows_pid_alive(Pid) ->
+    case os:find_executable("tasklist") of
+        false -> true;
+        Tasklist ->
+            try
+                Port = open_port(
+                    {spawn_executable, Tasklist},
+                    [binary, exit_status, use_stdio, stderr_to_stdout,
+                     {args, ["/FI", "PID eq " ++ Pid,
+                             "/FO", "CSV", "/NH"]}]),
+                sqlite_wait_for_windows_pid_probe(
+                    Port, unicode:characters_to_binary(Pid), <<>>)
+            catch
+                _:_ -> true
+            end
+    end.
+
+sqlite_wait_for_windows_pid_probe(Port, Pid, Output) ->
+    receive
+        {Port, {data, Data}}
+          when byte_size(Output) + byte_size(Data) =< 65536 ->
+            sqlite_wait_for_windows_pid_probe(
+                Port, Pid, <<Output/binary, Data/binary>>);
+        {Port, {data, _}} ->
+            port_close(Port),
+            true;
+        {Port, {exit_status, 0}} when byte_size(Output) > 0 ->
+            sqlite_windows_tasklist_has_pid(Output, Pid);
+        {Port, {exit_status, 0}} -> true;
+        {Port, {exit_status, _}} -> true;
+        {Port, closed} -> true
+    after 2000 ->
+        port_close(Port),
+        true
+    end.
+
+sqlite_windows_tasklist_has_pid(Output, Pid)
+  when is_binary(Output), is_binary(Pid) ->
+    Needle = iolist_to_binary([<<34, 44, 34>>, Pid, <<34, 44, 34>>]),
+    binary:match(Output, Needle) =/= nomatch;
+sqlite_windows_tasklist_has_pid(_, _) -> false.
 
 sqlite_backup(Source, Destination) ->
     case sqlite_paths(Source, Destination) of
