@@ -49,6 +49,20 @@ function Invoke-ErlangNifProbe {
     if ($ertsExecutables.Count -ne 1) {
         throw "native install did not contain exactly one erl.exe"
     }
+    $bootFiles = @(Get-ChildItem -LiteralPath $env:NOTIFY_INSTALL_DIR `
+        -Recurse -File -Filter "start.boot")
+    if ($bootFiles.Count -ne 1) {
+        throw "native install did not contain exactly one start.boot"
+    }
+    $releaseRoot = $bootFiles[0].Directory.Parent.Parent
+    $releaseLibrary = Join-Path $releaseRoot.FullName "lib"
+    if (-not (Test-Path -LiteralPath $releaseLibrary -PathType Container)) {
+        throw "native install omitted its release library directory"
+    }
+    $bootPath = $bootFiles[0].FullName.Substring(
+        0,
+        $bootFiles[0].FullName.Length - ".boot".Length
+    )
     $libraries = @(Get-ChildItem -LiteralPath $env:NOTIFY_INSTALL_DIR `
         -Recurse -File -Filter $LibraryName)
     if ($libraries.Count -ne 1) {
@@ -67,6 +81,9 @@ function Invoke-ErlangNifProbe {
     try {
         $PSNativeCommandUseErrorActionPreference = $false
         $probeOutput = @(& $ertsExecutables[0].FullName `
+            -root $releaseRoot.FullName `
+            -boot $bootPath `
+            -boot_var RELEASE_LIB $releaseLibrary `
             -noshell `
             -pa $ebinPath `
             -eval $Expression 2>&1 | ForEach-Object { "$_" })
