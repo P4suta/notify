@@ -212,7 +212,7 @@ single URL, after which reuse is rejected across the cluster.
 The durable PostgreSQL event log is authoritative. LISTEN/NOTIFY only wakes
 nodes; each node resumes from its stored cursor after lost notifications or a
 restart. The listener blocks on PostgreSQL notification frames instead of
-polling with queries, coalesces queued wakes for five milliseconds, and still
+polling with queries, coalesces queued wakes for 25 milliseconds, and still
 performs a catch-up after a one-second quiet timeout. Event cursor heartbeat
 and the next 256-row page are read in one statement. A node advances its cursor
 only after the broker has synchronously

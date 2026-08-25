@@ -19,7 +19,7 @@ const reconnect_milliseconds = 1000
 
 const notification_wait_milliseconds = 1000
 
-const wake_coalesce_milliseconds = 5
+const wake_coalesce_milliseconds = 25
 
 const flush_timeout_milliseconds = 5000
 
@@ -83,10 +83,11 @@ fn listen_loop(
 ) -> Nil {
   case connection.receive_message(state, notification_wait_milliseconds) {
     Ok(#(postgres_message.NotificationResponse(_, _, _), next_state)) -> {
-      // Give concurrent commits a very small window to coalesce. Reissuing
-      // the idempotent LISTEN command then drains queued NotificationResponse frames before one
-      // authoritative event-log catch-up, rather than polling PostgreSQL in a
-      // tight loop or issuing one cursor read for every wake-up.
+      // Give concurrent commits a bounded window to coalesce. Reissuing the
+      // idempotent LISTEN command then drains queued NotificationResponse
+      // frames before one authoritative event-log catch-up, rather than
+      // polling PostgreSQL in a tight loop or issuing one cursor read and ACK
+      // for every wake-up.
       process.sleep(wake_coalesce_milliseconds)
       case flush_notifications(next_state) {
         Error(_) ->

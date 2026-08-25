@@ -301,7 +301,7 @@ per-node event dispatcher is the single live-delivery path for both local and
 remote origins, keeping subscriber work outside publish commit latency.
 
 The dedicated listener waits directly for PostgreSQL `NotificationResponse`
-frames. After a wake it allows five milliseconds for concurrent commits to
+frames. After a wake it allows 25 milliseconds for concurrent commits to
 coalesce, flushes queued wake frames, and drains the authoritative log once.
 A one-second receive timeout triggers the same catch-up so a lost wake cannot
 strand committed events. The event connection combines cursor creation or
