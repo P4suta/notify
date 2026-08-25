@@ -119,6 +119,29 @@ function Invoke-ErlangNifProbe {
     }
 }
 
+function Write-RedactedDiagnostic {
+    param(
+        [string]$Label,
+        [string]$Path,
+        [int]$FirstLines = 0
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or `
+        -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return
+    }
+    $content = if ($FirstLines -gt 0) {
+        (Get-Content -LiteralPath $Path -First $FirstLines) -join "`n"
+    }
+    else {
+        Get-Content -LiteralPath $Path -Raw
+    }
+    $content = $content -replace 'tk_[A-Za-z0-9]{29}', '<redacted>'
+    $content = $content -replace [regex]::Escape($script:password), '<redacted>'
+    Write-Output "${Label}:"
+    Write-Output $content
+}
+
 function Start-NotifyServer {
     $script:serverLog = Join-Path $script:smokeDirectory "server.log"
     $script:serverError = Join-Path $script:smokeDirectory "server-error.log"
@@ -138,7 +161,8 @@ function Start-NotifyServer {
         }
         catch {
             if ($script:serverProcess.HasExited) {
-                throw "native Windows server exited before becoming healthy"
+                $script:serverProcess.WaitForExit()
+                throw "native Windows server exited before becoming healthy (exit $($script:serverProcess.ExitCode))"
             }
             Start-Sleep -Seconds 1
         }
@@ -251,9 +275,13 @@ try {
     Write-Output "Windows native setup, publish/poll, and forced-stop recovery smoke passed"
 }
 catch {
+    Write-RedactedDiagnostic "Native server stdout" $script:serverLog
+    Write-RedactedDiagnostic "Native server stderr" $script:serverError
     if (Test-Path -LiteralPath $env:ERL_CRASH_DUMP -PathType Leaf) {
-        Write-Output "Erlang crash dump tail:"
-        Get-Content -LiteralPath $env:ERL_CRASH_DUMP -Tail 120
+        Write-RedactedDiagnostic `
+            "Erlang crash dump head (first 240 lines)" `
+            $env:ERL_CRASH_DUMP `
+            240
     }
     throw
 }
