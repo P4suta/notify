@@ -65,13 +65,25 @@ fn test_database() -> Result(TestDatabase, Nil) {
       Error(Nil)
     }
     Ok(_) ->
-      Ok(TestDatabase(
-        configuration: config.extra_parameters(base_configuration, [
-          #("search_path", schema),
-        ]),
-        admin:,
-        schema:,
-      ))
+      case postgleam.simple_query(admin, "SET search_path TO " <> schema) {
+        Error(_) -> {
+          let _ =
+            postgleam.simple_query(
+              admin,
+              "DROP SCHEMA " <> schema <> " CASCADE",
+            )
+          postgleam.disconnect(admin)
+          Error(Nil)
+        }
+        Ok(_) ->
+          Ok(TestDatabase(
+            configuration: config.extra_parameters(base_configuration, [
+              #("search_path", schema),
+            ]),
+            admin:,
+            schema:,
+          ))
+      }
   }
 }
 
@@ -379,13 +391,17 @@ pub fn postgres_storage_pool_recovers_and_serializes_commits_test() {
       // actor must evaluate them in the same database microbatch.
       let batched_duplicate =
         fixture_on_topic("PgBatchDupXY", False, 90, "postgres-concurrency")
+      let duplicate_started = process.new_subject()
       let duplicate_commits = process.new_subject()
-      int.range(from: 1, to: 2, with: Nil, run: fn(_, _) {
+      int.range(from: 1, to: 3, with: Nil, run: fn(_, _) {
         process.spawn(fn() {
+          process.send(duplicate_started, Nil)
           process.send(duplicate_commits, messages.save(batched_duplicate))
         })
         Nil
       })
+      assert process.receive(duplicate_started, 5000) == Ok(Nil)
+      assert process.receive(duplicate_started, 5000) == Ok(Nil)
       process.sleep(20)
       assert process.receive(duplicate_commits, 50) == Error(Nil)
 
