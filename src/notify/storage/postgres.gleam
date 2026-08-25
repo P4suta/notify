@@ -459,6 +459,74 @@ fn commit(
   jobs: List(delivery.NewJob),
 ) -> Result(Message, storage.Error) {
   let payload = message_json.encode_storage(message) |> json.to_string
+  case jobs {
+    [] -> fast_commit(state, message, payload)
+    _ -> transactional_commit(state, message, payload, jobs)
+  }
+}
+
+const fast_commit_query = "
+WITH commit_lock AS MATERIALIZED (
+  SELECT pg_advisory_xact_lock($8::bigint)
+), inserted_message AS (
+  INSERT INTO notify_messages(
+    id, topic, time, expires, scheduled, sequence_id, payload
+  )
+  SELECT
+    $1::text,
+    $2::text,
+    $3::bigint,
+    $4::bigint,
+    $5::boolean,
+    $6::text,
+    $7::jsonb
+  FROM commit_lock
+  RETURNING id
+), inserted_event AS (
+  INSERT INTO notify_event_log(
+    message_id, event, topic, time, origin_node, payload
+  )
+  SELECT
+    $1::text,
+    $9::text,
+    $2::text,
+    $3::bigint,
+    $10::text,
+    $7::jsonb
+  FROM inserted_message
+  RETURNING sequence
+)
+SELECT inserted_event.sequence, pg_notify('notify_events', $1::text)
+FROM inserted_event
+"
+
+fn fast_commit(
+  state: State,
+  message: Message,
+  payload: String,
+) -> Result(Message, storage.Error) {
+  postgleam.query(state.connection, fast_commit_query, [
+    postgleam.text(message.id),
+    postgleam.text(topic.to_string(message.topic)),
+    postgleam.int(message.time),
+    postgleam.nullable(message.expires, postgleam.int),
+    postgleam.bool(message.scheduled),
+    postgleam.nullable(message.sequence_id, postgleam.text),
+    postgleam.jsonb(payload),
+    postgleam.int(event_commit_lock_key),
+    postgleam.text(message.event |> message.event_to_string),
+    postgleam.text(state.node_id),
+  ])
+  |> result.map(fn(_) { message })
+  |> result.map_error(map_error)
+}
+
+fn transactional_commit(
+  state: State,
+  message: Message,
+  payload: String,
+  jobs: List(delivery.NewJob),
+) -> Result(Message, storage.Error) {
   postgleam.transaction(state.connection, fn(tx) {
     use _ <- result.try(lock_event_commit(tx))
     use _ <- result.try(

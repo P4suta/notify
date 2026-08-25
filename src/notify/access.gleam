@@ -161,30 +161,24 @@ pub fn authorize(
   case access {
     OpenAccess -> Ok(True)
     ManagedAccess(store, _) -> {
-      use required <- result.try(
-        store.setup_required() |> result.map_error(IdentityError),
+      let username = case principal {
+        acl.Anonymous -> "*"
+        acl.Authenticated(username, _) -> username
+      }
+      use policy <- result.try(
+        store.authorization_policy(username) |> result.map_error(IdentityError),
       )
-      case required {
+      case policy.setup_required {
         True -> Error(SetupRequired)
         False -> {
-          let username = case principal {
-            acl.Anonymous -> "*"
-            acl.Authenticated(username, _) -> username
-          }
-          use rules <- result.try(
-            store.rules_for(username) |> result.map_error(IdentityError),
-          )
-          use fallback <- result.try(
-            store.default_access() |> result.map_error(IdentityError),
-          )
           Ok(
             list.all(topics, fn(topic) {
               acl.authorize(
                 principal,
                 topic.to_string(topic),
                 operation,
-                rules,
-                fallback,
+                policy.rules,
+                policy.default_access,
               )
             }),
           )

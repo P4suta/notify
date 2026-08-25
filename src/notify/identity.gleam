@@ -64,6 +64,15 @@ pub type GrantCursor {
   GrantCursor(username: String, topic_pattern: String)
 }
 
+/// One consistent snapshot of every value needed for an ACL decision.
+pub type AuthorizationPolicy {
+  AuthorizationPolicy(
+    setup_required: Bool,
+    default_access: Permission,
+    rules: List(acl.Rule),
+  )
+}
+
 pub type Error {
   Unavailable(String)
   Conflict(String)
@@ -85,6 +94,7 @@ pub type Store {
     complete_setup: fn(Setup) -> Result(User, Error),
     user_by_name: fn(String) -> Result(User, Error),
     user_by_token_hash: fn(String, Int) -> Result(User, Error),
+    authorization_policy: fn(String) -> Result(AuthorizationPolicy, Error),
     default_access: fn() -> Result(Permission, Error),
     set_default_access: fn(Permission) -> Result(Permission, Error),
     rules_for: fn(String) -> Result(List(acl.Rule), Error),

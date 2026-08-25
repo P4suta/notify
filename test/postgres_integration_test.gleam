@@ -380,6 +380,21 @@ pub fn postgres_storage_pool_recovers_and_serializes_commits_test() {
           Ok(fixture_on_topic("PgLocked01XY", False, 90, "postgres-concurrency")),
         )
 
+      let duplicate =
+        fixture_on_topic("PgAtomic01XY", False, 90, "postgres-concurrency")
+      assert messages.save(duplicate) == Ok(duplicate)
+      let assert Error(storage.Conflict(_)) = messages.save(duplicate)
+      let assert Ok(1) =
+        postgleam.query_one(
+          admin,
+          "SELECT COUNT(*)::bigint FROM notify_event_log WHERE message_id = $1",
+          [postgleam.text(duplicate.id)],
+          {
+            use count <- decode.element(0, decode.int)
+            decode.success(count)
+          },
+        )
+
       let concurrent_commits = process.new_subject()
       int.range(from: 1, to: 17, with: Nil, run: fn(_, index) {
         process.spawn(fn() {
@@ -1017,6 +1032,36 @@ pub fn postgres_delivery_webpush_and_rate_limit_contract_test() {
       assert limiter_a.check(rate_limit.Request, client_key, checked_at, 1)
         == Ok(rate_limit.Limited(retry_after: 30, reset_at: checked_at + 60))
       assert limiter_b.check(rate_limit.Subscription, client_key, checked_at, 1)
+        == Ok(rate_limit.Allowed(remaining: 0, reset_at: checked_at + 60))
+      assert limiter_b.check(
+          rate_limit.AttachmentBandwidth,
+          client_key,
+          checked_at,
+          5,
+        )
+        == Ok(rate_limit.Limited(retry_after: 60, reset_at: checked_at + 60))
+
+      let batch_key = client_key <> "-batch"
+      assert limiter_a.check_many(
+          [
+            #(rate_limit.Request, 1),
+            #(rate_limit.Subscription, 2),
+            #(rate_limit.TopicCreation, 1),
+          ],
+          batch_key,
+          checked_at,
+        )
+        == Ok([
+          #(
+            rate_limit.Request,
+            rate_limit.Allowed(remaining: 1, reset_at: checked_at + 30),
+          ),
+          #(
+            rate_limit.Subscription,
+            rate_limit.Limited(retry_after: 60, reset_at: checked_at + 60),
+          ),
+        ])
+      assert limiter_b.check(rate_limit.TopicCreation, batch_key, checked_at, 7)
         == Ok(rate_limit.Allowed(remaining: 0, reset_at: checked_at + 60))
 
       let concurrent_key = client_key <> "-concurrent"

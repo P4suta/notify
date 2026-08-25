@@ -102,6 +102,28 @@ pub fn concurrent_checks_never_exceed_the_configured_budget_test() {
   assert allowed == 7
 }
 
+pub fn batch_preserves_bucket_order_and_stops_at_limit_test() {
+  let assert Ok(limiter) = rate_limit.memory(requests: 1, window_seconds: 60)
+  assert limiter.check_many(
+      [
+        #(rate_limit.Request, 1),
+        #(rate_limit.TopicCreation, 2),
+        #(rate_limit.Subscription, 1),
+      ],
+      "batch",
+      400,
+    )
+    == Ok([
+      #(rate_limit.Request, rate_limit.Allowed(remaining: 0, reset_at: 460)),
+      #(
+        rate_limit.TopicCreation,
+        rate_limit.Limited(retry_after: 60, reset_at: 460),
+      ),
+    ])
+  assert limiter.check(rate_limit.Subscription, "batch", 400, 1)
+    == Ok(rate_limit.Allowed(remaining: 0, reset_at: 460))
+}
+
 fn receive_many(subject, remaining: Int, accumulated) {
   case remaining {
     0 -> accumulated

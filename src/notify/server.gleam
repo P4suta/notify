@@ -395,13 +395,54 @@ fn enforce_rate_charges(
 ) -> Response(mist.ResponseData) {
   case charges {
     [] -> continue()
-    [rate_policy.Charge(bucket, cost), ..remaining_charges] ->
-      case limiter.check(bucket, client_key, checked_at, cost) {
-        Ok(rate_limit.Allowed(remaining, reset_at)) ->
-          enforce_rate_charges(
-            remaining_charges,
+    [rate_policy.Charge(first_bucket, _), ..] ->
+      case
+        limiter.check_many(
+          charges
+            |> list.map(fn(charge) {
+              let rate_policy.Charge(bucket, cost) = charge
+              #(bucket, cost)
+            }),
+          client_key,
+          checked_at,
+        )
+      {
+        Ok(decisions) ->
+          apply_rate_decisions(decisions, limiter, checked_at, continue)
+        Error(_) ->
+          response.new(503)
+          |> response.set_header(
+            "content-type",
+            "application/json; charset=utf-8",
+          )
+          |> response.set_header("retry-after", "1")
+          |> response.set_header(
+            "x-notify-ratelimit-bucket",
+            rate_limit.bucket_name(first_bucket),
+          )
+          |> response.set_body(
+            mist.Bytes(bytes_tree.from_string(
+              "{\"code\":50301,\"http\":503,\"error\":\"temporarily unavailable: rate limiter\"}",
+            )),
+          )
+      }
+  }
+}
+
+fn apply_rate_decisions(
+  decisions: List(#(rate_limit.Bucket, rate_limit.Decision)),
+  limiter: rate_limit.Limiter,
+  checked_at: Int,
+  continue: fn() -> Response(mist.ResponseData),
+) -> Response(mist.ResponseData) {
+  case decisions {
+    [] -> continue()
+    [#(bucket, decision), ..remaining_decisions] ->
+      case decision {
+        rate_limit.Allowed(remaining, reset_at) ->
+          apply_rate_decisions(
+            remaining_decisions,
             limiter,
-            client_key,
             checked_at,
             continue,
           )
@@ -411,7 +452,7 @@ fn enforce_rate_charges(
             int.max(0, reset_at - checked_at),
             bucket,
           )
-        Ok(rate_limit.Limited(retry_after, reset_at)) ->
+        rate_limit.Limited(retry_after, reset_at) ->
           response.new(429)
           |> response.set_header(
             "content-type",
@@ -428,22 +469,6 @@ fn enforce_rate_charges(
             0,
             int.max(1, reset_at - checked_at),
             bucket,
-          )
-        Error(_) ->
-          response.new(503)
-          |> response.set_header(
-            "content-type",
-            "application/json; charset=utf-8",
-          )
-          |> response.set_header("retry-after", "1")
-          |> response.set_header(
-            "x-notify-ratelimit-bucket",
-            rate_limit.bucket_name(bucket),
-          )
-          |> response.set_body(
-            mist.Bytes(bytes_tree.from_string(
-              "{\"code\":50301,\"http\":503,\"error\":\"temporarily unavailable: rate limiter\"}",
-            )),
           )
       }
   }

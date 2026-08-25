@@ -19,6 +19,10 @@ type Command {
   CompleteSetup(identity.Setup, Subject(Result(User, identity.Error)))
   UserByName(String, Subject(Result(User, identity.Error)))
   UserByTokenHash(String, Int, Subject(Result(User, identity.Error)))
+  AuthorizationPolicy(
+    String,
+    Subject(Result(identity.AuthorizationPolicy, identity.Error)),
+  )
   DefaultAccess(Subject(Result(acl.Permission, identity.Error)))
   SetDefaultAccess(
     acl.Permission,
@@ -220,6 +224,11 @@ fn start_actor(connection: Connection) -> Result(Store, identity.Error) {
           UserByTokenHash(hash, now, reply)
         })
       },
+      authorization_policy: fn(username) {
+        process.call(subject, 10_000, fn(reply) {
+          AuthorizationPolicy(username, reply)
+        })
+      },
       default_access: fn() { process.call(subject, 10_000, DefaultAccess) },
       set_default_access: fn(permission) {
         process.call(subject, 10_000, fn(reply) {
@@ -297,6 +306,8 @@ fn handle(
       respond1(connection, reply, username, user_by_name)
     UserByTokenHash(hash, now, reply) ->
       respond2(connection, reply, hash, now, user_by_token_hash)
+    AuthorizationPolicy(username, reply) ->
+      respond1(connection, reply, username, authorization_policy)
     DefaultAccess(reply) -> respond(connection, reply, default_access)
     SetDefaultAccess(permission, reply) ->
       respond1(connection, reply, permission, set_default_access)
@@ -526,6 +537,44 @@ fn user_by_token_hash(
     )
     Ok(user)
   })
+}
+
+type AuthorizationRow {
+  AuthorizationRow(
+    setup_required: Bool,
+    default_access: acl.Permission,
+    rule: Option(acl.Rule),
+  )
+}
+
+fn authorization_policy(
+  connection: Connection,
+  username: String,
+) -> Result(identity.AuthorizationPolicy, identity.Error) {
+  use rows <- result.try(
+    sqlight.query(
+      "SELECT NOT state.setup_complete, state.anonymous_read, state.anonymous_write, 0, '', '', 0, 0 FROM auth_state AS state WHERE state.id = 1 UNION ALL SELECT NOT state.setup_complete, state.anonymous_read, state.anonymous_write, 1, rule.username, rule.topic_pattern, rule.readable, rule.writable FROM auth_state AS state JOIN acl_rules AS rule ON rule.username = ? OR rule.username = '*' WHERE state.id = 1",
+      on: connection,
+      with: [sqlight.text(username)],
+      expecting: authorization_row_decoder(),
+    )
+    |> result.map_error(map_error),
+  )
+  case rows {
+    [] -> Error(identity.Corrupt("auth_state row is missing"))
+    [first, ..rows] ->
+      Ok(identity.AuthorizationPolicy(
+        setup_required: first.setup_required,
+        default_access: first.default_access,
+        rules: [first, ..rows]
+          |> list.filter_map(fn(row) {
+            case row.rule {
+              Some(rule) -> Ok(rule)
+              None -> Error(Nil)
+            }
+          }),
+      ))
+  }
 }
 
 fn default_access(
@@ -997,6 +1046,34 @@ fn rule_decoder() -> decode.Decoder(acl.Rule) {
     username:,
     topic_pattern: pattern,
     permission: identity.permission_from_bits(read != 0, write != 0),
+  ))
+}
+
+fn authorization_row_decoder() -> decode.Decoder(AuthorizationRow) {
+  use setup_required <- decode.field(0, decode.int)
+  use read <- decode.field(1, decode.int)
+  use write <- decode.field(2, decode.int)
+  use has_rule <- decode.field(3, decode.int)
+  use username <- decode.field(4, decode.string)
+  use pattern <- decode.field(5, decode.string)
+  use rule_read <- decode.field(6, decode.int)
+  use rule_write <- decode.field(7, decode.int)
+  let rule = case has_rule == 0 {
+    True -> None
+    False ->
+      Some(acl.Rule(
+        username:,
+        topic_pattern: pattern,
+        permission: identity.permission_from_bits(
+          rule_read != 0,
+          rule_write != 0,
+        ),
+      ))
+  }
+  decode.success(AuthorizationRow(
+    setup_required: setup_required != 0,
+    default_access: identity.permission_from_bits(read != 0, write != 0),
+    rule:,
   ))
 }
 

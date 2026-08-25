@@ -21,6 +21,10 @@ type Command {
   CompleteSetup(identity.Setup, Subject(Result(User, identity.Error)))
   UserByName(String, Subject(Result(User, identity.Error)))
   UserByTokenHash(String, Int, Subject(Result(User, identity.Error)))
+  AuthorizationPolicy(
+    String,
+    Subject(Result(identity.AuthorizationPolicy, identity.Error)),
+  )
   DefaultAccess(Subject(Result(acl.Permission, identity.Error)))
   SetDefaultAccess(
     acl.Permission,
@@ -190,6 +194,11 @@ fn start_actor(
           UserByTokenHash(hash, now, reply)
         })
       },
+      authorization_policy: fn(username) {
+        process.call(subject, 30_000, fn(reply) {
+          AuthorizationPolicy(username, reply)
+        })
+      },
       default_access: fn() { process.call(subject, 30_000, DefaultAccess) },
       set_default_access: fn(permission) {
         process.call(subject, 30_000, fn(reply) {
@@ -268,6 +277,8 @@ fn handle(
       respond(connection, reply, user_by_name(connection, username))
     UserByTokenHash(hash, now, reply) ->
       respond(connection, reply, user_by_token_hash(connection, hash, now))
+    AuthorizationPolicy(username, reply) ->
+      respond(connection, reply, authorization_policy(connection, username))
     DefaultAccess(reply) ->
       respond(connection, reply, default_access(connection))
     SetDefaultAccess(permission, reply) ->
@@ -487,6 +498,44 @@ fn user_by_token_hash(
     "WITH matched AS (SELECT t.id AS token_id, u.id, u.username, u.role, u.password_hash, u.created_at FROM notify_users u JOIN notify_access_tokens t ON t.user_id = u.id WHERE t.token_hash = $1 AND (t.expires IS NULL OR t.expires >= $2)), touched AS (INSERT INTO notify_access_token_activity(token_id, last_access) SELECT token_id, $2 FROM matched ON CONFLICT(token_id) DO UPDATE SET last_access = GREATEST(notify_access_token_activity.last_access, excluded.last_access) RETURNING token_id) SELECT m.id, m.username, m.role, m.password_hash, m.created_at FROM matched m JOIN touched t ON t.token_id = m.token_id",
     [postgleam.text(hash), postgleam.int(now)],
   )
+}
+
+type AuthorizationRow {
+  AuthorizationRow(
+    setup_required: Bool,
+    default_access: acl.Permission,
+    rule: Option(acl.Rule),
+  )
+}
+
+fn authorization_policy(
+  connection: postgleam.Connection,
+  username: String,
+) -> Result(identity.AuthorizationPolicy, identity.Error) {
+  use response <- result.try(
+    postgleam.query_with(
+      connection,
+      "SELECT NOT state.setup_complete, state.anonymous_read, state.anonymous_write, FALSE, ''::text, ''::text, FALSE, FALSE FROM notify_auth_state AS state WHERE state.id = 1 UNION ALL SELECT NOT state.setup_complete, state.anonymous_read, state.anonymous_write, TRUE, rule.username, rule.topic_pattern, rule.readable, rule.writable FROM notify_auth_state AS state JOIN notify_acl_rules AS rule ON rule.username = $1 OR rule.username = '*' WHERE state.id = 1",
+      [postgleam.text(username)],
+      authorization_row_decoder(),
+    )
+    |> result.map_error(map_error),
+  )
+  case response.rows {
+    [] -> Error(identity.Corrupt("auth_state row is missing"))
+    [first, ..rows] ->
+      Ok(identity.AuthorizationPolicy(
+        setup_required: first.setup_required,
+        default_access: first.default_access,
+        rules: [first, ..rows]
+          |> list.filter_map(fn(row) {
+            case row.rule {
+              Some(rule) -> Ok(rule)
+              None -> Error(Nil)
+            }
+          }),
+      ))
+  }
 }
 
 fn default_access(
@@ -929,6 +978,31 @@ fn rule_decoder() -> decode.RowDecoder(acl.Rule) {
     username:,
     topic_pattern: pattern,
     permission: identity.permission_from_bits(read, write),
+  ))
+}
+
+fn authorization_row_decoder() -> decode.RowDecoder(AuthorizationRow) {
+  use setup_required <- decode.element(0, decode.bool)
+  use read <- decode.element(1, decode.bool)
+  use write <- decode.element(2, decode.bool)
+  use has_rule <- decode.element(3, decode.bool)
+  use username <- decode.element(4, decode.text)
+  use pattern <- decode.element(5, decode.text)
+  use rule_read <- decode.element(6, decode.bool)
+  use rule_write <- decode.element(7, decode.bool)
+  let rule = case has_rule {
+    False -> None
+    True ->
+      Some(acl.Rule(
+        username:,
+        topic_pattern: pattern,
+        permission: identity.permission_from_bits(rule_read, rule_write),
+      ))
+  }
+  decode.success(AuthorizationRow(
+    setup_required:,
+    default_access: identity.permission_from_bits(read, write),
+    rule:,
   ))
 }
 
