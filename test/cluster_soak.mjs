@@ -8,11 +8,18 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { performance } from "node:perf_hooks";
+import {
+  isMainThread,
+  parentPort,
+  workerData,
+  Worker,
+} from "node:worker_threads";
 
 const messageIdPattern = /^[A-Za-z0-9]{12}$/;
 const topicPattern = /^[-_A-Za-z0-9]{1,64}$/;
 const maximumExamples = 100;
 const keepaliveIntervalSeconds = 45;
+const publisherWorkerMode = "publisher";
 
 function integer(environment, name, defaultValue, minimum, maximum) {
   const raw = environment[name];
@@ -1037,6 +1044,58 @@ async function publishAtRate(configuration, topics, agents, errors) {
   };
 }
 
+function publishInWorker(configuration, topics) {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(new URL(import.meta.url), {
+      workerData: { mode: publisherWorkerMode, configuration, topics },
+    });
+    let settled = false;
+    worker.once("message", (message) => {
+      settled = true;
+      if (message?.ok) resolve(message);
+      else reject(new Error(message?.error ?? "publisher worker failed"));
+    });
+    worker.once("error", (error) => {
+      if (!settled) reject(error);
+    });
+    worker.once("exit", (code) => {
+      if (!settled) {
+        reject(
+          new Error(
+            code === 0
+              ? "publisher worker exited without a result"
+              : `publisher worker exited with status ${code}`,
+          ),
+        );
+      }
+    });
+  });
+}
+
+async function runPublisherWorker() {
+  const { configuration, topics } = workerData;
+  const errors = [];
+  const agents = configuration.endpoints.map((endpoint) =>
+    createAgent(endpoint, configuration.publishConcurrency),
+  );
+  try {
+    const published = await publishAtRate(
+      configuration,
+      topics,
+      agents,
+      errors,
+    );
+    parentPort.postMessage({ ok: true, published, errors });
+  } catch (error) {
+    parentPort.postMessage({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    for (const agent of agents) agent.destroy();
+  }
+}
+
 function latencySummary(samples) {
   if (samples.length === 0) {
     return { minimum: null, p50: null, p95: null, p99: null, maximum: null, mean: null };
@@ -1135,7 +1194,9 @@ export async function runSoak(configuration) {
   try {
     const opened = await openSubscribers(configuration, topics, agents, errors);
     subscribers = opened.subscribers;
-    const published = await publishAtRate(configuration, topics, agents, errors);
+    const workerResult = await publishInWorker(configuration, topics);
+    errors.push(...workerResult.errors);
+    const published = workerResult.published;
     const expected = expectedDeliveries(published.publishedByTopic, subscribers);
     await waitForDeliveries(opened.received, expected, configuration.settleSeconds);
     if (configuration.format === "raw") {
@@ -1156,6 +1217,7 @@ export async function runSoak(configuration) {
         architecture: os.arch(),
         logicalCpus: os.availableParallelism(),
         totalMemoryBytes: os.totalmem(),
+        publisherExecution: "worker_thread",
       },
       configuration: {
         subscriptions: configuration.subscriptions,
@@ -1257,7 +1319,9 @@ async function main() {
 }
 
 const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";
-if (import.meta.url === invokedPath) {
+if (!isMainThread && workerData?.mode === publisherWorkerMode) {
+  await runPublisherWorker();
+} else if (import.meta.url === invokedPath) {
   main().catch(async (error) => {
     const failure = {
       schemaVersion: 1,

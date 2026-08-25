@@ -244,7 +244,9 @@ The local acceptance command is `test/cluster_soak.sh`. It is loopback-only by
 default and starts an isolated three-node Compose project with PostgreSQL and
 MinIO. `NOTIFY_SOAK_FORMAT` selects JSON, raw, SSE, or WebSocket; the
 weekly/manual workflow runs the target once per format. The driver paces
-publish starts independently of completion, continuously distributes them
+publish starts independently of completion on a dedicated Node worker thread,
+so decoding 10,000 subscriber streams cannot delay the response-latency clock.
+It continuously distributes publishes
 round-robin across all three nodes, rotates each topic's origin across rounds,
 records request-to-response commit latency and scheduler lag, and holds every
 subscription open through the delivery-settle window. The final verifier

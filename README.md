@@ -439,6 +439,8 @@ the pull-request fast path.
 three nodes, 10,000 live subscriptions, 1,000 topics, 500 publishes per second
 for 600 seconds, JSON format, and a 200 ms publish-response p95 budget. Setting
 `NOTIFY_SOAK_FORMAT` selects JSON, raw, SSE, or WebSocket with the same oracle.
+Publish pacing and response-latency measurement run on a dedicated Node worker
+thread, so decoding 10,000 subscriber streams cannot delay the latency clock.
 For runs lasting at least 90 seconds it also requires every subscriber to
 receive the 45-second keepalive cadence. It rejects
 non-loopback endpoints unless explicitly overridden, records host/container/
