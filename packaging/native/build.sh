@@ -26,24 +26,28 @@ else
 fi
 
 case "$target" in
-  linux_amd64|linux_arm64|macos_amd64|macos_arm64|windows_amd64) ;;
+  linux_amd64|linux_arm64|macos_amd64|macos_arm64) ;;
   *) echo "unsupported native target: $target" >&2; exit 2 ;;
 esac
-if [ "$target" != windows_amd64 ] && [ "$target" != "$host_target" ]; then
+if [ "$target" != "$host_target" ]; then
   echo "native target $target requires its matching build host; detected $host_target" >&2
   exit 1
 fi
 
-for required_command in elixir gleam mix xz zig; do
+for required_command in elixir erl gleam mix xz zig; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     echo "required native build command not found: $required_command" >&2
     exit 127
   fi
 done
-if [ "$target" = windows_amd64 ] && ! command -v 7z >/dev/null 2>&1; then
-  echo "required Windows target build command not found: 7z" >&2
-  exit 127
-fi
+case "$target" in
+  linux_*)
+    if ! command -v docker >/dev/null 2>&1; then
+      echo "required Linux NIF build command not found: docker" >&2
+      exit 127
+    fi
+    ;;
+esac
 if [ "$(zig version)" != 0.15.2 ]; then
   echo "native builds require Zig 0.15.2" >&2
   exit 1
@@ -52,6 +56,7 @@ fi
 build_directory=$(mktemp -d "${TMPDIR:-/tmp}/notify-native-build.XXXXXX")
 stage="$build_directory/source"
 promotion=''
+nif_builder_image=''
 
 cleanup() {
   if [ -n "$promotion" ] && [ -f "$promotion" ]; then
@@ -59,6 +64,9 @@ cleanup() {
   fi
   if [ -d "$build_directory" ]; then
     find "$build_directory" -depth -delete
+  fi
+  if [ -n "$nif_builder_image" ]; then
+    docker image rm "$nif_builder_image" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -87,6 +95,33 @@ mix deps.get --only prod --check-locked
 elixir "$root/packaging/native/patch_burrito_launcher.exs" \
   deps/burrito/src/erlang_launcher.zig
 mix deps.compile
+case "$target" in
+  linux_*)
+    nif_erts_include=$(erl -noshell \
+      -eval 'io:format("~s/erts-~s/include", [code:root_dir(), erlang:system_info(version)]), halt().')
+    if [ ! -f "$nif_erts_include/erl_nif.h" ]; then
+      echo "Erlang NIF headers are missing: $nif_erts_include" >&2
+      exit 1
+    fi
+    cp -R "$nif_erts_include" "$stage/.native-erts-include"
+    nif_builder_image="notify-native-nif-builder:${target}-$$"
+    docker build \
+      --file "$root/packaging/native/linux-nif-builder.Dockerfile" \
+      --tag "$nif_builder_image" \
+      "$root"
+    docker run \
+      --rm \
+      --network none \
+      --cap-drop ALL \
+      --security-opt no-new-privileges \
+      --read-only \
+      --tmpfs /tmp:rw,noexec,nosuid,size=512m \
+      --user "$(id -u):$(id -g)" \
+      --volume "$stage:/source" \
+      "$nif_builder_image" \
+      /source
+    ;;
+esac
 hpack_application="_build/prod/lib/hpack_erl/ebin/hpack.app"
 mist_application="_build/prod/lib/mist/ebin/mist.app"
 if [ ! -f "$hpack_application" ]; then
@@ -110,10 +145,7 @@ export ERL_LIBS
 mix compile --no-deps-check
 mix release --overwrite --no-compile
 
-case "$target" in
-  windows_amd64) artifact="burrito_out/notify_${target}.exe" ;;
-  *) artifact="burrito_out/notify_${target}" ;;
-esac
+artifact="burrito_out/notify_${target}"
 if [ ! -f "$artifact" ]; then
   echo "Burrito did not create expected artifact: $artifact" >&2
   exit 1
@@ -123,9 +155,7 @@ destination="$root/$artifact"
 mkdir -p "$(dirname "$destination")"
 promotion="$destination.tmp.$$"
 cp "$artifact" "$promotion"
-if [ "$target" != windows_amd64 ]; then
-  chmod +x "$promotion"
-fi
+chmod +x "$promotion"
 mv -f "$promotion" "$destination"
 promotion=''
 cd "$root"

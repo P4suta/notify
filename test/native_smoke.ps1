@@ -21,8 +21,16 @@ $message = "durable native smoke message"
 
 function Invoke-Notify {
     param([string[]]$Arguments)
-    $output = @(& $script:artifactPath @Arguments 2>&1 | ForEach-Object { "$_" })
-    if ($LASTEXITCODE -ne 0) {
+    $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+    try {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $output = @(& $script:artifactPath @Arguments 2>&1 | ForEach-Object { "$_" })
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+    }
+    if ($exitCode -ne 0) {
         $redacted = ($output -join "`n") -replace 'tk_[A-Za-z0-9]{29}', '<redacted>'
         throw "native command failed: $($Arguments[0])`n$redacted"
     }

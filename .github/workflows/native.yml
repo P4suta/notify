@@ -67,9 +67,9 @@ jobs:
       - name: Smoke-test native lifecycle
         run: test/native_smoke.sh "$NATIVE_BINARY"
 
-  windows-build:
-    name: Build Native windows_amd64
-    runs-on: ubuntu-24.04
+  windows:
+    name: Native windows_amd64
+    runs-on: windows-2025
     timeout-minutes: 45
     steps:
       - name: Check out source
@@ -84,41 +84,38 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
           rebar3-version: "3"
       - name: Install checksum-verified Zig
-        run: packaging/native/install_zig.sh "$ZIG_VERSION"
-      - name: Verify Windows cross-build tools
+        shell: pwsh
         run: |
-          command -v 7z
-          command -v xz
+          try {
+              & ./packaging/native/install_zig.ps1 -Version 0.15.3
+              throw "unsupported Zig version was accepted"
+          }
+          catch {
+              if ($_.Exception.Message -ne "unsupported Zig version: 0.15.3") {
+                  throw
+              }
+          }
+          & ./packaging/native/install_zig.ps1 -Version $env:ZIG_VERSION
+      - name: Enable pre-installed MSYS2 build tools
+        shell: pwsh
+        run: |
+          $toolPaths = @("C:\msys64\mingw64\bin", "C:\msys64\usr\bin")
+          foreach ($toolPath in $toolPaths) {
+              if (-not (Test-Path -LiteralPath $toolPath -PathType Container)) {
+                  throw "required MSYS2 tool directory is missing: $toolPath"
+              }
+              Add-Content -LiteralPath $env:GITHUB_PATH -Value $toolPath -Encoding utf8
+          }
+          $env:PATH = ($toolPaths -join [IO.Path]::PathSeparator) +
+              [IO.Path]::PathSeparator + $env:PATH
+          foreach ($command in @("make", "gcc", "xz", "7z")) {
+              Get-Command $command -ErrorAction Stop | Out-Null
+          }
       - name: Install exact MixGleam archive
         run: mix archive.install hex mix_gleam 0.6.2 --force
-      - name: Build locked Windows executable
-        run: packaging/native/build.sh windows_amd64
-      - name: Transfer Windows executable within this workflow only
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: notify-native-windows-${{ github.run_id }}
-          path: burrito_out/notify_windows_amd64.exe
-          if-no-files-found: error
-          retention-days: 3
-
-  windows-smoke:
-    name: Native windows_amd64 smoke
-    needs: windows-build
-    runs-on: windows-2025
-    timeout-minutes: 20
-    permissions:
-      actions: read
-      contents: read
-    steps:
-      - name: Check out smoke harness
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - name: Download this workflow's Windows executable
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: notify-native-windows-${{ github.run_id }}
-          path: native-windows
+      - name: Build locked host-native executable
+        shell: pwsh
+        run: ./packaging/native/build.ps1 -Target windows_amd64
       - name: Smoke-test Windows recovery
         shell: pwsh
-        run: test/native_smoke.ps1 -Artifact native-windows/notify_windows_amd64.exe
+        run: ./test/native_smoke.ps1 -Artifact burrito_out/notify_windows_amd64.exe

@@ -6,10 +6,10 @@ param(
 $ErrorActionPreference = "Stop"
 $PSNativeCommandUseErrorActionPreference = $true
 $root = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "../..")).Path
-if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
-    throw "Burrito does not support Windows build hosts; cross-build windows_amd64 on Linux or macOS"
+$hostOperatingSystem = if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Windows)) {
+    "windows"
 }
-$hostOperatingSystem = if ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)) {
+elseif ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::OSX)) {
     "macos"
 }
 elseif ([Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([Runtime.InteropServices.OSPlatform]::Linux)) {
@@ -25,7 +25,7 @@ $hostArchitecture = switch ($processArchitecture.ToString()) {
     default { throw "unsupported native build architecture: $processArchitecture" }
 }
 $hostTarget = "${hostOperatingSystem}_${hostArchitecture}"
-if ($Target -ne "windows_amd64" -and $Target -ne $hostTarget) {
+if ($Target -ne $hostTarget) {
     throw "native target $Target requires its matching build host; detected $hostTarget"
 }
 foreach ($command in @("elixir", "gleam", "mix", "xz", "zig")) {
