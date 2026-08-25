@@ -215,9 +215,12 @@ publication uses `FOR UPDATE SKIP LOCKED` and commits the released message plus
 its event in one transaction. These paths have real-PostgreSQL contract
 coverage. The contract also terminates the dedicated LISTEN backend, commits an
 event while it is disconnected, requires a new listener PID to catch up from
-the log, and proves duplicate wake-ups do not duplicate delivery. Multi-node
-process outage and long-duration soak coverage remain open. SQLite uses WAL
-plus a per-database live-process lock and is strictly single-node.
+the log, and proves duplicate wake-ups do not duplicate delivery. A separate
+three-node data-plane contract stops one bus actor, commits on both surviving
+origins, and requires the restarted node to resume both events in sequence from
+its durable cursor. Full server/container outage and long-duration soak
+coverage remain open. SQLite uses WAL plus a per-database live-process lock and
+is strictly single-node.
 
 The PostgreSQL message adapter uses a bounded four-worker round-robin connection
 pool plus a separate dedicated LISTEN connection. Reads and cursor operations

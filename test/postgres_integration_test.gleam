@@ -604,6 +604,87 @@ pub fn postgres_cluster_bus_recovers_listener_and_ignores_duplicate_wakes_test()
   }
 }
 
+pub fn postgres_three_node_bus_catches_up_after_actor_restart_test() {
+  case test_database() {
+    Error(_) -> Nil
+    Ok(database) -> {
+      process.trap_exits(True)
+      let TestDatabase(configuration:, ..) = database
+      let assert Ok(cursor_connection) = postgleam.connect(configuration)
+      let assert Ok(adapter_a) = postgres.start(configuration, "cluster-a")
+      let assert Ok(adapter_b) = postgres.start(configuration, "cluster-b")
+      let assert Ok(adapter_c) = postgres.start(configuration, "cluster-c")
+      let postgres.Adapter(storage: messages_a, ..) = adapter_a
+      let postgres.Adapter(storage: messages_c, ..) = adapter_c
+      let deliveries_a = process.new_subject()
+      let deliveries_b = process.new_subject()
+      let deliveries_c = process.new_subject()
+      let bus_a =
+        postgres_bus.start(configuration, adapter_a, "cluster-a", fn(value) {
+          process.send(deliveries_a, value.id)
+          Ok(Nil)
+        })
+      let bus_b =
+        postgres_bus.start(configuration, adapter_b, "cluster-b", fn(value) {
+          process.send(deliveries_b, value.id)
+          Ok(Nil)
+        })
+      let bus_c =
+        postgres_bus.start(configuration, adapter_c, "cluster-c", fn(value) {
+          process.send(deliveries_c, value.id)
+          Ok(Nil)
+        })
+
+      let first =
+        fixture_on_topic("PgNode001AXY", False, 500, "postgres-three-node")
+      let second =
+        fixture_on_topic("PgNode002CXY", False, 501, "postgres-three-node")
+      assert messages_a.save(first) == Ok(first)
+      assert messages_c.save(second) == Ok(second)
+      assert process.receive(deliveries_a, 10_000) == Ok(second.id)
+      assert process.receive(deliveries_b, 10_000) == Ok(first.id)
+      assert process.receive(deliveries_b, 10_000) == Ok(second.id)
+      assert process.receive(deliveries_c, 10_000) == Ok(first.id)
+      assert process.receive(deliveries_a, 500) == Error(Nil)
+      assert process.receive(deliveries_b, 500) == Error(Nil)
+      assert process.receive(deliveries_c, 500) == Error(Nil)
+      assert wait_for_node_cursor(cursor_connection, "cluster-b", 2, 100)
+
+      process.kill(bus_b)
+      assert wait_for_process_stop(bus_b, 100)
+      let third =
+        fixture_on_topic("PgNode003AXY", False, 502, "postgres-three-node")
+      let fourth =
+        fixture_on_topic("PgNode004CXY", False, 503, "postgres-three-node")
+      assert messages_a.save(third) == Ok(third)
+      assert messages_c.save(fourth) == Ok(fourth)
+      assert process.receive(deliveries_a, 10_000) == Ok(fourth.id)
+      assert process.receive(deliveries_c, 10_000) == Ok(third.id)
+      assert process.receive(deliveries_b, 1500) == Error(Nil)
+
+      let restarted_b =
+        postgres_bus.start(configuration, adapter_b, "cluster-b", fn(value) {
+          process.send(deliveries_b, value.id)
+          Ok(Nil)
+        })
+      assert process.receive(deliveries_b, 10_000) == Ok(third.id)
+      assert process.receive(deliveries_b, 10_000) == Ok(fourth.id)
+      assert process.receive(deliveries_b, 1500) == Error(Nil)
+      assert wait_for_node_cursor(cursor_connection, "cluster-b", 4, 100)
+
+      process.kill(bus_a)
+      process.kill(restarted_b)
+      process.kill(bus_c)
+      assert wait_for_process_stop(bus_a, 100)
+      assert wait_for_process_stop(restarted_b, 100)
+      assert wait_for_process_stop(bus_c, 100)
+      process.trap_exits(False)
+      postgleam.disconnect(cursor_connection)
+      drop_test_database(database)
+    }
+  }
+}
+
 pub fn postgres_identity_setup_contract_test() {
   case test_database() {
     Error(_) -> Nil
@@ -1009,6 +1090,40 @@ fn wait_for_listener_pid(
             admin,
             application_name,
             excluded_pid,
+            remaining - 1,
+          )
+        }
+      }
+  }
+}
+
+fn wait_for_node_cursor(
+  connection: postgleam.Connection,
+  node_id: String,
+  minimum_sequence: Int,
+  remaining: Int,
+) -> Bool {
+  case remaining {
+    0 -> False
+    _ ->
+      case
+        postgleam.query_one(
+          connection,
+          "SELECT COALESCE((SELECT sequence FROM notify_node_cursors WHERE node_id = $1), -1)::bigint",
+          [postgleam.text(node_id)],
+          {
+            use sequence <- decode.element(0, decode.int)
+            decode.success(sequence)
+          },
+        )
+      {
+        Ok(sequence) if sequence >= minimum_sequence -> True
+        _ -> {
+          process.sleep(100)
+          wait_for_node_cursor(
+            connection,
+            node_id,
+            minimum_sequence,
             remaining - 1,
           )
         }
