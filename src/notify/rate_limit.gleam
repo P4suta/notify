@@ -672,12 +672,24 @@ fn collect_postgres_commands(
   wait_milliseconds: Int,
   accumulated: List(PostgresCommand),
 ) -> List(PostgresCommand) {
+  // Wait for the complete, bounded coalescing window before draining. Waking
+  // on the first companion request made a nominal 16 ms window collect only
+  // two requests at the steady three-node publish rate.
+  process.sleep(wait_milliseconds)
+  drain_postgres_commands(subject, remaining, accumulated)
+}
+
+fn drain_postgres_commands(
+  subject: Subject(PostgresCommand),
+  remaining: Int,
+  accumulated: List(PostgresCommand),
+) -> List(PostgresCommand) {
   case remaining > 0 {
     False -> list.reverse(accumulated)
     True ->
-      case process.receive(subject, wait_milliseconds) {
+      case process.receive(subject, 0) {
         Ok(command) ->
-          collect_postgres_commands(subject, remaining - 1, 0, [
+          drain_postgres_commands(subject, remaining - 1, [
             command,
             ..accumulated
           ])
