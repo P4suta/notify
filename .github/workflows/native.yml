@@ -59,10 +59,7 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
           rebar3-version: "3"
       - name: Install checksum-verified Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          cache-key: notify-native
+        run: packaging/native/install_zig.sh "$ZIG_VERSION"
       - name: Install exact MixGleam archive
         run: mix archive.install hex mix_gleam 0.6.2 --force
       - name: Build locked host-native executable
@@ -87,17 +84,15 @@ jobs:
           otp-version: ${{ env.OTP_VERSION }}
           rebar3-version: "3"
       - name: Install checksum-verified Zig
-        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
-        with:
-          version: ${{ env.ZIG_VERSION }}
-          cache-key: notify-native-windows
+        run: packaging/native/install_zig.sh "$ZIG_VERSION"
       - name: Verify Windows cross-build tools
         run: |
           command -v 7z
+          command -v file
           command -v xz
       - name: Install exact MixGleam archive
         run: mix archive.install hex mix_gleam 0.6.2 --force
-      - name: Build locked Windows executable
+      - name: Build locked Windows executable and NIFs
         run: packaging/native/build.sh windows_amd64
       - name: Transfer Windows executable within this workflow only
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -127,4 +122,4 @@ jobs:
           path: native-windows
       - name: Smoke-test Windows recovery
         shell: pwsh
-        run: test/native_smoke.ps1 -Artifact native-windows/notify_windows_amd64.exe
+        run: ./test/native_smoke.ps1 -Artifact native-windows/notify_windows_amd64.exe

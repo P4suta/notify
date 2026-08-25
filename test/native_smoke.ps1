@@ -21,12 +21,125 @@ $message = "durable native smoke message"
 
 function Invoke-Notify {
     param([string[]]$Arguments)
-    $output = @(& $script:artifactPath @Arguments 2>&1 | ForEach-Object { "$_" })
-    if ($LASTEXITCODE -ne 0) {
+    $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+    try {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $output = @(& $script:artifactPath @Arguments 2>&1 | ForEach-Object { "$_" })
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+    }
+    if ($exitCode -ne 0) {
         $redacted = ($output -join "`n") -replace 'tk_[A-Za-z0-9]{29}', '<redacted>'
-        throw "native command failed: $($Arguments[0])`n$redacted"
+        throw "native command failed (exit $exitCode): $($Arguments[0])`n$redacted"
     }
     return $output
+}
+
+function Invoke-ErlangNifProbe {
+    param(
+        [string]$Application,
+        [string]$LibraryName,
+        [string]$Expression
+    )
+
+    $ertsExecutables = @(Get-ChildItem -LiteralPath $env:NOTIFY_INSTALL_DIR `
+        -Recurse -File -Filter "erl.exe")
+    if ($ertsExecutables.Count -ne 1) {
+        throw "native install did not contain exactly one erl.exe"
+    }
+    $bootFiles = @(Get-ChildItem -LiteralPath $env:NOTIFY_INSTALL_DIR `
+        -Recurse -File -Filter "start.boot")
+    if ($bootFiles.Count -ne 1) {
+        throw "native install did not contain exactly one start.boot"
+    }
+    $releaseRoot = $bootFiles[0].Directory.Parent.Parent
+    $releaseLibrary = Join-Path $releaseRoot.FullName "lib"
+    if (-not (Test-Path -LiteralPath $releaseLibrary -PathType Container)) {
+        throw "native install omitted its release library directory"
+    }
+    $bootPath = $bootFiles[0].FullName.Substring(
+        0,
+        $bootFiles[0].FullName.Length - ".boot".Length
+    )
+    $libraries = @(Get-ChildItem -LiteralPath $env:NOTIFY_INSTALL_DIR `
+        -Recurse -File -Filter $LibraryName)
+    if ($libraries.Count -ne 1) {
+        throw "native install did not contain exactly one $LibraryName"
+    }
+    $applicationDirectory = $libraries[0].Directory.Parent
+    if ($applicationDirectory.Name -notlike "$Application-*") {
+        throw "$LibraryName was outside the expected $Application application"
+    }
+    $ebinPath = Join-Path $applicationDirectory.FullName "ebin"
+    if (-not (Test-Path -LiteralPath $ebinPath -PathType Container)) {
+        throw "$Application application omitted its ebin directory"
+    }
+    $probeResultPath = Join-Path $script:smokeDirectory "$Application-nif-probe.txt"
+    $env:NOTIFY_NIF_PROBE_RESULT = $probeResultPath
+    $probeExpression = (
+        'ProbePath = os:getenv("NOTIFY_NIF_PROBE_RESULT"), ' +
+        'ok = file:write_file(ProbePath, <<"started">>), ' +
+        'try Outcome = (' + $Expression + '), ' +
+        'Result = unicode:characters_to_binary(io_lib:format("~tp", [Outcome])), ' +
+        'ok = file:write_file(ProbePath, Result), ' +
+        'case Outcome of ok -> erlang:halt(0); _ -> erlang:halt(2) end ' +
+        'catch Class:Reason:Stack -> ' +
+        'Failure = unicode:characters_to_binary(io_lib:format("~tp:~tp~n~tp", [Class, Reason, Stack])), ' +
+        'ok = file:write_file(ProbePath, Failure), erlang:halt(3) end.'
+    )
+
+    $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
+    try {
+        $PSNativeCommandUseErrorActionPreference = $false
+        $probeOutput = @(& $ertsExecutables[0].FullName `
+            -boot $bootPath `
+            -boot_var RELEASE_LIB $releaseLibrary `
+            -noshell `
+            -pa $ebinPath `
+            -eval $probeExpression 2>&1 | ForEach-Object { "$_" })
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $PSNativeCommandUseErrorActionPreference = $previousNativeErrorPreference
+    }
+    $probeResult = if (Test-Path -LiteralPath $probeResultPath -PathType Leaf) {
+        (Get-Content -LiteralPath $probeResultPath -Raw).Trim()
+    }
+    else {
+        "<probe did not start>"
+    }
+    if ($exitCode -ne 0) {
+        $redacted = ($probeOutput -join "`n") -replace 'tk_[A-Za-z0-9]{29}', '<redacted>'
+        throw "$Application NIF probe failed (exit $exitCode; result: $probeResult)`n$redacted"
+    }
+    if ($probeResult -ne "ok") {
+        throw "$Application NIF probe returned an invalid result: $probeResult"
+    }
+}
+
+function Write-RedactedDiagnostic {
+    param(
+        [string]$Label,
+        [string]$Path,
+        [int]$FirstLines = 0
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or `
+        -not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return
+    }
+    $content = if ($FirstLines -gt 0) {
+        (Get-Content -LiteralPath $Path -First $FirstLines) -join "`n"
+    }
+    else {
+        Get-Content -LiteralPath $Path -Raw
+    }
+    $content = $content -replace 'tk_[A-Za-z0-9]{29}', '<redacted>'
+    $content = $content -replace [regex]::Escape($script:password), '<redacted>'
+    Write-Output "${Label}:"
+    Write-Output $content
 }
 
 function Start-NotifyServer {
@@ -48,7 +161,8 @@ function Start-NotifyServer {
         }
         catch {
             if ($script:serverProcess.HasExited) {
-                throw "native Windows server exited before becoming healthy"
+                $script:serverProcess.WaitForExit()
+                throw "native Windows server exited before becoming healthy (exit $($script:serverProcess.ExitCode))"
             }
             Start-Sleep -Seconds 1
         }
@@ -84,10 +198,46 @@ try {
     $env:NOTIFY_ATTACHMENT_BACKEND = "filesystem"
     $env:NOTIFY_ATTACHMENT_DIRECTORY = Join-Path $smokeDirectory "attachments"
     $env:NOTIFY_PASSWORD = $password
+    $env:ERL_CRASH_DUMP = Join-Path $smokeDirectory "erl_crash.dump"
 
     $help = Invoke-Notify @("help")
     if (($help -join "`n") -notmatch "Usage: notify <command> \[options\]") {
         throw "native help contract is missing"
+    }
+    $nifProbeFailures = @()
+    try {
+        Invoke-ErlangNifProbe `
+            -Application "esqlite" `
+            -LibraryName "esqlite3_nif.dll" `
+            -Expression 'case esqlite3:open(":memory:") of {ok, Connection} -> case esqlite3:close(Connection) of ok -> ok; CloseResult -> {unexpected_close, CloseResult} end; OpenResult -> {unexpected_open, OpenResult} end'
+    }
+    catch {
+        $nifProbeFailures += $_.Exception.Message
+    }
+    try {
+        Invoke-ErlangNifProbe `
+            -Application "jargon" `
+            -LibraryName "jargon.dll" `
+            -Expression 'case jargon:hash(<<"native-smoke-password">>, <<"0123456789abcdef0123456789abcdef">>, argon2id, 1, 1024, 1, 16) of {ok, _, _} -> ok; Other -> {unexpected, Other} end'
+    }
+    catch {
+        $nifProbeFailures += $_.Exception.Message
+    }
+    try {
+        Invoke-ErlangNifProbe `
+            -Application "bcrypt" `
+            -LibraryName "bcrypt_nif.dll" `
+            -Expression 'begin _ = bcrypt_nif:create_ctx(), ok end'
+    }
+    catch {
+        $nifProbeFailures += $_.Exception.Message
+    }
+    if ($nifProbeFailures.Count -gt 0) {
+        throw "native NIF probes failed`n$($nifProbeFailures -join "`n---`n")"
+    }
+    $doctor = Invoke-Notify @("doctor")
+    if (($doctor -join "`n") -notmatch "PASS doctor: all required dependencies are healthy") {
+        throw "native doctor did not report healthy dependencies"
     }
     $setup = Invoke-Notify @("setup", "--username", $username, "--anonymous-access", "deny")
     if (($setup -join "`n") -notmatch "setup complete; administrator admin created") {
@@ -123,6 +273,17 @@ try {
     Stop-NotifyServerForRecovery
 
     Write-Output "Windows native setup, publish/poll, and forced-stop recovery smoke passed"
+}
+catch {
+    Write-RedactedDiagnostic "Native server stdout" $script:serverLog
+    Write-RedactedDiagnostic "Native server stderr" $script:serverError
+    if (Test-Path -LiteralPath $env:ERL_CRASH_DUMP -PathType Leaf) {
+        Write-RedactedDiagnostic `
+            "Erlang crash dump head (first 240 lines)" `
+            $env:ERL_CRASH_DUMP `
+            240
+    }
+    throw
 }
 finally {
     Stop-NotifyServerForRecovery

@@ -30,7 +30,8 @@ readonly -a container_options=(
 )
 
 docker run "${container_options[@]}" "$actionlint_image"
-docker run "${container_options[@]}" "$hadolint_image" /bin/hadolint Dockerfile
+docker run "${container_options[@]}" "$hadolint_image" /bin/hadolint \
+  Dockerfile packaging/native/linux-nif-builder.Dockerfile
 
 mapfile -d '' -t shell_files \
   < <(git ls-files --cached --others --exclude-standard -z -- '*.sh' '*.bash')

@@ -12,6 +12,19 @@ for required_command in bash git node; do
   fi
 done
 
+if command -v pwsh >/dev/null 2>&1 && \
+  pwsh -NoLogo -NoProfile -NonInteractive -Command 'exit 0' >/dev/null 2>&1; then
+  mapfile -d '' -t powershell_files \
+    < <(git ls-files --cached --others --exclude-standard -z -- '*.ps1')
+  for powershell_file in "${powershell_files[@]}"; do
+    # PowerShell expands these expressions; Bash must pass them literally.
+    # shellcheck disable=SC2016
+    NOTIFY_POWERSHELL_FILE="$powershell_file" \
+      pwsh -NoLogo -NoProfile -NonInteractive -Command \
+        '$tokens = $null; $errors = $null; [Management.Automation.Language.Parser]::ParseFile($env:NOTIFY_POWERSHELL_FILE, [ref]$tokens, [ref]$errors) | Out-Null; if ($errors.Count -gt 0) { $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; exit 1 }'
+  done
+fi
+
 mapfile -d '' -t tracked_files \
   < <(git ls-files --cached --others --exclude-standard -z)
 

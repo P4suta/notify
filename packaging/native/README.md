@@ -5,6 +5,7 @@ configuration. MixGleam compiles the Gleam project and Burrito is used only at
 build time to embed ERTS and the platform NIFs.
 
 Install Elixir/Mix, Gleam, Zig 0.15.2, XZ, and (for Windows output) 7-Zip.
+Linux targets also require Docker for the pinned musl NIF builder.
 Install the exact build archive and build the host target with the committed
 Mix lock:
 
@@ -20,8 +21,11 @@ With PowerShell on a supported Linux or macOS build host:
 ```
 
 Outputs are written to `burrito_out/`. The scheduled/manual native workflow
-builds and runs each POSIX target on its matching standard runner so SQLite and
-Argon2id NIFs are native to the artifact:
+builds and runs every POSIX target on its matching standard runner. Linux
+rebuilds the bcrypt, SQLite, and Argon2id NIFs in a digest-pinned Alpine image,
+rejects glibc symbol versions, and then packages them with Burrito's musl ERTS.
+The compiler receives the exact ERTS NIF headers from the selected host OTP
+rather than depending on an Erlang version inside the compiler image.
 
 The build first stages runtime source only, so Gleam test modules and their
 development-only dependencies are excluded. MixGleam 0.6.2 derives OTP
@@ -46,10 +50,15 @@ embedded-mode startup valid.
 - macOS amd64 and arm64
 - Windows amd64
 
-Burrito does not support a Windows build host. Notify therefore
-cross-builds `windows_amd64` on Linux, transfers it only within the same workflow
-for a Windows runner smoke, and retains that workflow artifact for three days.
-The Windows smoke validates setup, SQLite publish/poll, and recovery after a
-forced process stop; POSIX runners additionally validate graceful SIGTERM
-draining. No workflow signs, releases, uploads to a registry, or publishes a
-versioned artifact.
+Burrito's supported Windows path cross-builds the wrapper on Linux. The build
+also uses Zig to produce x86-64 PE DLLs for bcrypt, SQLite, and Argon2id from
+the locked dependency sources and the selected OTP NIF headers. The copied
+headers remain isolated in the temporary build stage; their generated integer
+size configuration is changed from the Unix LP64 layout to Windows amd64's
+LLP64 layout before a compile-time ERTS callback-table check. Its private
+transfer artifact is retained for three days only, then a standard Windows
+runner probes every bundled NIF and validates setup, SQLite publish/poll, and
+recovery after a forced process stop; POSIX runners additionally validate
+graceful SIGTERM draining. The official Zig archives are verified against fixed
+per-host SHA-256 values before extraction. No workflow signs a release, uploads
+to a registry, or publishes a versioned artifact.

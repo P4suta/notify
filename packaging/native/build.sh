@@ -34,16 +34,28 @@ if [ "$target" != windows_amd64 ] && [ "$target" != "$host_target" ]; then
   exit 1
 fi
 
-for required_command in elixir gleam mix xz zig; do
+for required_command in elixir erl gleam mix xz zig; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
     echo "required native build command not found: $required_command" >&2
     exit 127
   fi
 done
-if [ "$target" = windows_amd64 ] && ! command -v 7z >/dev/null 2>&1; then
-  echo "required Windows target build command not found: 7z" >&2
-  exit 127
+if [ "$target" = windows_amd64 ]; then
+  for required_command in 7z file; do
+    if ! command -v "$required_command" >/dev/null 2>&1; then
+      echo "required Windows target build command not found: $required_command" >&2
+      exit 127
+    fi
+  done
 fi
+case "$target" in
+  linux_*)
+    if ! command -v docker >/dev/null 2>&1; then
+      echo "required Linux NIF build command not found: docker" >&2
+      exit 127
+    fi
+    ;;
+esac
 if [ "$(zig version)" != 0.15.2 ]; then
   echo "native builds require Zig 0.15.2" >&2
   exit 1
@@ -52,6 +64,7 @@ fi
 build_directory=$(mktemp -d "${TMPDIR:-/tmp}/notify-native-build.XXXXXX")
 stage="$build_directory/source"
 promotion=''
+nif_builder_image=''
 
 cleanup() {
   if [ -n "$promotion" ] && [ -f "$promotion" ]; then
@@ -59,6 +72,9 @@ cleanup() {
   fi
   if [ -d "$build_directory" ]; then
     find "$build_directory" -depth -delete
+  fi
+  if [ -n "$nif_builder_image" ]; then
+    docker image rm "$nif_builder_image" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT
@@ -87,6 +103,40 @@ mix deps.get --only prod --check-locked
 elixir "$root/packaging/native/patch_burrito_launcher.exs" \
   deps/burrito/src/erlang_launcher.zig
 mix deps.compile
+case "$target" in
+  linux_*|windows_amd64)
+    nif_erts_include=$(erl -noshell \
+      -eval 'io:format("~s/erts-~s/include", [code:root_dir(), erlang:system_info(version)]), halt().')
+    if [ ! -f "$nif_erts_include/erl_nif.h" ]; then
+      echo "Erlang NIF headers are missing: $nif_erts_include" >&2
+      exit 1
+    fi
+    cp -R "$nif_erts_include" "$stage/.native-erts-include"
+    ;;
+esac
+case "$target" in
+  linux_*)
+    nif_builder_image="notify-native-nif-builder:${target}-$$"
+    docker build \
+      --file "$root/packaging/native/linux-nif-builder.Dockerfile" \
+      --tag "$nif_builder_image" \
+      "$root"
+    docker run \
+      --rm \
+      --network none \
+      --cap-drop ALL \
+      --security-opt no-new-privileges \
+      --read-only \
+      --tmpfs /tmp:rw,noexec,nosuid,size=512m \
+      --user "$(id -u):$(id -g)" \
+      --volume "$stage:/source" \
+      "$nif_builder_image" \
+      /source
+    ;;
+  windows_amd64)
+    "$root/packaging/native/compile_windows_nifs.sh" "$stage"
+    ;;
+esac
 hpack_application="_build/prod/lib/hpack_erl/ebin/hpack.app"
 mist_application="_build/prod/lib/mist/ebin/mist.app"
 if [ ! -f "$hpack_application" ]; then

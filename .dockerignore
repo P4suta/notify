@@ -6,7 +6,10 @@ build
 docs
 data
 erl_crash.dump
-packaging
+packaging/*
+!packaging/native/
+packaging/native/*
+!packaging/native/compile_linux_nifs.sh
 requirements
 scripts
 supply-chain

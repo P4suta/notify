@@ -318,6 +318,7 @@ Web Push endpoints, and mobile relay.
 gleam format --check src test packages/notify_core/src packages/notify_core/test
 test/lint.sh
 test/security_lint.sh
+test/native_zig_install_test.sh
 python3 test/check_licenses.py --root .
 gleam test
 (cd packages/notify_core && gleam test)
@@ -340,6 +341,11 @@ required hashes. Generated dependency/build trees are excluded from the
 working-tree Gitleaks scan; source, configuration, fixtures, and workflows
 remain in scope. Dependabot applies a seven-day cooldown to routine version
 updates; Dependabot security updates are not delayed by that setting.
+
+Native CI downloads Zig 0.15.2 directly from `ziglang.org`, verifies the
+official per-host SHA-256 before extraction, and never publishes the resulting
+executables. `test/native_zig_install_test.sh` proves unsupported versions and
+checksum-mismatched archives are rejected before the runner path is changed.
 
 The `Supply-chain lint / Static supply-chain policy`,
 `Supply-chain security / Vulnerability, license, and SBOM`, and CodeQL jobs are
@@ -450,10 +456,12 @@ separate endpoint/artifact and never rewrites the stable baseline.
 
 The optional ERTS-embedded native build scaffold is under `packaging/native`.
 It uses exact MixGleam, Mix lock, Zig, and Burrito inputs. Scheduled/main CI
-builds Linux amd64/arm64 and macOS amd64/arm64 on matching standard runners;
-the upstream-supported Linux cross-build path produces Windows amd64 for a
-Windows recovery smoke. The transfer artifact expires after three days. No
-registry publication or release-page automation is included.
+builds Linux amd64/arm64 and macOS amd64/arm64 on matching standard runners.
+Linux NIFs are rebuilt against musl in a digest-pinned compiler image; the
+supported Linux cross-build path produces Windows amd64 with explicit Zig-built
+PE NIFs, then transfers it to a Windows recovery smoke. That private workflow
+artifact expires after three days. No registry publication or release-page
+automation is included.
 
 ## License
 
