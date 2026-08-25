@@ -456,11 +456,12 @@ separate endpoint/artifact and never rewrites the stable baseline.
 
 The optional ERTS-embedded native build scaffold is under `packaging/native`.
 It uses exact MixGleam, Mix lock, Zig, and Burrito inputs. Scheduled/main CI
-builds Linux amd64/arm64, macOS amd64/arm64, and Windows amd64 on matching
-standard runners. Linux NIFs are rebuilt against musl in a digest-pinned
-compiler image, while Windows uses the runner's MSYS2/MinGW toolchain. Each
-artifact is smoke-tested in the job that builds it and is not uploaded or
-retained. No registry publication or release-page automation is included.
+builds Linux amd64/arm64 and macOS amd64/arm64 on matching standard runners.
+Linux NIFs are rebuilt against musl in a digest-pinned compiler image; the
+supported Linux cross-build path produces Windows amd64 with explicit Zig-built
+PE NIFs, then transfers it to a Windows recovery smoke. That private workflow
+artifact expires after three days. No registry publication or release-page
+automation is included.
 
 ## License
 

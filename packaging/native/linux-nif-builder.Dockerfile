@@ -8,4 +8,6 @@ RUN apk add --no-cache \
 
 COPY packaging/native/compile_linux_nifs.sh /usr/local/bin/compile-linux-nifs
 
+USER 65532:65532
+
 ENTRYPOINT ["/usr/local/bin/compile-linux-nifs"]

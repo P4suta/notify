@@ -4,9 +4,8 @@ This directory contains host-local wrappers for the root MixGleam + Burrito
 configuration. MixGleam compiles the Gleam project and Burrito is used only at
 build time to embed ERTS and the platform NIFs.
 
-Install Elixir/Mix, Gleam, Zig 0.15.2, XZ, and (on Windows) 7-Zip plus
-MSYS2/MinGW build tools. Linux builds also require Docker for the pinned musl
-NIF builder.
+Install Elixir/Mix, Gleam, Zig 0.15.2, XZ, and (for Windows output) 7-Zip.
+Linux targets also require Docker for the pinned musl NIF builder.
 Install the exact build archive and build the host target with the committed
 Mix lock:
 
@@ -15,18 +14,18 @@ mix archive.install hex mix_gleam 0.6.2 --force
 ./packaging/native/build.sh
 ```
 
-With PowerShell on Windows:
+With PowerShell on a supported Linux or macOS build host:
 
 ```powershell
 ./packaging/native/build.ps1
 ```
 
 Outputs are written to `burrito_out/`. The scheduled/manual native workflow
-builds and runs every target on its matching standard runner. Linux rebuilds
-the bcrypt, SQLite, and Argon2id NIFs in a digest-pinned Alpine image, rejects
-glibc symbol versions, and then packages them with Burrito's musl ERTS. The
-compiler receives the exact ERTS NIF headers from the selected host OTP rather
-than depending on an Erlang version inside the compiler image.
+builds and runs every POSIX target on its matching standard runner. Linux
+rebuilds the bcrypt, SQLite, and Argon2id NIFs in a digest-pinned Alpine image,
+rejects glibc symbol versions, and then packages them with Burrito's musl ERTS.
+The compiler receives the exact ERTS NIF headers from the selected host OTP
+rather than depending on an Erlang version inside the compiler image.
 
 The build first stages runtime source only, so Gleam test modules and their
 development-only dependencies are excluded. MixGleam 0.6.2 derives OTP
@@ -51,10 +50,12 @@ embedded-mode startup valid.
 - macOS amd64 and arm64
 - Windows amd64
 
-The Windows job builds NIFs and the Burrito wrapper together on the standard
-Windows runner using its pre-installed MSYS2/MinGW toolchain. Its smoke validates
-setup, SQLite publish/poll, and recovery after a forced process stop; POSIX
-runners additionally validate graceful SIGTERM draining. The official Zig
-archives are verified against fixed per-host SHA-256 values before extraction.
-No workflow transfers or retains a native binary, signs a release, uploads to a
-registry, or publishes a versioned artifact.
+Burrito's supported Windows path cross-builds the wrapper on Linux. The build
+also uses Zig to produce x86-64 PE DLLs for bcrypt, SQLite, and Argon2id from
+the locked dependency sources and the selected OTP NIF headers. Its private
+transfer artifact is retained for three days only, then a standard Windows
+runner validates setup, SQLite publish/poll, and recovery after a forced process
+stop; POSIX runners additionally validate graceful SIGTERM draining. The
+official Zig archives are verified against fixed per-host SHA-256 values before
+extraction. No workflow signs a release, uploads to a registry, or publishes a
+versioned artifact.

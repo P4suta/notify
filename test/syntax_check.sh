@@ -19,9 +19,9 @@ if command -v pwsh >/dev/null 2>&1 && \
   for powershell_file in "${powershell_files[@]}"; do
     # PowerShell expands these expressions; Bash must pass them literally.
     # shellcheck disable=SC2016
-    pwsh -NoLogo -NoProfile -NonInteractive -Command \
-      '$tokens = $null; $errors = $null; [Management.Automation.Language.Parser]::ParseFile($args[0], [ref]$tokens, [ref]$errors) | Out-Null; if ($errors.Count -gt 0) { $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; exit 1 }' \
-      "$powershell_file"
+    NOTIFY_POWERSHELL_FILE="$powershell_file" \
+      pwsh -NoLogo -NoProfile -NonInteractive -Command \
+        '$tokens = $null; $errors = $null; [Management.Automation.Language.Parser]::ParseFile($env:NOTIFY_POWERSHELL_FILE, [ref]$tokens, [ref]$errors) | Out-Null; if ($errors.Count -gt 0) { $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; exit 1 }'
   done
 fi
 

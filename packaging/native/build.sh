@@ -26,10 +26,10 @@ else
 fi
 
 case "$target" in
-  linux_amd64|linux_arm64|macos_amd64|macos_arm64) ;;
+  linux_amd64|linux_arm64|macos_amd64|macos_arm64|windows_amd64) ;;
   *) echo "unsupported native target: $target" >&2; exit 2 ;;
 esac
-if [ "$target" != "$host_target" ]; then
+if [ "$target" != windows_amd64 ] && [ "$target" != "$host_target" ]; then
   echo "native target $target requires its matching build host; detected $host_target" >&2
   exit 1
 fi
@@ -40,6 +40,14 @@ for required_command in elixir erl gleam mix xz zig; do
     exit 127
   fi
 done
+if [ "$target" = windows_amd64 ]; then
+  for required_command in 7z file; do
+    if ! command -v "$required_command" >/dev/null 2>&1; then
+      echo "required Windows target build command not found: $required_command" >&2
+      exit 127
+    fi
+  done
+fi
 case "$target" in
   linux_*)
     if ! command -v docker >/dev/null 2>&1; then
@@ -96,7 +104,7 @@ elixir "$root/packaging/native/patch_burrito_launcher.exs" \
   deps/burrito/src/erlang_launcher.zig
 mix deps.compile
 case "$target" in
-  linux_*)
+  linux_*|windows_amd64)
     nif_erts_include=$(erl -noshell \
       -eval 'io:format("~s/erts-~s/include", [code:root_dir(), erlang:system_info(version)]), halt().')
     if [ ! -f "$nif_erts_include/erl_nif.h" ]; then
@@ -104,6 +112,10 @@ case "$target" in
       exit 1
     fi
     cp -R "$nif_erts_include" "$stage/.native-erts-include"
+    ;;
+esac
+case "$target" in
+  linux_*)
     nif_builder_image="notify-native-nif-builder:${target}-$$"
     docker build \
       --file "$root/packaging/native/linux-nif-builder.Dockerfile" \
@@ -120,6 +132,9 @@ case "$target" in
       --volume "$stage:/source" \
       "$nif_builder_image" \
       /source
+    ;;
+  windows_amd64)
+    "$root/packaging/native/compile_windows_nifs.sh" "$stage"
     ;;
 esac
 hpack_application="_build/prod/lib/hpack_erl/ebin/hpack.app"
@@ -145,7 +160,10 @@ export ERL_LIBS
 mix compile --no-deps-check
 mix release --overwrite --no-compile
 
-artifact="burrito_out/notify_${target}"
+case "$target" in
+  windows_amd64) artifact="burrito_out/notify_${target}.exe" ;;
+  *) artifact="burrito_out/notify_${target}" ;;
+esac
 if [ ! -f "$artifact" ]; then
   echo "Burrito did not create expected artifact: $artifact" >&2
   exit 1
@@ -155,7 +173,9 @@ destination="$root/$artifact"
 mkdir -p "$(dirname "$destination")"
 promotion="$destination.tmp.$$"
 cp "$artifact" "$promotion"
-chmod +x "$promotion"
+if [ "$target" != windows_amd64 ]; then
+  chmod +x "$promotion"
+fi
 mv -f "$promotion" "$destination"
 promotion=''
 cd "$root"
