@@ -78,6 +78,7 @@ pub fn message_json_round_trip_property_test() {
         scheduled: False,
         cached: True,
         sequence_id: None,
+        poll_id: None,
       )
     let encoded = original |> message_json.encode_storage |> json.to_string
     let assert Ok(decoded) = json.parse(encoded, message_json.decoder())

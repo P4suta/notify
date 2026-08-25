@@ -448,6 +448,17 @@ fn validate_key(key: String) -> Result(Nil, attachment_store.Error) {
   }
 }
 
+/// Returns the immutable blob path for an already content-addressed object.
+/// HTTP transports use this only after the normal store metadata and topic
+/// authorization checks have succeeded.
+pub fn blob_path(
+  directory: String,
+  key: String,
+) -> Result(String, attachment_store.Error) {
+  use _ <- result.try(validate_key(key))
+  Ok(attachment_blob_path(directory, key))
+}
+
 fn page(
   directory: String,
   after: Option(String),
@@ -556,6 +567,9 @@ fn cleanup_expired(directory: String, now: Int) -> Result(Int, String)
 
 @external(erlang, "notify_ffi", "attachment_health")
 fn attachment_health(directory: String) -> Result(Nil, String)
+
+@external(erlang, "notify_ffi", "attachment_blob_path")
+fn attachment_blob_path(directory: String, key: String) -> String
 
 @external(erlang, "notify_ffi", "make_temporary_directory")
 fn make_temporary_directory() -> Result(String, String)

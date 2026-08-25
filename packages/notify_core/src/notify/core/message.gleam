@@ -60,6 +60,7 @@ pub type Draft {
     attachment: Option(Attachment),
     delay: Option(String),
     sequence_id: Option(String),
+    poll_id: Option(String),
     cache: Bool,
   )
 }
@@ -83,6 +84,7 @@ pub type Message {
     scheduled: Bool,
     cached: Bool,
     sequence_id: Option(String),
+    poll_id: Option(String),
   )
 }
 
@@ -111,6 +113,7 @@ pub fn plaintext_draft(topic: Topic, body: String) -> Draft {
     attachment: None,
     delay: None,
     sequence_id: None,
+    poll_id: None,
     cache: True,
   )
 }
@@ -121,8 +124,12 @@ pub fn materialise(
   now now: Int,
   expires expires: Int,
 ) -> Result(Message, ValidationError) {
+  let body = case draft.poll_id {
+    None -> draft.message
+    Some(_) -> "New message"
+  }
   let message_bytes =
-    draft.message
+    body
     |> bit_array.from_string
     |> bit_array.byte_size
   let sequence_id_valid = case draft.sequence_id {
@@ -136,29 +143,51 @@ pub fn materialise(
     _, False, _, _ -> Error(InvalidId)
     _, _, False, _ -> Error(InvalidExpiry)
     _, _, _, False -> Error(InvalidSequenceId)
-    _, True, True, True ->
-      Ok(Message(
-        id:,
-        time: now,
-        expires: case draft.cache {
+    _, True, True, True -> {
+      let #(event, cached, message_expires) = case draft.poll_id {
+        None -> #(MessageEvent, draft.cache, case draft.cache {
           True -> option.Some(expires)
           False -> None
-        },
-        event: MessageEvent,
-        topic: draft.topic,
-        message: draft.message,
-        title: draft.title,
-        priority: draft.priority,
-        tags: draft.tags,
-        markdown: draft.markdown,
-        icon: draft.icon,
-        click: draft.click,
-        actions: assign_action_ids(draft.actions, id),
-        attachment: draft.attachment,
-        scheduled: False,
-        cached: draft.cache,
-        sequence_id: draft.sequence_id,
-      ))
+        })
+        Some(_) -> #(PollRequestEvent, False, None)
+      }
+      let candidate =
+        Message(
+          id:,
+          time: now,
+          expires: message_expires,
+          event:,
+          topic: draft.topic,
+          message: body,
+          title: draft.title,
+          priority: draft.priority,
+          tags: draft.tags,
+          markdown: draft.markdown,
+          icon: draft.icon,
+          click: draft.click,
+          actions: assign_action_ids(draft.actions, id),
+          attachment: draft.attachment,
+          scheduled: False,
+          cached:,
+          sequence_id: draft.sequence_id,
+          poll_id: draft.poll_id,
+        )
+      Ok(case draft.poll_id {
+        None -> candidate
+        Some(_) ->
+          Message(
+            ..candidate,
+            title: None,
+            priority: Default,
+            tags: [],
+            markdown: False,
+            icon: None,
+            click: None,
+            actions: [],
+            attachment: None,
+          )
+      })
+    }
   }
 }
 
@@ -221,6 +250,7 @@ pub fn materialise_control(
         scheduled: False,
         cached: True,
         sequence_id: option.Some(sequence_id),
+        poll_id: None,
       ))
     True, True, _ -> Error(InvalidSequenceId)
   }

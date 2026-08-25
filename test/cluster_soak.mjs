@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // SPDX-License-Identifier: Apache-2.0
 import { mkdir, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
 import http from "node:http";
 import https from "node:https";
 import os from "node:os";
@@ -11,6 +12,7 @@ import { performance } from "node:perf_hooks";
 const messageIdPattern = /^[A-Za-z0-9]{12}$/;
 const topicPattern = /^[-_A-Za-z0-9]{1,64}$/;
 const maximumExamples = 100;
+const keepaliveIntervalSeconds = 45;
 
 function integer(environment, name, defaultValue, minimum, maximum) {
   const raw = environment[name];
@@ -62,6 +64,12 @@ export function loadConfiguration(environment = process.env) {
   }
   const allowRemote = environment.NOTIFY_SOAK_ALLOW_REMOTE === "1";
   validateEndpoints(endpoints, { allowRemote });
+  const format = environment.NOTIFY_SOAK_FORMAT ?? "json";
+  if (!["json", "raw", "sse", "websocket"].includes(format)) {
+    throw new Error(
+      "NOTIFY_SOAK_FORMAT must be json, raw, sse, or websocket",
+    );
+  }
 
   return {
     subscriptions,
@@ -123,6 +131,7 @@ export function loadConfiguration(environment = process.env) {
       1_800,
     ),
     endpoints,
+    format,
     topicPrefix,
     reportPath: environment.NOTIFY_SOAK_REPORT_PATH ?? "",
     sequencePath: environment.NOTIFY_SOAK_SEQUENCE_PATH ?? "",
@@ -274,6 +283,20 @@ export function evaluateReport(report) {
     report.subscriptions.disconnected === 0,
     `stable-connection disconnects ${report.subscriptions.disconnected}`,
   );
+  const requiredKeepalives =
+    configuration.durationSeconds < keepaliveIntervalSeconds * 2
+      ? 0
+      : Math.max(
+          1,
+          Math.floor(
+            configuration.durationSeconds / keepaliveIntervalSeconds,
+          ) - 1,
+        );
+  expect(
+    requiredKeepalives === 0 ||
+      report.subscriptions.minimumKeepalives >= requiredKeepalives,
+    `minimum keepalives ${report.subscriptions.minimumKeepalives ?? "unknown"}/${requiredKeepalives}`,
+  );
   expect(
     report.publishes.planned === expectedPublishes,
     `planned publishes ${report.publishes.planned}/${expectedPublishes}`,
@@ -396,11 +419,48 @@ function messagePath(topic) {
   return `/${encodeURIComponent(topic)}`;
 }
 
-function subscriptionPath(topic) {
-  return `${messagePath(topic)}/json?since=none`;
+export function subscriptionPath(topic, format) {
+  const suffix = format === "websocket" ? "ws" : format;
+  return `${messagePath(topic)}/${suffix}?since=none`;
 }
 
-function parseNdjson(state, chunk, onMessage, onError) {
+function acceptEvent(state, event, onDelivery, onError) {
+  if (event.event === "open") {
+    state.opened = true;
+    state.resolveOpen();
+    return;
+  }
+  if (event.event === "keepalive") {
+    state.keepalives = (state.keepalives ?? 0) + 1;
+    return;
+  }
+  if (event.event !== "message") {
+    onError(`subscriber ${state.index} received unexpected event`);
+    return;
+  }
+  if (
+    !messageIdPattern.test(event.id) ||
+    event.topic !== state.topic ||
+    typeof event.message !== "string"
+  ) {
+    onError(`subscriber ${state.index} received malformed message metadata`);
+    return;
+  }
+  onDelivery({ id: event.id, payload: event.message });
+}
+
+function parseJsonEvent(state, encoded, onDelivery, onError) {
+  let event;
+  try {
+    event = JSON.parse(encoded);
+  } catch (error) {
+    onError(`subscriber ${state.index} received invalid JSON: ${error.message}`);
+    return;
+  }
+  acceptEvent(state, event, onDelivery, onError);
+}
+
+function parseNdjson(state, chunk, onDelivery, onError) {
   state.buffer += chunk;
   for (;;) {
     const newline = state.buffer.indexOf("\n");
@@ -408,38 +468,143 @@ function parseNdjson(state, chunk, onMessage, onError) {
     const line = state.buffer.slice(0, newline).trim();
     state.buffer = state.buffer.slice(newline + 1);
     if (!line) continue;
-    let event;
-    try {
-      event = JSON.parse(line);
-    } catch (error) {
-      onError(`subscriber ${state.index} received invalid JSON: ${error.message}`);
-      continue;
-    }
-    if (event.event === "open") {
+    parseJsonEvent(state, line, onDelivery, onError);
+  }
+}
+
+function parseSse(state, chunk, onDelivery, onError) {
+  state.buffer += chunk.replaceAll("\r\n", "\n");
+  for (;;) {
+    const boundary = state.buffer.indexOf("\n\n");
+    if (boundary < 0) break;
+    const frame = state.buffer.slice(0, boundary);
+    state.buffer = state.buffer.slice(boundary + 2);
+    const data = frame
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).replace(/^ /, ""))
+      .join("\n");
+    if (data) parseJsonEvent(state, data, onDelivery, onError);
+  }
+}
+
+function parseRaw(state, chunk, onDelivery, onError) {
+  state.buffer += chunk;
+  for (;;) {
+    const newline = state.buffer.indexOf("\n");
+    if (newline < 0) break;
+    const line = state.buffer.slice(0, newline).replace(/\r$/, "");
+    state.buffer = state.buffer.slice(newline + 1);
+    if (!state.opened) {
+      if (line !== "") {
+        onError(`subscriber ${state.index} did not receive the raw open event`);
+      }
       state.opened = true;
       state.resolveOpen();
       continue;
     }
-    if (event.event === "keepalive") continue;
-    if (event.event !== "message") {
-      onError(`subscriber ${state.index} received unexpected event`);
+    if (line === "") {
+      state.keepalives = (state.keepalives ?? 0) + 1;
       continue;
     }
-    if (!messageIdPattern.test(event.id) || event.topic !== state.topic) {
-      onError(`subscriber ${state.index} received malformed message metadata`);
+    if (!/^soak-[0-9]+$/.test(line)) {
+      onError(`subscriber ${state.index} received malformed raw payload`);
       continue;
     }
-    state.messageIds.push(event.id);
-    onMessage(event.id);
+    onDelivery({ id: null, payload: line });
   }
 }
 
-function connectSubscriber(
+export function parseSubscriptionChunk(
+  format,
+  state,
+  chunk,
+  onDelivery,
+  onError,
+) {
+  if (format === "json") return parseNdjson(state, chunk, onDelivery, onError);
+  if (format === "sse") return parseSse(state, chunk, onDelivery, onError);
+  if (format === "raw") return parseRaw(state, chunk, onDelivery, onError);
+  throw new Error(`unsupported HTTP subscription format: ${format}`);
+}
+
+export function decodeWebSocketFrames(
+  state,
+  chunk,
+  onText,
+  onError,
+  onControl = () => {},
+) {
+  state.websocketBuffer = Buffer.concat([
+    state.websocketBuffer ?? Buffer.alloc(0),
+    Buffer.from(chunk),
+  ]);
+  for (;;) {
+    const buffer = state.websocketBuffer;
+    if (buffer.length < 2) return;
+    const final = (buffer[0] & 0x80) !== 0;
+    const opcode = buffer[0] & 0x0f;
+    const masked = (buffer[1] & 0x80) !== 0;
+    let length = buffer[1] & 0x7f;
+    let offset = 2;
+    if ((buffer[0] & 0x70) !== 0 || masked || !final) {
+      onError(`subscriber ${state.index ?? "?"} received an invalid WebSocket frame`);
+      state.websocketBuffer = Buffer.alloc(0);
+      return;
+    }
+    if (length === 126) {
+      if (buffer.length < 4) return;
+      length = buffer.readUInt16BE(2);
+      offset = 4;
+    } else if (length === 127) {
+      if (buffer.length < 10) return;
+      const wideLength = buffer.readBigUInt64BE(2);
+      if (wideLength > BigInt(Number.MAX_SAFE_INTEGER)) {
+        onError(`subscriber ${state.index ?? "?"} received an oversized WebSocket frame`);
+        state.websocketBuffer = Buffer.alloc(0);
+        return;
+      }
+      length = Number(wideLength);
+      offset = 10;
+    }
+    if (buffer.length < offset + length) return;
+    const payload = buffer.subarray(offset, offset + length);
+    state.websocketBuffer = buffer.subarray(offset + length);
+    if (opcode === 0x1) {
+      try {
+        onText(new TextDecoder("utf-8", { fatal: true }).decode(payload));
+      } catch {
+        onError(`subscriber ${state.index ?? "?"} received invalid WebSocket UTF-8`);
+      }
+    } else if ([0x8, 0x9, 0xa].includes(opcode)) {
+      onControl(opcode, payload);
+    } else {
+      onError(`subscriber ${state.index ?? "?"} received unsupported WebSocket opcode`);
+    }
+  }
+}
+
+function maskedClientFrame(opcode, payload = Buffer.alloc(0)) {
+  const body = Buffer.from(payload);
+  if (body.length > 125) throw new Error("WebSocket control payload is too large");
+  const mask = randomBytes(4);
+  const frame = Buffer.alloc(6 + body.length);
+  frame[0] = 0x80 | opcode;
+  frame[1] = 0x80 | body.length;
+  mask.copy(frame, 2);
+  for (let index = 0; index < body.length; index += 1) {
+    frame[6 + index] = body[index] ^ mask[index % 4];
+  }
+  return frame;
+}
+
+function connectHttpSubscriber(
   state,
   endpoint,
   agent,
   timeoutMilliseconds,
-  onMessage,
+  format,
+  onDelivery,
   onError,
 ) {
   return new Promise((resolve, reject) => {
@@ -457,11 +622,18 @@ function connectSubscriber(
       reject(error);
     };
     state.resolveOpen = finishOpen;
-    const url = new URL(subscriptionPath(state.topic), endpoint);
+    const url = new URL(subscriptionPath(state.topic, format), endpoint);
     const request = transport(url).request(url, {
       agent,
       method: "GET",
-      headers: { accept: "application/x-ndjson" },
+      headers: {
+        accept:
+          format === "json"
+            ? "application/x-ndjson"
+            : format === "sse"
+              ? "text/event-stream"
+              : "text/plain",
+      },
     });
     state.request = request;
     const timer = setTimeout(() => {
@@ -482,7 +654,7 @@ function connectSubscriber(
       }
       response.setEncoding("utf8");
       response.on("data", (chunk) =>
-        parseNdjson(state, chunk, onMessage, onError),
+        parseSubscriptionChunk(format, state, chunk, onDelivery, onError),
       );
       const disconnected = (reason) => {
         if (!state.closing && !state.disconnected) {
@@ -506,6 +678,143 @@ function connectSubscriber(
   });
 }
 
+function connectWebSocketSubscriber(
+  state,
+  endpoint,
+  agent,
+  timeoutMilliseconds,
+  onDelivery,
+  onError,
+) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finishOpen = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const failOpen = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      state.socket?.destroy();
+      reject(error);
+    };
+    state.resolveOpen = finishOpen;
+    const url = new URL(subscriptionPath(state.topic, "websocket"), endpoint);
+    const key = randomBytes(16).toString("base64");
+    const expectedAccept = createHash("sha1")
+      .update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+      .digest("base64");
+    const request = transport(url).request(url, {
+      agent,
+      method: "GET",
+      headers: {
+        connection: "Upgrade",
+        upgrade: "websocket",
+        "sec-websocket-key": key,
+        "sec-websocket-version": "13",
+      },
+    });
+    state.request = request;
+    const timer = setTimeout(() => {
+      request.destroy();
+      state.socket?.destroy();
+      failOpen(new Error(`subscriber ${state.index} open timed out`));
+    }, timeoutMilliseconds);
+
+    request.on("upgrade", (response, socket, head) => {
+      if (
+        response.statusCode !== 101 ||
+        response.headers["sec-websocket-accept"] !== expectedAccept
+      ) {
+        socket.destroy();
+        failOpen(
+          new Error(`subscriber ${state.index} WebSocket handshake was invalid`),
+        );
+        return;
+      }
+      state.socket = socket;
+      const disconnected = (reason) => {
+        if (!state.closing && !state.disconnected) {
+          state.disconnected = true;
+          onError(`subscriber ${state.index} disconnected: ${reason}`);
+        }
+        if (!state.opened) {
+          failOpen(new Error(`subscriber ${state.index} disconnected`));
+        }
+      };
+      const consume = (chunk) =>
+        decodeWebSocketFrames(
+          state,
+          chunk,
+          (text) => parseJsonEvent(state, text, onDelivery, onError),
+          onError,
+          (opcode, payload) => {
+            if (opcode === 0x9 && !socket.destroyed) {
+              socket.write(maskedClientFrame(0xa, payload));
+            } else if (opcode === 0x8) {
+              disconnected("close frame");
+              socket.end();
+            }
+          },
+        );
+      socket.on("data", consume);
+      socket.on("error", (error) => disconnected(error.message));
+      socket.on("end", () => disconnected("end of stream"));
+      socket.on("close", () => disconnected("closed"));
+      if (head.length > 0) consume(head);
+    });
+    request.on("response", (response) => {
+      response.resume();
+      failOpen(
+        new Error(
+          `subscriber ${state.index} returned HTTP ${response.statusCode}`,
+        ),
+      );
+    });
+    request.on("error", (error) => {
+      if (!state.opened) failOpen(error);
+      else if (!state.closing && !state.disconnected) {
+        state.disconnected = true;
+        onError(`subscriber ${state.index} request failed: ${error.message}`);
+      }
+    });
+    request.end();
+  });
+}
+
+function connectSubscriber(
+  state,
+  endpoint,
+  agent,
+  timeoutMilliseconds,
+  format,
+  onDelivery,
+  onError,
+) {
+  if (format === "websocket") {
+    return connectWebSocketSubscriber(
+      state,
+      endpoint,
+      agent,
+      timeoutMilliseconds,
+      onDelivery,
+      onError,
+    );
+  }
+  return connectHttpSubscriber(
+    state,
+    endpoint,
+    agent,
+    timeoutMilliseconds,
+    format,
+    onDelivery,
+    onError,
+  );
+}
+
 async function openSubscribers(configuration, topics, agents, errors) {
   const subscribers = Array.from(
     { length: configuration.subscriptions },
@@ -515,19 +824,20 @@ async function openSubscribers(configuration, topics, agents, errors) {
       endpointIndex:
         Math.floor(index / topics.length) % configuration.endpoints.length,
       buffer: "",
+      websocketBuffer: Buffer.alloc(0),
       messageIds: [],
+      rawPayloads: [],
+      keepalives: 0,
       opened: false,
       disconnected: false,
       closing: false,
       request: null,
       response: null,
+      socket: null,
       resolveOpen: () => {},
     }),
   );
   let received = 0;
-  const onMessage = () => {
-    received += 1;
-  };
   const onError = (detail) => addExample(errors, detail);
   const timeoutMilliseconds = configuration.connectTimeoutSeconds * 1_000;
 
@@ -547,7 +857,15 @@ async function openSubscribers(configuration, topics, agents, errors) {
           configuration.endpoints[subscriber.endpointIndex],
           agents[subscriber.endpointIndex],
           timeoutMilliseconds,
-          onMessage,
+          configuration.format,
+          (delivery) => {
+            if (delivery.id === null) {
+              subscriber.rawPayloads.push(delivery.payload);
+            } else {
+              subscriber.messageIds.push(delivery.id);
+            }
+            received += 1;
+          },
           onError,
         ),
       ),
@@ -607,7 +925,13 @@ function publishOne(index, topic, endpoint, agent) {
           reject(new Error(`publish ${index} returned malformed message metadata`));
           return;
         }
-        resolve({ id: event.id, topic, latencyMs, completedAt: performance.now() });
+        resolve({
+          id: event.id,
+          topic,
+          payload,
+          latencyMs,
+          completedAt: performance.now(),
+        });
       });
     });
     request.on("error", reject);
@@ -620,6 +944,7 @@ async function publishAtRate(configuration, topics, agents, errors) {
   const intervalMilliseconds = 1_000 / configuration.publishRate;
   const latencies = [];
   const publishedByTopic = new Map(topics.map((topic) => [topic, new Set()]));
+  const publishedByPayload = new Map();
   const allIds = new Set();
   const inFlight = new Set();
   let next = 0;
@@ -650,6 +975,7 @@ async function publishAtRate(configuration, topics, agents, errors) {
         }
         allIds.add(published.id);
         publishedByTopic.get(topic).add(published.id);
+        publishedByPayload.set(published.payload, published);
         latencies.push(published.latencyMs);
         committed += 1;
         lastCompletedAt = Math.max(lastCompletedAt, published.completedAt);
@@ -695,6 +1021,7 @@ async function publishAtRate(configuration, topics, agents, errors) {
     completedDurationSeconds,
     latencies,
     publishedByTopic,
+    publishedByPayload,
   };
 }
 
@@ -748,8 +1075,24 @@ function closeSubscribers(subscribers, agents) {
     subscriber.closing = true;
     subscriber.response?.destroy();
     subscriber.request?.destroy();
+    subscriber.socket?.destroy();
   }
   for (const agent of agents) agent.destroy();
+}
+
+function resolveRawDeliveries(subscribers, publishedByPayload, errors) {
+  for (const subscriber of subscribers) {
+    if (subscriber.rawPayloads.length === 0) continue;
+    subscriber.messageIds = subscriber.rawPayloads.map((payload) => {
+      const published = publishedByPayload.get(payload);
+      if (published?.topic === subscriber.topic) return published.id;
+      addExample(
+        errors,
+        `subscriber ${subscriber.index} received unknown raw payload ${payload}`,
+      );
+      return payload;
+    });
+  }
 }
 
 function rounded(value) {
@@ -783,6 +1126,9 @@ export async function runSoak(configuration) {
     const published = await publishAtRate(configuration, topics, agents, errors);
     const expected = expectedDeliveries(published.publishedByTopic, subscribers);
     await waitForDeliveries(opened.received, expected, configuration.settleSeconds);
+    if (configuration.format === "raw") {
+      resolveRawDeliveries(subscribers, published.publishedByPayload, errors);
+    }
     const validation = validateTopicSequences(
       published.publishedByTopic,
       subscribers,
@@ -807,6 +1153,7 @@ export async function runSoak(configuration) {
         commitP95BudgetMs: configuration.commitP95BudgetMs,
         schedulingLagBudgetMs: configuration.schedulingLagBudgetMs,
         settleSeconds: configuration.settleSeconds,
+        format: configuration.format,
         endpoints: configuration.endpoints,
       },
       subscriptions: {
@@ -814,6 +1161,14 @@ export async function runSoak(configuration) {
         disconnected: subscribers.filter((subscriber) => subscriber.disconnected)
           .length,
         errors: errors.filter((error) => error.startsWith("subscriber ")).length,
+        keepalives: subscribers.reduce(
+          (total, subscriber) => total + subscriber.keepalives,
+          0,
+        ),
+        minimumKeepalives: subscribers.reduce(
+          (minimum, subscriber) => Math.min(minimum, subscriber.keepalives),
+          subscribers[0]?.keepalives ?? 0,
+        ),
         perNode: configuration.endpoints.map((endpoint, endpointIndex) => ({
           endpoint,
           ready: subscribers.filter(

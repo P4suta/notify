@@ -27,6 +27,8 @@ x-notify: &notify
     NOTIFY_S3_ACCESS_KEY: notify-minio
     NOTIFY_S3_SECRET_KEY: notify-minio-development-password
     NOTIFY_S3_PATH_STYLE: "true"
+    NOTIFY_RELAY_URL: "${NOTIFY_CLUSTER_RELAY_URL:-}"
+    NOTIFY_RELAY_TOKEN: "${NOTIFY_CLUSTER_RELAY_TOKEN:-}"
   restart: unless-stopped
   ulimits:
     nofile:
@@ -71,6 +73,13 @@ services:
       - >-
         until mc alias set local http://minio:9000 notify-minio notify-minio-development-password; do sleep 1; done;
         mc mb --ignore-existing local/notify
+
+  relay-mock:
+    image: ${NOTIFY_CLUSTER_IMAGE:-notify:cluster-local}
+    entrypoint: ["escript", "/test/relay_fault_server.escript"]
+    command: []
+    volumes:
+      - ./test/relay_fault_server.escript:/test/relay_fault_server.escript:ro
 
   notify-a:
     <<: *notify

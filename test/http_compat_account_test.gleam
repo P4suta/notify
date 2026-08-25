@@ -236,6 +236,18 @@ pub fn ntfy_admin_users_and_access_contract_test() {
   assert string.contains(listed_body, "\"username\":\"pat\"")
   assert string.contains(listed_body, "\"topic\":\"jobs-*\"")
   assert string.contains(listed_body, "\"permission\":\"read-only\"")
+  assert string.contains(
+    listed_body,
+    "{\"username\":\"*\",\"role\":\"anonymous\"}",
+  )
+  assert string.contains(
+    listed_body,
+    "{\"username\":\"admin\",\"role\":\"admin\"}",
+  )
+  assert !string.contains(
+    listed_body,
+    "{\"username\":\"admin\",\"role\":\"admin\",\"grants\":[]}",
+  )
 
   let pat = authorization("pat", "a different secure password")
   let readable =
@@ -284,4 +296,21 @@ pub fn ntfy_admin_users_and_access_contract_test() {
   assert string.contains(audit_body, "\"action\":\"user.delete\"")
   assert !string.contains(audit_body, "a different secure password")
   assert !string.contains(audit_body, "a sufficiently long password")
+}
+
+pub fn ntfy_signup_route_is_disabled_before_topic_routing_test() {
+  let #(runtime, setup_token) = managed_runtime()
+  complete_setup(runtime, setup_token)
+  let response =
+    api_request(
+      http.Post,
+      "/v1/account",
+      "{\"username\":\"new-user\",\"password\":\"secure password\"}",
+      "",
+    )
+    |> router.handle(runtime)
+  assert response.status == 400
+  assert string.contains(response_text(response), "\"code\":40022")
+  assert string.contains(response_text(response), "signup not enabled")
+  assert string.contains(response_text(response), "https://ntfy.sh/docs/config")
 }

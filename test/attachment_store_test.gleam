@@ -149,6 +149,15 @@ pub fn filesystem_attachment_store_contract_test() {
   management_page_contract(store)
 }
 
+pub fn filesystem_exposes_only_valid_content_addressed_blob_paths_test() {
+  let assert Ok(directory) = filesystem.temporary_directory()
+  let key = attachment_store.content_key(<<"safe path":utf8>>)
+  let assert Ok(path) = filesystem.blob_path(directory, key)
+  assert string.ends_with(path, key <> ".blob")
+  assert filesystem.blob_path(directory, "../outside")
+    == Error(attachment_store.NotFound)
+}
+
 fn concurrent_quota_contract(store: attachment_store.Store) {
   let assert Ok(first) = store.begin(attachment_store.BeginUpload(100))
   let assert Ok(second) = store.begin(attachment_store.BeginUpload(100))

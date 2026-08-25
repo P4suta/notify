@@ -55,6 +55,13 @@ pub fn route(
   runtime: Runtime,
 ) -> Option(Response(BitArray)) {
   case request.method, request.path_segments(request) {
+    Post, ["v1", "account"] ->
+      Some(ntfy_error(
+        400,
+        40_022,
+        "invalid request: signup not enabled",
+        "https://ntfy.sh/docs/config",
+      ))
     Get, ["v1", "account"] -> Some(account_get(request, runtime))
     Delete, ["v1", "account"] ->
       Some(
@@ -433,7 +440,12 @@ fn users_get(runtime: Runtime) -> Response(BitArray) {
     Ok(users), Ok(grants) ->
       json_response(
         200,
-        json.array(users, fn(user) { user_json(user, grants) }),
+        json.array(
+          list.append(list.map(users, fn(user) { user_json(user, grants) }), [
+            anonymous_user_json(grants),
+          ]),
+          fn(value) { value },
+        ),
       )
     _, _ -> unavailable("identity storage unavailable")
   }
@@ -811,26 +823,49 @@ fn token_to_delete(request: Request(body)) -> Option(String) {
 }
 
 fn user_json(user: identity.User, grants: List(acl.Rule)) -> json.Json {
-  let user_grants =
-    grants
-    |> list.filter(fn(rule) { rule.username == user.username })
-    |> list.map(fn(rule) {
-      json.object([
-        #("topic", json.string(rule.topic_pattern)),
-        #("permission", json.string(permission_string(rule.permission))),
-      ])
-    })
-  json.object([
-    #("username", json.string(user.username)),
-    #(
-      "role",
-      json.string(case user.role {
-        acl.User -> "user"
-        acl.Admin -> "admin"
-      }),
-    ),
-    #("grants", json.array(user_grants, fn(value) { value })),
-  ])
+  user_fields(
+    username: user.username,
+    role: case user.role {
+      acl.User -> "user"
+      acl.Admin -> "admin"
+    },
+    grants: grants_for(user.username, grants),
+  )
+}
+
+fn anonymous_user_json(grants: List(acl.Rule)) -> json.Json {
+  user_fields(username: "*", role: "anonymous", grants: grants_for("*", grants))
+}
+
+fn user_fields(
+  username username: String,
+  role role: String,
+  grants grants: List(json.Json),
+) -> json.Json {
+  let fields = [
+    #("username", json.string(username)),
+    #("role", json.string(role)),
+  ]
+  case grants {
+    [] -> json.object(fields)
+    _ ->
+      json.object(
+        list.append(fields, [
+          #("grants", json.array(grants, fn(value) { value })),
+        ]),
+      )
+  }
+}
+
+fn grants_for(username: String, grants: List(acl.Rule)) -> List(json.Json) {
+  grants
+  |> list.filter(fn(rule) { rule.username == username })
+  |> list.map(fn(rule) {
+    json.object([
+      #("topic", json.string(rule.topic_pattern)),
+      #("permission", json.string(permission_string(rule.permission))),
+    ])
+  })
 }
 
 fn stored_token_json(stored: identity.Token) -> json.Json {

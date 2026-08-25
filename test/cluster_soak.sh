@@ -18,6 +18,14 @@ publish_rate=${NOTIFY_SOAK_PUBLISH_RATE:-500}
 duration_seconds=${NOTIFY_SOAK_DURATION_SECONDS:-600}
 settle_seconds=${NOTIFY_SOAK_SETTLE_SECONDS:-60}
 connect_timeout_seconds=${NOTIFY_SOAK_CONNECT_TIMEOUT_SECONDS:-180}
+format=${NOTIFY_SOAK_FORMAT:-json}
+case $format in
+  json | raw | sse | websocket) ;;
+  *)
+    echo "NOTIFY_SOAK_FORMAT must be json, raw, sse, or websocket" >&2
+    exit 2
+    ;;
+esac
 for numeric_value in \
   "$subscriptions" \
   "$topics" \
@@ -211,6 +219,7 @@ export NOTIFY_SOAK_PUBLISH_RATE=$publish_rate
 export NOTIFY_SOAK_DURATION_SECONDS=$duration_seconds
 export NOTIFY_SOAK_SETTLE_SECONDS=$settle_seconds
 export NOTIFY_SOAK_CONNECT_TIMEOUT_SECONDS=$connect_timeout_seconds
+export NOTIFY_SOAK_FORMAT=$format
 export NOTIFY_SOAK_ENDPOINTS="$node_a,$node_b,$node_c"
 topic_prefix="soak-$$"
 readonly topic_prefix

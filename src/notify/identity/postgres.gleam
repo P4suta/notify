@@ -61,6 +61,10 @@ type Command {
   )
 }
 
+type State {
+  State(config: Config, connection: postgleam.Connection, reconnect: Bool)
+}
+
 const setup_lifetime_seconds = 900
 
 const migration = "
@@ -159,15 +163,16 @@ pub fn open_store(config: Config) -> Result(Store, identity.Error) {
       postgleam.disconnect(connection)
       Error(error)
     }
-    Ok(_) -> start_actor(connection)
+    Ok(_) -> start_actor(config, connection)
   }
 }
 
 fn start_actor(
+  config: Config,
   connection: postgleam.Connection,
 ) -> Result(Store, identity.Error) {
   use started <- result.try(
-    actor.new(connection)
+    actor.new(State(config:, connection:, reconnect: False))
     |> actor.on_message(handle)
     |> actor.start
     |> result.map_error(fn(_) {
@@ -262,70 +267,117 @@ fn start_actor(
   )
 }
 
-fn handle(
-  connection: postgleam.Connection,
-  command: Command,
-) -> actor.Next(postgleam.Connection, Command) {
+fn handle(state: State, command: Command) -> actor.Next(State, Command) {
   case command {
-    SetupRequired(reply) ->
-      respond(connection, reply, setup_required(connection))
+    SetupRequired(reply) -> respond(state, reply, setup_required)
     IssueSetup(hash, expires, now, reply) ->
-      respond(connection, reply, issue_setup(connection, hash, expires, now))
+      respond(state, reply, fn(connection) {
+        issue_setup(connection, hash, expires, now)
+      })
     CompleteSetup(setup, reply) ->
-      respond(connection, reply, complete_setup(connection, setup))
+      respond(state, reply, fn(connection) { complete_setup(connection, setup) })
     UserByName(username, reply) ->
-      respond(connection, reply, user_by_name(connection, username))
+      respond(state, reply, fn(connection) {
+        user_by_name(connection, username)
+      })
     UserByTokenHash(hash, now, reply) ->
-      respond(connection, reply, user_by_token_hash(connection, hash, now))
+      respond(state, reply, fn(connection) {
+        user_by_token_hash(connection, hash, now)
+      })
     AuthorizationPolicy(username, reply) ->
-      respond(connection, reply, authorization_policy(connection, username))
-    DefaultAccess(reply) ->
-      respond(connection, reply, default_access(connection))
+      respond(state, reply, fn(connection) {
+        authorization_policy(connection, username)
+      })
+    DefaultAccess(reply) -> respond(state, reply, default_access)
     SetDefaultAccess(permission, reply) ->
-      respond(connection, reply, set_default_access(connection, permission))
+      respond(state, reply, fn(connection) {
+        set_default_access(connection, permission)
+      })
     RulesFor(username, reply) ->
-      respond(connection, reply, rules_for(connection, username))
+      respond(state, reply, fn(connection) { rules_for(connection, username) })
     AddUser(user, reply) ->
-      respond(connection, reply, add_user(connection, user))
-    ListUsers(reply) -> respond(connection, reply, list_users(connection))
+      respond(state, reply, fn(connection) { add_user(connection, user) })
+    ListUsers(reply) -> respond(state, reply, list_users)
     PageUsers(after, limit, reply) ->
-      respond(connection, reply, page_users(connection, after, limit))
+      respond(state, reply, fn(connection) {
+        page_users(connection, after, limit)
+      })
     DeleteUser(username, reply) ->
-      respond(connection, reply, delete_user(connection, username))
+      respond(state, reply, fn(connection) { delete_user(connection, username) })
     ChangePassword(username, hash, reply) ->
-      respond(connection, reply, change_password(connection, username, hash))
+      respond(state, reply, fn(connection) {
+        change_password(connection, username, hash)
+      })
     AddToken(token, reply) ->
-      respond(connection, reply, add_token(connection, token))
+      respond(state, reply, fn(connection) { add_token(connection, token) })
     ListTokens(user_id, reply) ->
-      respond(connection, reply, list_tokens(connection, user_id))
+      respond(state, reply, fn(connection) { list_tokens(connection, user_id) })
     PageTokens(user_id, after, limit, reply) ->
-      respond(connection, reply, page_tokens(connection, user_id, after, limit))
+      respond(state, reply, fn(connection) {
+        page_tokens(connection, user_id, after, limit)
+      })
     RevokeToken(id, reply) ->
-      respond(connection, reply, revoke_token(connection, id))
+      respond(state, reply, fn(connection) { revoke_token(connection, id) })
     RevokeTokenHash(hash, reply) ->
-      respond(connection, reply, revoke_token_hash(connection, hash))
+      respond(state, reply, fn(connection) {
+        revoke_token_hash(connection, hash)
+      })
     PutGrant(rule, reply) ->
-      respond(connection, reply, put_grant(connection, rule))
+      respond(state, reply, fn(connection) { put_grant(connection, rule) })
     DeleteGrant(username, pattern, reply) ->
-      respond(connection, reply, delete_grant(connection, username, pattern))
+      respond(state, reply, fn(connection) {
+        delete_grant(connection, username, pattern)
+      })
     ListGrants(username, reply) ->
-      respond(connection, reply, list_grants(connection, username))
+      respond(state, reply, fn(connection) { list_grants(connection, username) })
     PageGrants(username, after, limit, reply) ->
-      respond(
-        connection,
-        reply,
-        page_grants(connection, username, after, limit),
-      )
+      respond(state, reply, fn(connection) {
+        page_grants(connection, username, after, limit)
+      })
   }
 }
 
 fn respond(
-  connection: postgleam.Connection,
-  reply: Subject(a),
-  value: a,
-) -> actor.Next(postgleam.Connection, Command) {
-  process.send(reply, value)
-  actor.continue(connection)
+  state: State,
+  reply: Subject(Result(value, identity.Error)),
+  operation: fn(postgleam.Connection) -> Result(value, identity.Error),
+) -> actor.Next(State, Command) {
+  let #(next, outcome) = run(state, operation)
+  process.send(reply, outcome)
+  actor.continue(next)
+}
+
+fn run(
+  state: State,
+  operation: fn(postgleam.Connection) -> Result(value, identity.Error),
+) -> #(State, Result(value, identity.Error)) {
+  case ready_connection(state) {
+    Error(error) -> #(state, Error(error))
+    Ok(ready) -> {
+      let outcome = operation(ready.connection)
+      case outcome {
+        Error(identity.Unavailable(_)) -> #(
+          State(..ready, reconnect: True),
+          outcome,
+        )
+        _ -> #(ready, outcome)
+      }
+    }
+  }
+}
+
+fn ready_connection(state: State) -> Result(State, identity.Error) {
+  case state.reconnect {
+    False -> Ok(state)
+    True ->
+      case postgleam.connect(state.config) {
+        Error(error) -> Error(map_error(error))
+        Ok(connection) -> {
+          postgleam.disconnect(state.connection)
+          Ok(State(..state, connection:, reconnect: False))
+        }
+      }
+  }
 }
 
 fn migrate(connection: postgleam.Connection) -> Result(Nil, identity.Error) {

@@ -41,6 +41,12 @@ services:
       NTFY_LISTEN_HTTP: :80
       NTFY_AUTH_FILE: /var/lib/ntfy/auth.db
       NTFY_AUTH_DEFAULT_ACCESS: read-write
+      NTFY_VISITOR_REQUEST_LIMIT_BURST: "1000"
+      NTFY_VISITOR_TOPIC_CREATION_LIMIT_BURST: "1000"
+      NTFY_WEB_PUSH_FILE: /var/lib/ntfy/webpush.db
+      NTFY_WEB_PUSH_PUBLIC_KEY: BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8
+      NTFY_WEB_PUSH_PRIVATE_KEY: yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw
+      NTFY_WEB_PUSH_EMAIL_ADDRESS: admin@example.test
     ports:
       - "18080:80"
     volumes:
@@ -80,6 +86,12 @@ services:
     depends_on:
       notify-setup:
         condition: service_completed_successfully
+    environment:
+      NOTIFY_RATE_LIMIT_REQUESTS: "1000"
+      NOTIFY_RATE_LIMIT_TOPIC_CREATIONS: "1000"
+      NOTIFY_WEBPUSH_PUBLIC_KEY: BP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A8
+      NOTIFY_WEBPUSH_PRIVATE_KEY: yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw
+      NOTIFY_WEBPUSH_SUBSCRIBER: admin@example.test
     ports:
       - "18081:8080"
     volumes:

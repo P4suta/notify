@@ -150,13 +150,18 @@ the same bytes does not consume quota twice and only extends the expiry.
   staging objects by expiry. GET Range is delegated to the object store.
 
 The defaults are a 15 MiB object limit, 100 MiB attachment inventory limit,
-and three-hour retention. The surrounding Mist request currently arrives as a
-complete body (bounded by the 16 MiB request limit), and complete downloads are
-also materialised before the response is sent; transport streaming and
-filesystem sendfile are not implemented. Name and MIME remain message metadata,
-so the download endpoint uses the percent-decoded URL filename and serves
-`application/octet-stream` with `nosniff`. It returns a strong content-hash
-ETag and supports HEAD, a single byte Range, and If-None-Match.
+and three-hour retention. For a local attachment publish, Mist reads at most
+1 MiB per iteration and writes each chunk through the store port; an input,
+limit, store, or client-disconnect failure aborts the staging upload. Topic,
+filename, publish parameters, CSRF, credentials, and ACL are validated before
+the uploader callback runs. Filesystem/shared-filesystem full and single-Range
+GETs use Mist sendfile after the ordinary route has authorized the topic,
+confirmed a persisted message reference, and validated ETag/range semantics.
+PostgreSQL and S3 responses retain bounded adapter reads. Name and MIME remain
+notification metadata by design, so the download endpoint uses the percent-
+decoded URL filename and serves `application/octet-stream` with `nosniff`. It
+returns a strong content-hash ETag and supports HEAD, a single byte Range, and
+If-None-Match.
 
 Before returning an object, the server verifies that a persisted notification
 under the authorised topic actually references that content key. Merely
@@ -168,8 +173,9 @@ and S3 inventory checks are serialized only inside one adapter process; their
 total-quota check is not cluster-atomic. Enforce a backend quota externally or
 use the PostgreSQL attachment backend when strict active-active quota is
 required. If message publication fails after object promotion, the unreferenced
-content-addressed object remains until its configured expiry; immediate
-reference-counted compensation is still open.
+content-addressed object is bounded by its configured expiry and cleanup. This
+expiry-based compensation is the documented contract; immediate distributed
+reference counting is not provided.
 
 ## Session and log safety
 
@@ -218,11 +224,13 @@ removed afterward. The recorded maxima are observations from this run, not a
 proof of a universal heap, mailbox, or storage bound.
 
 This is one single-host steady-state measurement, not a portable capacity
-certificate. It does not cover a database or object-store outage during the
-target load, simultaneous node failures, a slow-subscriber fault during the
-full 10 minutes, cross-host network latency, or target-scale raw/SSE/WebSocket
-streams. Those fault and transport cases remain required before production
-certification. Reconnect delivery remains at-least-once, never exactly-once.
+certificate. A separate compound test now covers simultaneous node failures,
+slow-subscriber isolation, scheduled-origin failure, PostgreSQL and MinIO
+outages, and delivery-lease reclamation, but not while the full target load is
+running. The recorded measurement also does not cover cross-host network
+latency or target-scale raw/SSE/WebSocket streams. Those load/environment
+results must be evaluated independently before a deployment-specific capacity
+claim. Reconnect delivery remains at-least-once, never exactly-once.
 
 A pre-fix diagnostic attempt at commit `2d76633` was stopped without a passing
 verdict after about 15 minutes with only 208,956 of 300,000 commits complete.
@@ -234,18 +242,23 @@ pass.
 
 The local acceptance command is `test/cluster_soak.sh`. It is loopback-only by
 default and starts an isolated three-node Compose project with PostgreSQL and
-MinIO. The driver paces publish starts independently of completion, records
-request-to-response commit latency and scheduler lag, and holds every
+MinIO. `NOTIFY_SOAK_FORMAT` selects JSON, raw, SSE, or WebSocket; the
+weekly/manual workflow runs the target once per format. The driver paces
+publish starts independently of completion, records request-to-response commit
+latency and scheduler lag, and holds every
 subscription open through the delivery-settle window. The final verifier
 requires every subscriber on a topic to have the same 12-character ID sequence
 with no loss or duplicates, exports `notify_event_log` in sequence order, and
 requires the observed live order to match that durable source of truth exactly.
-It additionally requires exactly the expected three node cursors and zero final
-lag from the event-log head. Missing oracle evidence makes the verdict fail.
+Raw payloads are mapped back to the authoritative IDs before the same check.
+Runs of at least 90 seconds also require every subscriber to observe the
+45-second keepalive cadence. The verifier additionally requires exactly the
+expected three node cursors and zero final lag from the event-log head. Missing
+oracle evidence makes the verdict fail.
 Environment, database size and row counts, cursor positions, container/OOM
 state, and periodic resource samples are separate report files. The
-weekly/manual workflow uses the exact defaults above and retains these private
-artifacts for seven days.
+weekly/manual workflow uses the exact defaults above for all four formats and
+retains these private artifacts for seven days.
 
 ## SQLite schema refusal and recovery
 
@@ -332,12 +345,16 @@ local- and remote-origin events in the same sequence, stops one bus actor after
 its cursor is durable, commits on both
 surviving origins, and restarts the same node identity to catch up both events
 in sequence. These persistence cases run against real PostgreSQL in the
-pull-request gate. The weekly/manual container contract starts three complete
-nodes with PostgreSQL and MinIO, validates stable ordered delivery, SIGKILLs one
-node, publishes on both survivors, and requires ordered poll replay and
-message-ID live resume after restart. Simultaneous multi-node crash and
-prolonged database/object-store outage tests remain required before production
-certification.
+pull-request gate. The weekly/manual compound container contract starts three
+complete nodes with PostgreSQL and MinIO. It replaces a terminated LISTEN
+connection, injects duplicate wake-ups, disconnects only a bounded-buffer slow
+subscriber, SIGKILLs two nodes simultaneously, and requires ordered replay,
+cursor catch-up, and message-ID resume. It then kills a scheduled message's
+origin before due time and requires exactly one release from the two surviving
+schedulers. Its storage faults stop PostgreSQL and MinIO separately, require
+fail-closed writes with no phantom message/attachment, and verify recovery plus
+cross-node object download. These are bounded fault contracts, not prolonged
+outage-at-target-load capacity results.
 
 ## Durable delivery recovery
 
@@ -349,9 +366,12 @@ and the tenth failed attempt becomes `dead_letter`.
 The real-PostgreSQL contract opens independent stores for two node identities.
 It rejects a second claim before expiry, permits reclamation exactly at expiry,
 preserves the attempt count, rejects completion by the stale owner, and races
-two 16-job claims over 32 due rows without overlap. Killing a worker during a
-live provider request and a prolonged outbox outage remain fault-injection
-gaps.
+two 16-job claims over 32 due rows without overlap. The compound container test
+also holds a content-blind relay request open, SIGKILLs its lease-owner node,
+expires the lease, observes a different node reclaim it, and requires exactly
+one successful completion. The mock rejects message bodies and malformed poll
+IDs. Killing a Web Push worker inside provider crypto/HTTP and a prolonged
+outbox outage at target load remain separate certification cases.
 
 Administrators can inspect redacted jobs at `GET /api/v1/delivery-jobs`, retry
 a dead letter at `POST /api/v1/delivery-jobs/{id}/retry`, or permanently purge

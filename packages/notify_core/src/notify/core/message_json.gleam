@@ -37,6 +37,7 @@ type RawPublish {
     actions: List(Action),
     delay: Option(String),
     sequence_id: Option(String),
+    poll_id: Option(String),
     cache: Bool,
   )
 }
@@ -73,7 +74,7 @@ fn encode_fields(message: Message) -> List(#(String, Json)) {
       #("topic", json.string(topic.to_string(message.topic))),
     ])
   let fields = case message.event {
-    message.MessageEvent ->
+    message.MessageEvent | message.PollRequestEvent ->
       list.append(fields, [#("message", json.string(message.message))])
     _ -> fields
   }
@@ -103,7 +104,9 @@ fn encode_fields(message: Message) -> List(#(String, Json)) {
   }
   let fields =
     append_optional(fields, "attachment", message.attachment, encode_attachment)
-  append_optional(fields, "sequence_id", message.sequence_id, json.string)
+  fields
+  |> append_optional("sequence_id", message.sequence_id, json.string)
+  |> append_optional("poll_id", message.poll_id, json.string)
 }
 
 pub fn encode_control(
@@ -258,6 +261,11 @@ pub fn decoder() -> decode.Decoder(Message) {
     None,
     decode.optional(decode.string),
   )
+  use poll_id <- decode.optional_field(
+    "poll_id",
+    None,
+    decode.optional(decode.string),
+  )
   decode.success(message.Message(
     id:,
     time:,
@@ -276,6 +284,7 @@ pub fn decoder() -> decode.Decoder(Message) {
     scheduled:,
     cached:,
     sequence_id:,
+    poll_id:,
   ))
 }
 
@@ -435,6 +444,11 @@ fn raw_publish_decoder() -> decode.Decoder(RawPublish) {
     None,
     decode.optional(decode.string),
   )
+  use poll_id <- decode.optional_field(
+    "poll_id",
+    None,
+    decode.optional(decode.string),
+  )
   use cache <- decode.optional_field("cache", True, decode.bool)
   decode.success(RawPublish(
     topic:,
@@ -450,6 +464,7 @@ fn raw_publish_decoder() -> decode.Decoder(RawPublish) {
     actions:,
     delay:,
     sequence_id:,
+    poll_id:,
     cache:,
   ))
 }
@@ -485,6 +500,7 @@ fn raw_to_draft(raw: RawPublish) -> Result(Draft, DecodeError) {
     attachment:,
     delay: raw.delay,
     sequence_id: raw.sequence_id,
+    poll_id: raw.poll_id,
     cache: raw.cache,
   ))
 }

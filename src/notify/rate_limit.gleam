@@ -80,7 +80,9 @@ type PostgresCommand {
 type PostgresState {
   PostgresState(
     subject: Subject(PostgresCommand),
+    config: Config,
     connection: postgleam.Connection,
+    reconnect: Bool,
     policies: Policies,
     window_seconds: Int,
     last_cleanup_at: Int,
@@ -336,7 +338,7 @@ pub fn postgres_with_policies(
       postgleam.disconnect(connection)
       Error(error)
     }
-    Ok(_) -> start_postgres_actor(connection, policies, window_seconds)
+    Ok(_) -> start_postgres_actor(config, connection, policies, window_seconds)
   }
 }
 
@@ -398,6 +400,7 @@ fn handle_memory(
 }
 
 fn start_postgres_actor(
+  config: Config,
   connection: postgleam.Connection,
   policies: Policies,
   window_seconds: Int,
@@ -407,7 +410,9 @@ fn start_postgres_actor(
       Ok(
         actor.initialised(PostgresState(
           subject:,
+          config:,
           connection:,
+          reconnect: False,
           policies:,
           window_seconds:,
           last_cleanup_at: 0,
@@ -478,26 +483,53 @@ fn handle_postgres(
     |> list.fold(0, fn(latest, check) { int.max(latest, check.now) })
   let cleanup =
     cleanup_due(state.last_cleanup_at, checked_at, state.window_seconds)
+  let #(next, outcome) = case pending {
+    [] -> #(state, Ok([]))
+    _ ->
+      case ready_postgres_connection(state) {
+        Error(error) -> #(state, Error(error))
+        Ok(ready) -> {
+          let outcome = check_postgres_batches(ready, pending, cleanup)
+          let next = case outcome {
+            Ok(_) -> ready
+            Error(_) -> PostgresState(..ready, reconnect: True)
+          }
+          #(next, outcome)
+        }
+      }
+  }
   case pending {
     [] -> Nil
-    _ -> {
-      let outcome = check_postgres_batches(state, pending, cleanup)
+    _ ->
       send_postgres_batch_results(
         pending,
-        case outcome {
-          Ok(rows) -> Ok(rows)
-          Error(error) -> Error(error)
-        },
+        outcome,
         state.policies,
         state.window_seconds,
         1,
       )
-    }
   }
-  actor.continue(case cleanup {
-    True -> PostgresState(..state, last_cleanup_at: int.max(checked_at, 0))
-    False -> state
+  actor.continue(case cleanup, outcome {
+    True, Ok(_) ->
+      PostgresState(..next, last_cleanup_at: int.max(checked_at, 0))
+    _, _ -> next
   })
+}
+
+fn ready_postgres_connection(
+  state: PostgresState,
+) -> Result(PostgresState, Error) {
+  case state.reconnect {
+    False -> Ok(state)
+    True ->
+      case postgleam.connect(state.config) {
+        Error(error) -> Error(map_postgres_error(error))
+        Ok(connection) -> {
+          postgleam.disconnect(state.connection)
+          Ok(PostgresState(..state, connection:, reconnect: False))
+        }
+      }
+  }
 }
 
 fn collect_postgres_commands(

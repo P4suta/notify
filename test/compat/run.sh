@@ -64,18 +64,18 @@ normalise_body() {
   case "$kind" in
     message)
       jq --sort-keys \
-        'def action: {id_contract: {length: ((.id // "") | length), alphanumeric: ((.id // "") | test("^[A-Za-z0-9]+$"))}, value: del(.id)}; {id_contract: {length: (.id | length), alphanumeric: (.id | test("^[A-Za-z0-9]+$"))}, value: (del(.id, .time, .expires, .attachment.expires) | if has("actions") then .actions |= map(action) else . end)}' \
+        'def action: {id_contract: {length: ((.id // "") | length), alphanumeric: ((.id // "") | test("^[A-Za-z0-9]+$"))}, value: del(.id)}; def portable_attachment_url: if (.attachment.url? | type) == "string" then .attachment.url |= sub("^https?://[^/]+"; "<origin>") else . end; {id_contract: {length: (.id | length), alphanumeric: (.id | test("^[A-Za-z0-9]+$"))}, value: (del(.id, .time, .expires, .attachment.expires) | portable_attachment_url | if has("actions") then .actions |= map(action) else . end)}' \
         "$source" >"$destination"
       ;;
     ndjson)
       jq --slurp --sort-keys \
-        'def action: {id_contract: {length: ((.id // "") | length), alphanumeric: ((.id // "") | test("^[A-Za-z0-9]+$"))}, value: del(.id)}; map({id_contract: {length: (.id | length), alphanumeric: (.id | test("^[A-Za-z0-9]+$"))}, value: (del(.id, .time, .expires, .attachment.expires) | if has("actions") then .actions |= map(action) else . end)})' \
+        'def action: {id_contract: {length: ((.id // "") | length), alphanumeric: ((.id // "") | test("^[A-Za-z0-9]+$"))}, value: del(.id)}; def portable_attachment_url: if (.attachment.url? | type) == "string" then .attachment.url |= sub("^https?://[^/]+"; "<origin>") else . end; map({id_contract: {length: (.id | length), alphanumeric: (.id | test("^[A-Za-z0-9]+$"))}, value: (del(.id, .time, .expires, .attachment.expires) | portable_attachment_url | if has("actions") then .actions |= map(action) else . end)})' \
         "$source" >"$destination"
       ;;
     sse)
       sed -n 's/^data: //p' "$source" \
         | jq --slurp --sort-keys \
-          'def action: {id_contract: {length: ((.id // "") | length), alphanumeric: ((.id // "") | test("^[A-Za-z0-9]+$"))}, value: del(.id)}; map({id_contract: {length: (.id | length), alphanumeric: (.id | test("^[A-Za-z0-9]+$"))}, value: (del(.id, .time, .expires, .attachment.expires) | if has("actions") then .actions |= map(action) else . end)})' \
+          'def action: {id_contract: {length: ((.id // "") | length), alphanumeric: ((.id // "") | test("^[A-Za-z0-9]+$"))}, value: del(.id)}; def portable_attachment_url: if (.attachment.url? | type) == "string" then .attachment.url |= sub("^https?://[^/]+"; "<origin>") else . end; map({id_contract: {length: (.id | length), alphanumeric: (.id | test("^[A-Za-z0-9]+$"))}, value: (del(.id, .time, .expires, .attachment.expires) | portable_attachment_url | if has("actions") then .actions |= map(action) else . end)})' \
           >"$destination"
       ;;
     error)
@@ -153,7 +153,7 @@ run_case() {
   local encoded_case="$3"
   local case_json
   case_json="$(printf '%s' "$encoded_case" | base64 --decode)"
-  local name method path body content_type normalizer body_repeat capture_name
+  local name method path body content_type normalizer body_repeat capture_name capture_kind
   name="$(jq -r .name <<<"$case_json")"
   method="$(jq -r .method <<<"$case_json")"
   path="$(substitute_value "$side" "$(jq -r .path <<<"$case_json")")"
@@ -162,6 +162,7 @@ run_case() {
   normalizer="$(jq -r .normalizer <<<"$case_json")"
   body_repeat="$(jq -r '.body_repeat // 0' <<<"$case_json")"
   capture_name="$(jq -r '.capture // ""' <<<"$case_json")"
+  capture_kind="$(jq -r '.capture_kind // "token"' <<<"$case_json")"
   if [[ "$body_repeat" -gt 0 ]]; then
     body="$(printf '%*s' "$body_repeat" '' | tr ' ' x)"
   fi
@@ -189,11 +190,26 @@ run_case() {
       return 1
     fi
     local capture_value
-    capture_value="$(jq --exit-status --raw-output '.token | strings | select(length > 0)' "$raw_body")"
-    if [[ ! "$capture_value" =~ ^tk_[A-Za-z0-9]{29}$ ]]; then
-      echo "invalid captured token contract in case $name" >&2
-      return 1
-    fi
+    case "$capture_kind" in
+      token)
+        capture_value="$(jq --exit-status --raw-output '.token | strings | select(length > 0)' "$raw_body")"
+        if [[ ! "$capture_value" =~ ^tk_[A-Za-z0-9]{29}$ ]]; then
+          echo "invalid captured token contract in case $name" >&2
+          return 1
+        fi
+        ;;
+      message_id)
+        capture_value="$(jq --exit-status --raw-output '.id | strings | select(length > 0)' "$raw_body")"
+        if [[ ! "$capture_value" =~ ^[A-Za-z0-9]{12}$ ]]; then
+          echo "invalid captured message ID contract in case $name" >&2
+          return 1
+        fi
+        ;;
+      *)
+        echo "invalid capture kind in case $name: $capture_kind" >&2
+        return 1
+        ;;
+    esac
     printf '%s' "$capture_value" >"$capture_dir/$side/$capture_name"
   fi
   local media_type

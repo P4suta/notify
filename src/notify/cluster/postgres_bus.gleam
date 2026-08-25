@@ -6,7 +6,7 @@ import gleam/result
 import notify/core/message.{type Message}
 import notify/storage
 import notify/storage/postgres.{type Adapter}
-import postgleam/config.{type Config}
+import postgleam/config as postgres_config
 import postgleam/connection
 import postgleam/notifications
 
@@ -18,7 +18,7 @@ const reconnect_milliseconds = 1000
 /// latency: the durable event log and per-node cursor remain the source of
 /// truth, and every loop drains the cursor even if a notification was lost.
 pub fn start(
-  config: Config,
+  config: postgres_config.Config,
   adapter: Adapter,
   node_id: String,
   dispatch: fn(Message) -> Result(Nil, storage.Error),
@@ -27,7 +27,7 @@ pub fn start(
 }
 
 pub fn supervised(
-  config: Config,
+  config: postgres_config.Config,
   adapter: Adapter,
   node_id: String,
   dispatch: fn(Message) -> Result(Nil, storage.Error),
@@ -39,12 +39,12 @@ pub fn supervised(
 }
 
 fn connect_loop(
-  config: Config,
+  config: postgres_config.Config,
   adapter: Adapter,
   node_id: String,
   dispatch: fn(Message) -> Result(Nil, storage.Error),
 ) -> Nil {
-  case connection.connect(config) {
+  case connection.connect(listener_config(config, node_id)) {
     Error(_) -> {
       process.sleep(reconnect_milliseconds)
       connect_loop(config, adapter, node_id, dispatch)
@@ -64,7 +64,7 @@ fn connect_loop(
 
 fn listen_loop(
   state: connection.ConnectionState,
-  config: Config,
+  config: postgres_config.Config,
   adapter: Adapter,
   node_id: String,
   dispatch: fn(Message) -> Result(Nil, storage.Error),
@@ -77,6 +77,25 @@ fn listen_loop(
     }
     Ok(#(_, next_state)) ->
       listen_loop(next_state, config, adapter, node_id, dispatch)
+  }
+}
+
+fn listener_config(
+  config: postgres_config.Config,
+  node_id: String,
+) -> postgres_config.Config {
+  let postgres_config.Config(extra_parameters:, ..) = config
+  case
+    list.any(extra_parameters, fn(parameter) {
+      parameter.0 == "application_name"
+    })
+  {
+    True -> config
+    False ->
+      postgres_config.extra_parameters(config, [
+        #("application_name", "notify-listener-" <> node_id),
+        ..extra_parameters
+      ])
   }
 }
 

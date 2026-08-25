@@ -72,9 +72,58 @@ pub fn materialise_rejects_invalid_sequence_parameters_test() {
     message.Draft(
       ..message.plaintext_draft(fixture_topic(), "Backup complete"),
       sequence_id: Some("invalid*sequence"),
+      poll_id: None,
     )
   let assert Error(message.InvalidSequenceId) =
     message.materialise(invalid, id: "AbCdEf1234XY", now: 1, expires: 2)
+}
+
+pub fn poll_request_materialisation_uses_the_pinned_ntfy_shape_test() {
+  let draft =
+    message.Draft(
+      ..message.plaintext_draft(fixture_topic(), "ignored by poll requests"),
+      title: Some("Ignored title"),
+      priority: message.Max,
+      tags: ["ignored"],
+      markdown: True,
+      icon: Some("https://example.test/icon.png"),
+      click: Some("https://example.test/click"),
+      actions: [
+        message.CopyAction(
+          label: "Ignored action",
+          value: "ignored",
+          clear: True,
+          id: None,
+        ),
+      ],
+      attachment: Some(message.Attachment(
+        name: "ignored.txt",
+        url: "https://example.test/ignored.txt",
+        mime_type: Some("text/plain"),
+        size: Some(7),
+        expires: Some(200),
+      )),
+      sequence_id: Some("sequence-42"),
+      poll_id: Some("poll-request-42"),
+      cache: True,
+    )
+  let assert Ok(value) =
+    message.materialise(draft, id: "AbCdEf1234XY", now: 100, expires: 200)
+
+  assert value.event == message.PollRequestEvent
+  assert value.message == "New message"
+  assert value.expires == None
+  assert !value.cached
+  assert value.title == None
+  assert value.priority == message.Default
+  assert value.tags == []
+  assert !value.markdown
+  assert value.icon == None
+  assert value.click == None
+  assert value.actions == []
+  assert value.attachment == None
+  assert value.sequence_id == Some("sequence-42")
+  assert value.poll_id == Some("poll-request-42")
 }
 
 pub fn message_body_is_limited_to_four_kibibytes_test() {

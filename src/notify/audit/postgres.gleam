@@ -15,6 +15,10 @@ type Command {
   Health(Subject(Result(Nil, audit.Error)))
 }
 
+type State {
+  State(config: Config, connection: postgleam.Connection, reconnect: Bool)
+}
+
 const migration = "
 CREATE TABLE IF NOT EXISTS notify_audit_log (
   sequence BIGSERIAL PRIMARY KEY,
@@ -54,7 +58,7 @@ pub fn start(config: Config) -> Result(Store, audit.Error) {
           Error(error)
         }
         Ok(_) ->
-          case start_actor(connection) {
+          case start_actor(config, connection) {
             Ok(store) -> Ok(store)
             Error(error) -> {
               postgleam.disconnect(connection)
@@ -116,9 +120,12 @@ fn migrate(connection: postgleam.Connection) -> Result(Nil, audit.Error) {
   |> result.map_error(map_error)
 }
 
-fn start_actor(connection: postgleam.Connection) -> Result(Store, audit.Error) {
+fn start_actor(
+  config: Config,
+  connection: postgleam.Connection,
+) -> Result(Store, audit.Error) {
   use started <- result.try(
-    actor.new(connection)
+    actor.new(State(config:, connection:, reconnect: False))
     |> actor.on_message(handle)
     |> actor.start
     |> result.map_error(fn(_) {
@@ -139,17 +146,57 @@ fn start_actor(connection: postgleam.Connection) -> Result(Store, audit.Error) {
   )
 }
 
-fn handle(
-  connection: postgleam.Connection,
-  command: Command,
-) -> actor.Next(postgleam.Connection, Command) {
+fn handle(state: State, command: Command) -> actor.Next(State, Command) {
   case command {
-    Append(event, reply) -> process.send(reply, append(connection, event))
+    Append(event, reply) ->
+      respond(state, reply, fn(connection) { append(connection, event) })
     Page(after, limit, reply) ->
-      process.send(reply, page(connection, after, limit))
-    Health(reply) -> process.send(reply, health(connection))
+      respond(state, reply, fn(connection) { page(connection, after, limit) })
+    Health(reply) -> respond(state, reply, health)
   }
-  actor.continue(connection)
+}
+
+fn respond(
+  state: State,
+  reply: Subject(Result(value, audit.Error)),
+  operation: fn(postgleam.Connection) -> Result(value, audit.Error),
+) -> actor.Next(State, Command) {
+  let #(next, outcome) = run(state, operation)
+  process.send(reply, outcome)
+  actor.continue(next)
+}
+
+fn run(
+  state: State,
+  operation: fn(postgleam.Connection) -> Result(value, audit.Error),
+) -> #(State, Result(value, audit.Error)) {
+  case ready_connection(state) {
+    Error(error) -> #(state, Error(error))
+    Ok(ready) -> {
+      let outcome = operation(ready.connection)
+      case outcome {
+        Error(audit.Unavailable(_)) -> #(
+          State(..ready, reconnect: True),
+          outcome,
+        )
+        _ -> #(ready, outcome)
+      }
+    }
+  }
+}
+
+fn ready_connection(state: State) -> Result(State, audit.Error) {
+  case state.reconnect {
+    False -> Ok(state)
+    True ->
+      case postgleam.connect(state.config) {
+        Error(error) -> Error(map_error(error))
+        Ok(connection) -> {
+          postgleam.disconnect(state.connection)
+          Ok(State(..state, connection:, reconnect: False))
+        }
+      }
+  }
 }
 
 fn append(

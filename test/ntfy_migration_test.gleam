@@ -606,6 +606,7 @@ pub fn local_ntfy_attachments_are_content_addressed_and_rolled_back_on_db_failur
       scheduled: False,
       cached: True,
       sequence_id: None,
+      poll_id: None,
     )
   assert conflict_store.save(conflicting) == Ok(conflicting)
   let assert Ok(rollback_target) =

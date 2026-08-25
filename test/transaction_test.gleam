@@ -156,6 +156,7 @@ pub fn sqlite_atomic_commit_rolls_back_message_when_outbox_insert_fails_test() {
       scheduled: False,
       cached: True,
       sequence_id: None,
+      poll_id: None,
     )
   let storage.AtomicCommit(commit) = adapter.commit
   assert commit(candidate, [duplicate]) |> result_is_error

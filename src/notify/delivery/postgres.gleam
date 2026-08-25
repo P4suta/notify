@@ -42,6 +42,10 @@ type Command {
   Health(Subject(Result(Nil, delivery.Error)))
 }
 
+type State {
+  State(config: Config, connection: postgleam.Connection, reconnect: Bool)
+}
+
 const migration = "
 CREATE TABLE IF NOT EXISTS notify_delivery_outbox (
   id TEXT PRIMARY KEY,
@@ -73,7 +77,7 @@ pub fn start(config: Config) -> Result(Store, delivery.Error) {
       postgleam.disconnect(connection)
       Error(error)
     }
-    Ok(_) -> start_actor(connection)
+    Ok(_) -> start_actor(config, connection)
   }
 }
 
@@ -91,10 +95,11 @@ fn migrate(connection: postgleam.Connection) -> Result(Nil, delivery.Error) {
 }
 
 fn start_actor(
+  config: Config,
   connection: postgleam.Connection,
 ) -> Result(Store, delivery.Error) {
   use started <- result.try(
-    actor.new(connection)
+    actor.new(State(config:, connection:, reconnect: False))
     |> actor.on_message(handle)
     |> actor.start
     |> result.map_error(fn(_) {
@@ -140,33 +145,76 @@ fn start_actor(
   )
 }
 
-fn handle(
-  connection: postgleam.Connection,
-  command: Command,
-) -> actor.Next(postgleam.Connection, Command) {
+fn handle(state: State, command: Command) -> actor.Next(State, Command) {
   case command {
-    Enqueue(job, reply) -> process.send(reply, enqueue(connection, job))
+    Enqueue(job, reply) ->
+      respond(state, reply, fn(connection) { enqueue(connection, job) })
     Claim(kind, owner, now, lease_seconds, limit, reply) ->
-      process.send(
-        reply,
-        claim(connection, kind, owner, now, lease_seconds, limit),
-      )
+      respond(state, reply, fn(connection) {
+        claim(connection, kind, owner, now, lease_seconds, limit)
+      })
     Complete(id, owner, reply) ->
-      process.send(reply, complete(connection, id, owner))
+      respond(state, reply, fn(connection) { complete(connection, id, owner) })
     Fail(id, owner, now, detail, max_attempts, base_delay, reply) ->
-      process.send(
-        reply,
-        fail(connection, id, owner, now, detail, max_attempts, base_delay),
-      )
-    Requeue(id, now, reply) -> process.send(reply, requeue(connection, id, now))
-    Purge(id, reply) -> process.send(reply, purge(connection, id))
-    List(kind, reply) -> process.send(reply, list_jobs(connection, kind))
+      respond(state, reply, fn(connection) {
+        fail(connection, id, owner, now, detail, max_attempts, base_delay)
+      })
+    Requeue(id, now, reply) ->
+      respond(state, reply, fn(connection) { requeue(connection, id, now) })
+    Purge(id, reply) ->
+      respond(state, reply, fn(connection) { purge(connection, id) })
+    List(kind, reply) ->
+      respond(state, reply, fn(connection) { list_jobs(connection, kind) })
     Page(kind, after, limit, reply) ->
-      process.send(reply, page_jobs(connection, kind, after, limit))
-    Stats(reply) -> process.send(reply, stats(connection))
-    Health(reply) -> process.send(reply, health(connection))
+      respond(state, reply, fn(connection) {
+        page_jobs(connection, kind, after, limit)
+      })
+    Stats(reply) -> respond(state, reply, stats)
+    Health(reply) -> respond(state, reply, health)
   }
-  actor.continue(connection)
+}
+
+fn respond(
+  state: State,
+  reply: Subject(Result(value, delivery.Error)),
+  operation: fn(postgleam.Connection) -> Result(value, delivery.Error),
+) -> actor.Next(State, Command) {
+  let #(next, outcome) = run(state, operation)
+  process.send(reply, outcome)
+  actor.continue(next)
+}
+
+fn run(
+  state: State,
+  operation: fn(postgleam.Connection) -> Result(value, delivery.Error),
+) -> #(State, Result(value, delivery.Error)) {
+  case ready_connection(state) {
+    Error(error) -> #(state, Error(error))
+    Ok(ready) -> {
+      let outcome = operation(ready.connection)
+      case outcome {
+        Error(delivery.Unavailable(_)) -> #(
+          State(..ready, reconnect: True),
+          outcome,
+        )
+        _ -> #(ready, outcome)
+      }
+    }
+  }
+}
+
+fn ready_connection(state: State) -> Result(State, delivery.Error) {
+  case state.reconnect {
+    False -> Ok(state)
+    True ->
+      case postgleam.connect(state.config) {
+        Error(error) -> Error(map_error(error))
+        Ok(connection) -> {
+          postgleam.disconnect(state.connection)
+          Ok(State(..state, connection:, reconnect: False))
+        }
+      }
+  }
 }
 
 fn enqueue(

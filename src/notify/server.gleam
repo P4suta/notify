@@ -1,3 +1,4 @@
+import gleam/bit_array
 import gleam/bytes_tree
 import gleam/erlang/process.{type Pid}
 import gleam/http
@@ -202,10 +203,39 @@ fn start_after_lock(
             case live.route(request, runtime, bus, 128) {
               Some(response) -> response
               None ->
-                case mist.read_body(request, config.max_request_bytes) {
-                  Ok(request) ->
-                    request |> router.handle(runtime) |> to_mist_response
-                  Error(_) -> body_too_large
+                case
+                  router.streamed_attachment(
+                    request,
+                    runtime,
+                    fn(store, expires) {
+                      stream_attachment(
+                        request,
+                        store,
+                        expires,
+                        config.max_request_bytes,
+                      )
+                    },
+                  )
+                {
+                  Some(reply) ->
+                    reply
+                    // A rejected streaming upload may leave unread bytes on
+                    // this connection. Closing it prevents those bytes from
+                    // being parsed as the next keep-alive request.
+                    |> response.set_header("connection", "close")
+                    |> to_mist_response
+                  None ->
+                    case filesystem_download(request, runtime, config) {
+                      Some(reply) -> reply
+                      None ->
+                        case mist.read_body(request, config.max_request_bytes) {
+                          Ok(request) ->
+                            request
+                            |> router.handle(runtime)
+                            |> to_mist_response
+                          Error(_) -> body_too_large
+                        }
+                    }
                 }
             }
           },
@@ -744,6 +774,162 @@ fn to_mist_response(reply: Response(BitArray)) -> Response(mist.ResponseData) {
     |> bytes_tree.from_bit_array
     |> mist.Bytes
   })
+}
+
+const attachment_stream_chunk_bytes = 1_048_576
+
+fn stream_attachment(
+  request: request.Request(mist.Connection),
+  store: attachment_store.Store,
+  expires: Int,
+  maximum_request_bytes: Int,
+) -> Result(attachment_store.Stored, attachment_store.Error) {
+  case mist.stream(request) {
+    Error(_) ->
+      Error(attachment_store.Unavailable("request body stream is malformed"))
+    Ok(consume) ->
+      case store.begin(attachment_store.BeginUpload(expires:)) {
+        Error(error) -> Error(error)
+        Ok(handle) ->
+          consume_attachment(consume, store, handle, maximum_request_bytes, 0)
+      }
+  }
+}
+
+fn consume_attachment(
+  consume: fn(Int) -> Result(mist.Chunk, mist.ReadError),
+  store: attachment_store.Store,
+  handle: attachment_store.UploadHandle,
+  maximum_request_bytes: Int,
+  bytes_read: Int,
+) -> Result(attachment_store.Stored, attachment_store.Error) {
+  case consume(attachment_stream_chunk_bytes) {
+    Error(_) ->
+      abort_attachment(
+        store,
+        handle,
+        attachment_store.Unavailable("request body stream was interrupted"),
+      )
+    Ok(mist.Done) ->
+      case store.finish(handle) {
+        Ok(stored) -> Ok(stored)
+        Error(error) -> abort_attachment(store, handle, error)
+      }
+    Ok(mist.Chunk(chunk, next)) -> {
+      let actual = bytes_read + bit_array.byte_size(chunk)
+      case actual > maximum_request_bytes {
+        True ->
+          abort_attachment(
+            store,
+            handle,
+            attachment_store.TooLarge(maximum_request_bytes, actual),
+          )
+        False ->
+          case store.write(handle, chunk) {
+            Error(error) -> abort_attachment(store, handle, error)
+            Ok(_) ->
+              consume_attachment(
+                next,
+                store,
+                handle,
+                maximum_request_bytes,
+                actual,
+              )
+          }
+      }
+    }
+  }
+}
+
+fn abort_attachment(
+  store: attachment_store.Store,
+  handle: attachment_store.UploadHandle,
+  error: attachment_store.Error,
+) -> Result(attachment_store.Stored, attachment_store.Error) {
+  let _ = store.abort(handle)
+  Error(error)
+}
+
+fn filesystem_download(
+  incoming: request.Request(mist.Connection),
+  runtime: runtime.Runtime,
+  config: Config,
+) -> Option(Response(mist.ResponseData)) {
+  case
+    config.attachment_backend,
+    incoming.method,
+    request.path_segments(incoming)
+  {
+    config.Filesystem, http.Get, ["file", _, key]
+    | config.Filesystem, http.Get, ["file", _, key, _]
+    | config.SharedFilesystem, http.Get, ["file", _, key]
+    | config.SharedFilesystem, http.Get, ["file", _, key, _]
+    -> {
+      let head_request =
+        incoming
+        |> request.set_method(http.Head)
+        |> request.set_body(<<>>)
+      let checked = router.handle(head_request, runtime)
+      Some(
+        case
+          checked.status,
+          attachment_file_window(checked),
+          attachment_filesystem.blob_path(config.attachment_directory, key)
+        {
+          status, Ok(#(offset, length)), Ok(path)
+            if status == 200 || status == 206
+          ->
+            case mist.send_file(path, offset:, limit: Some(length)) {
+              Ok(file) -> response.set_body(checked, file)
+              Error(_) -> buffered_download(incoming, runtime)
+            }
+          _, _, _ -> to_mist_response(checked)
+        },
+      )
+    }
+    _, _, _ -> None
+  }
+}
+
+fn attachment_file_window(
+  reply: Response(BitArray),
+) -> Result(#(Int, Int), Nil) {
+  use length_text <- result.try(response.get_header(reply, "content-length"))
+  use length <- result.try(int.parse(length_text))
+  case reply.status {
+    200 if length >= 0 -> Ok(#(0, length))
+    206 -> {
+      use content_range <- result.try(response.get_header(
+        reply,
+        "content-range",
+      ))
+      use unit_and_value <- result.try(string.split_once(content_range, " "))
+      use range_and_total <- result.try(string.split_once(unit_and_value.1, "/"))
+      use bounds <- result.try(string.split_once(range_and_total.0, "-"))
+      use start <- result.try(int.parse(bounds.0))
+      use end <- result.try(int.parse(bounds.1))
+      case
+        unit_and_value.0 == "bytes",
+        start >= 0,
+        end >= start,
+        end - start + 1 == length
+      {
+        True, True, True, True -> Ok(#(start, length))
+        _, _, _, _ -> Error(Nil)
+      }
+    }
+    _ -> Error(Nil)
+  }
+}
+
+fn buffered_download(
+  incoming: request.Request(mist.Connection),
+  runtime: runtime.Runtime,
+) -> Response(mist.ResponseData) {
+  incoming
+  |> request.set_body(<<>>)
+  |> router.handle(runtime)
+  |> to_mist_response
 }
 
 fn prepare_database(path: String) -> Result(Nil, Error) {

@@ -57,6 +57,8 @@ pub fn quoted_commas_and_json_are_supported_test() {
 }
 
 pub fn rejects_invalid_action_constraints_test() {
+  assert action.parse("not-an-action")
+    == Error(action.InvalidActionKind("not-an-action"))
   assert action.parse("copy, Missing value") == Error(action.InvalidAction)
   assert action.parse(
       "http, No body on GET, https://example.test, method=GET, body=x",

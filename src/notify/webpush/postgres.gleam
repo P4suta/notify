@@ -9,7 +9,12 @@ import postgleam/decode
 import postgleam/error as pg_error
 
 type State {
-  State(connection: postgleam.Connection, max_endpoints_per_ip: Int)
+  State(
+    config: Config,
+    connection: postgleam.Connection,
+    reconnect: Bool,
+    max_endpoints_per_ip: Int,
+  )
 }
 
 type Command {
@@ -63,7 +68,12 @@ pub fn start(
       Error(error)
     }
     Ok(_) ->
-      start_actor(State(connection:, max_endpoints_per_ip: max(1, limit)))
+      start_actor(State(
+        config:,
+        connection:,
+        reconnect: False,
+        max_endpoints_per_ip: max(1, limit),
+      ))
   }
 }
 
@@ -119,20 +129,70 @@ fn start_actor(state: State) -> Result(Store, webpush.Error) {
 
 fn handle(state: State, command: Command) -> actor.Next(State, Command) {
   case command {
-    Upsert(value, reply) -> process.send(reply, upsert(state, value))
+    Upsert(value, reply) ->
+      respond(state, reply, fn(ready) { upsert(ready, value) })
     ForTopic(topic, reply) ->
-      process.send(reply, for_topic(state.connection, topic))
+      respond(state, reply, fn(ready) { for_topic(ready.connection, topic) })
     ByEndpoint(endpoint, reply) ->
-      process.send(reply, by_endpoint(state.connection, endpoint))
+      respond(state, reply, fn(ready) {
+        by_endpoint(ready.connection, endpoint)
+      })
     RemoveEndpoint(endpoint, reply) ->
-      process.send(reply, remove_endpoint(state.connection, endpoint))
+      respond(state, reply, fn(ready) {
+        remove_endpoint(ready.connection, endpoint)
+      })
     RemoveUser(user_id, reply) ->
-      process.send(reply, remove_user(state.connection, user_id))
+      respond(state, reply, fn(ready) { remove_user(ready.connection, user_id) })
     RemoveExpired(before, reply) ->
-      process.send(reply, remove_expired(state.connection, before))
-    Health(reply) -> process.send(reply, health(state.connection))
+      respond(state, reply, fn(ready) {
+        remove_expired(ready.connection, before)
+      })
+    Health(reply) ->
+      respond(state, reply, fn(ready) { health(ready.connection) })
   }
-  actor.continue(state)
+}
+
+fn respond(
+  state: State,
+  reply: Subject(Result(value, webpush.Error)),
+  operation: fn(State) -> Result(value, webpush.Error),
+) -> actor.Next(State, Command) {
+  let #(next, outcome) = run(state, operation)
+  process.send(reply, outcome)
+  actor.continue(next)
+}
+
+fn run(
+  state: State,
+  operation: fn(State) -> Result(value, webpush.Error),
+) -> #(State, Result(value, webpush.Error)) {
+  case ready_connection(state) {
+    Error(error) -> #(state, Error(error))
+    Ok(ready) -> {
+      let outcome = operation(ready)
+      case outcome {
+        Error(webpush.Unavailable(_)) -> #(
+          State(..ready, reconnect: True),
+          outcome,
+        )
+        _ -> #(ready, outcome)
+      }
+    }
+  }
+}
+
+fn ready_connection(state: State) -> Result(State, webpush.Error) {
+  case state.reconnect {
+    False -> Ok(state)
+    True ->
+      case postgleam.connect(state.config) {
+        Error(error) -> Error(map_error(error))
+        Ok(connection) -> {
+          postgleam.disconnect(state.connection)
+          Ok(State(..state, connection:, reconnect: False))
+        }
+      }
+  }
 }
 
 fn upsert(
