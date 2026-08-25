@@ -39,6 +39,33 @@ type Worker {
   Worker(subject: Subject(Command))
 }
 
+type CommitCommand {
+  CommitMessage(
+    Message,
+    List(delivery.NewJob),
+    Subject(Result(Message, storage.Error)),
+  )
+  CommitHealth(Subject(Result(Nil, storage.Error)))
+  CommitShutdown(Subject(Nil))
+}
+
+type CommitState {
+  CommitState(subject: Subject(CommitCommand), worker: State)
+}
+
+type CommitWorker {
+  CommitWorker(subject: Subject(CommitCommand))
+}
+
+type CommitRun {
+  ContinueCommit(CommitState)
+  StopCommit
+}
+
+type BatchCommitResult {
+  BatchCommitResult(index: Int, succeeded: Bool, sequence: Option(Int))
+}
+
 type PoolState {
   PoolState(workers: List(Worker), remaining: List(Worker))
 }
@@ -48,12 +75,6 @@ type PoolCommand {
 }
 
 type Command {
-  Save(Message, Subject(Result(Message, storage.Error)))
-  Commit(
-    Message,
-    List(delivery.NewJob),
-    Subject(Result(Message, storage.Error)),
-  )
   RunQuery(Query, Subject(Result(List(Message), storage.Error)))
   HasAttachment(topic.Topic, String, Subject(Result(Bool, storage.Error)))
   ReleaseDue(Int, Int, Subject(Result(List(Message), storage.Error)))
@@ -142,11 +163,82 @@ CREATE TABLE IF NOT EXISTS notify_delivery_outbox (
 CREATE INDEX IF NOT EXISTS notify_delivery_outbox_claim
   ON notify_delivery_outbox(kind, state, available_at, lease_until, created_at);
 
+CREATE OR REPLACE FUNCTION notify_commit_message_batch(
+  requested_messages JSONB,
+  requested_origin_node TEXT,
+  requested_lock_key BIGINT
+)
+RETURNS TABLE(
+  batch_index BIGINT,
+  commit_succeeded BOOLEAN,
+  event_sequence BIGINT
+)
+LANGUAGE plpgsql
+AS $notify_commit_batch$
+DECLARE
+  requested_message JSONB;
+  requested_index BIGINT;
+  inserted_id TEXT;
+  committed_sequence BIGINT;
+  last_message_id TEXT := NULL;
+BEGIN
+  PERFORM pg_advisory_xact_lock(requested_lock_key);
+  FOR requested_message, requested_index IN
+    SELECT value, ordinality::BIGINT
+    FROM jsonb_array_elements(requested_messages) WITH ORDINALITY
+    ORDER BY ordinality
+  LOOP
+    inserted_id := NULL;
+    INSERT INTO notify_messages(
+      id, topic, time, expires, scheduled, sequence_id, payload
+    )
+    VALUES (
+      requested_message ->> 'id',
+      requested_message ->> 'topic',
+      (requested_message ->> 'time')::BIGINT,
+      (requested_message ->> 'expires')::BIGINT,
+      (requested_message ->> 'scheduled')::BOOLEAN,
+      requested_message ->> 'sequence_id',
+      requested_message -> 'payload'
+    )
+    ON CONFLICT(id) DO NOTHING
+    RETURNING id INTO inserted_id;
+
+    IF inserted_id IS NULL THEN
+      RETURN QUERY SELECT requested_index, FALSE, NULL::BIGINT;
+    ELSE
+      INSERT INTO notify_event_log(
+        message_id, event, topic, time, origin_node, payload
+      )
+      VALUES (
+        inserted_id,
+        requested_message ->> 'event',
+        requested_message ->> 'topic',
+        (requested_message ->> 'time')::BIGINT,
+        requested_origin_node,
+        requested_message -> 'payload'
+      )
+      RETURNING sequence INTO committed_sequence;
+      last_message_id := inserted_id;
+      RETURN QUERY SELECT requested_index, TRUE, committed_sequence;
+    END IF;
+  END LOOP;
+
+  IF last_message_id IS NOT NULL THEN
+    PERFORM pg_notify('notify_events', last_message_id);
+  END IF;
+END;
+$notify_commit_batch$;
+
 INSERT INTO notify_schema_migrations(version) VALUES (1)
 ON CONFLICT(version) DO NOTHING;
 "
 
 const query_page_size = 256
+
+const commit_batch_size = 64
+
+const commit_batch_wait_milliseconds = 1
 
 const page_query = "
 SELECT m.position, m.payload, m.scheduled
@@ -207,23 +299,58 @@ pub fn start_with_pool_size(
   node_id: String,
   size: Int,
 ) -> Result(Adapter, storage.Error) {
-  use connections <- result.try(connect_many(config, max(1, size), []))
-  let assert [first, ..] = connections
-  case migrate(first) {
+  let requested_pool_size = max(1, size)
+  use connections <- result.try(
+    connect_many(config, requested_pool_size + 2, []),
+  )
+  let assert [commit_connection, event_connection, ..pool_connections] =
+    connections
+  case migrate(commit_connection) {
     Error(error) -> {
       disconnect_all(connections)
       Error(error)
     }
     Ok(_) ->
-      case start_workers(config, node_id, connections, []) {
-        Error(error) -> Error(error)
+      case start_workers(config, node_id, pool_connections, []) {
+        Error(error) -> {
+          postgleam.disconnect(commit_connection)
+          postgleam.disconnect(event_connection)
+          Error(error)
+        }
         Ok(workers) ->
-          case start_pool(workers) {
+          case
+            start_worker(State(config:, connection: event_connection, node_id:))
+          {
             Error(error) -> {
               shutdown_workers(workers)
+              postgleam.disconnect(commit_connection)
+              postgleam.disconnect(event_connection)
               Error(error)
             }
-            Ok(pool) -> Ok(adapter(pool, workers))
+            Ok(event_worker) ->
+              case
+                start_commit_worker(State(
+                  config:,
+                  connection: commit_connection,
+                  node_id:,
+                ))
+              {
+                Error(error) -> {
+                  shutdown_workers([event_worker, ..workers])
+                  postgleam.disconnect(commit_connection)
+                  Error(error)
+                }
+                Ok(commit_worker) ->
+                  case start_pool(workers) {
+                    Error(error) -> {
+                      shutdown_workers([event_worker, ..workers])
+                      shutdown_commit_worker(commit_worker)
+                      Error(error)
+                    }
+                    Ok(pool) ->
+                      Ok(adapter(pool, workers, event_worker, commit_worker))
+                  }
+              }
           }
       }
   }
@@ -284,6 +411,23 @@ fn start_worker(state: State) -> Result(Worker, storage.Error) {
   Ok(Worker(started.data))
 }
 
+fn start_commit_worker(state: State) -> Result(CommitWorker, storage.Error) {
+  use started <- result.try(
+    actor.new_with_initialiser(1000, fn(subject) {
+      Ok(
+        actor.initialised(CommitState(subject:, worker: state))
+        |> actor.returning(subject),
+      )
+    })
+    |> actor.on_message(handle_commit)
+    |> actor.start
+    |> result.map_error(fn(_) {
+      storage.Unavailable("PostgreSQL commit actor failed to start")
+    }),
+  )
+  Ok(CommitWorker(started.data))
+}
+
 fn start_pool(
   workers: List(Worker),
 ) -> Result(Subject(PoolCommand), storage.Error) {
@@ -315,11 +459,20 @@ fn handle_pool(
   }
 }
 
-fn adapter(pool: Subject(PoolCommand), workers: List(Worker)) -> Adapter {
+fn adapter(
+  pool: Subject(PoolCommand),
+  workers: List(Worker),
+  event_worker: Worker,
+  commit_worker: CommitWorker,
+) -> Adapter {
   let persistent =
     storage.Storage(
       migrate: fn() { call(pool, Migrate) },
-      save: fn(message) { call(pool, fn(reply) { Save(message, reply) }) },
+      save: fn(message) {
+        call_commit_worker(commit_worker, fn(reply) {
+          CommitMessage(message, [], reply)
+        })
+      },
       query: fn(query) { call(pool, fn(reply) { RunQuery(query, reply) }) },
       has_attachment: fn(topic, key) {
         call(pool, fn(reply) { HasAttachment(topic, key, reply) })
@@ -331,18 +484,22 @@ fn adapter(pool: Subject(PoolCommand), workers: List(Worker)) -> Adapter {
         call(pool, fn(reply) { CleanupExpired(now, reply) })
       },
       stats: fn() { call(pool, Stats) },
-      health: fn() { health_all(workers) },
+      health: fn() { health_all(workers, event_worker, commit_worker) },
     )
   Adapter(
     storage: persistent,
     commit: storage.AtomicCommit(fn(message, jobs) {
-      call(pool, fn(reply) { Commit(message, jobs, reply) })
+      call_commit_worker(commit_worker, fn(reply) {
+        CommitMessage(message, jobs, reply)
+      })
     }),
     fetch_events: fn(node_id, limit) {
-      call(pool, fn(reply) { FetchEvents(node_id, limit, reply) })
+      call_worker(event_worker, fn(reply) { FetchEvents(node_id, limit, reply) })
     },
     ack_events: fn(node_id, sequence) {
-      call(pool, fn(reply) { AckEvents(node_id, sequence, reply) })
+      call_worker(event_worker, fn(reply) {
+        AckEvents(node_id, sequence, reply)
+      })
     },
     cluster_health: cluster_health.Store(fn(after, limit) {
       case limit >= 1 && limit <= 100 {
@@ -372,19 +529,243 @@ fn call_worker(
   process.call(subject, 30_000, command)
 }
 
-fn health_all(workers: List(Worker)) -> Result(Nil, storage.Error) {
-  list.try_each(workers, fn(worker) { call_worker(worker, Health) })
+fn call_commit_worker(
+  worker: CommitWorker,
+  command: fn(Subject(reply)) -> CommitCommand,
+) -> reply {
+  let CommitWorker(subject) = worker
+  process.call(subject, 30_000, command)
+}
+
+fn health_all(
+  workers: List(Worker),
+  event_worker: Worker,
+  commit_worker: CommitWorker,
+) -> Result(Nil, storage.Error) {
+  use _ <- result.try(
+    list.try_each(workers, fn(worker) { call_worker(worker, Health) }),
+  )
+  use _ <- result.try(call_worker(event_worker, Health))
+  call_commit_worker(commit_worker, CommitHealth)
 }
 
 fn shutdown_workers(workers: List(Worker)) -> Nil {
   list.each(workers, fn(worker) { call_worker(worker, Shutdown) })
 }
 
+fn shutdown_commit_worker(worker: CommitWorker) -> Nil {
+  call_commit_worker(worker, CommitShutdown)
+}
+
+fn handle_commit(
+  state: CommitState,
+  command: CommitCommand,
+) -> actor.Next(CommitState, CommitCommand) {
+  let commands =
+    collect_commit_commands(
+      state.subject,
+      commit_batch_size - 1,
+      commit_batch_wait_milliseconds,
+      [command],
+    )
+  case run_commit_commands(state, commands) {
+    ContinueCommit(state) -> actor.continue(state)
+    StopCommit -> actor.stop()
+  }
+}
+
+fn collect_commit_commands(
+  subject: Subject(CommitCommand),
+  remaining: Int,
+  wait_milliseconds: Int,
+  accumulated: List(CommitCommand),
+) -> List(CommitCommand) {
+  case remaining > 0 {
+    False -> list.reverse(accumulated)
+    True ->
+      case process.receive(subject, wait_milliseconds) {
+        Ok(command) ->
+          collect_commit_commands(subject, remaining - 1, 0, [
+            command,
+            ..accumulated
+          ])
+        Error(_) -> list.reverse(accumulated)
+      }
+  }
+}
+
+fn run_commit_commands(
+  state: CommitState,
+  commands: List(CommitCommand),
+) -> CommitRun {
+  case commands {
+    [] -> ContinueCommit(state)
+    [CommitMessage(_, [], _), ..] -> {
+      let #(batch, remaining) = take_fast_commit_prefix(commands, [])
+      let outcome = fast_commit_batch(state.worker, batch)
+      send_fast_commit_results(batch, outcome)
+      run_commit_commands(
+        CommitState(..state, worker: recover_connection(state.worker, outcome)),
+        remaining,
+      )
+    }
+    [CommitMessage(message, jobs, reply), ..remaining] -> {
+      let payload = message_json.encode_storage(message) |> json.to_string
+      let outcome = transactional_commit(state.worker, message, payload, jobs)
+      process.send(reply, outcome)
+      run_commit_commands(
+        CommitState(..state, worker: recover_connection(state.worker, outcome)),
+        remaining,
+      )
+    }
+    [CommitHealth(reply), ..remaining] -> {
+      let outcome = health(state.worker.connection)
+      process.send(reply, outcome)
+      run_commit_commands(
+        CommitState(..state, worker: recover_connection(state.worker, outcome)),
+        remaining,
+      )
+    }
+    [CommitShutdown(reply), ..] -> {
+      postgleam.disconnect(state.worker.connection)
+      process.send(reply, Nil)
+      StopCommit
+    }
+  }
+}
+
+fn take_fast_commit_prefix(
+  commands: List(CommitCommand),
+  accumulated: List(CommitCommand),
+) -> #(List(CommitCommand), List(CommitCommand)) {
+  case commands {
+    [CommitMessage(message, [], reply), ..remaining] ->
+      take_fast_commit_prefix(remaining, [
+        CommitMessage(message, [], reply),
+        ..accumulated
+      ])
+    _ -> #(list.reverse(accumulated), commands)
+  }
+}
+
+fn fast_commit_batch(
+  state: State,
+  commands: List(CommitCommand),
+) -> Result(List(BatchCommitResult), storage.Error) {
+  let encoded_messages =
+    commands
+    |> json.array(fn(command) {
+      let assert CommitMessage(message, [], _) = command
+      json.object([
+        #("id", json.string(message.id)),
+        #("topic", json.string(topic.to_string(message.topic))),
+        #("time", json.int(message.time)),
+        #("expires", json.nullable(message.expires, json.int)),
+        #("scheduled", json.bool(message.scheduled)),
+        #("sequence_id", json.nullable(message.sequence_id, json.string)),
+        #("event", json.string(message.event |> message.event_to_string)),
+        #("payload", message_json.encode_storage(message)),
+      ])
+    })
+    |> json.to_string
+  postgleam.query_with(
+    state.connection,
+    "SELECT batch_index, commit_succeeded, event_sequence FROM notify_commit_message_batch($1, $2, $3) ORDER BY batch_index",
+    [
+      postgleam.jsonb(encoded_messages),
+      postgleam.text(state.node_id),
+      postgleam.int(event_commit_lock_key),
+    ],
+    {
+      use index <- decode.element(0, decode.int)
+      use succeeded <- decode.element(1, decode.bool)
+      use sequence <- decode.element(2, decode.optional(decode.int))
+      decode.success(BatchCommitResult(index:, succeeded:, sequence:))
+    },
+  )
+  |> result.map(fn(response) { response.rows })
+  |> result.map_error(map_error)
+}
+
+fn send_fast_commit_results(
+  commands: List(CommitCommand),
+  outcome: Result(List(BatchCommitResult), storage.Error),
+) -> Nil {
+  case outcome {
+    Error(error) ->
+      list.each(commands, fn(command) {
+        let assert CommitMessage(_, [], reply) = command
+        process.send(reply, Error(error))
+      })
+    Ok(rows) ->
+      case
+        list.length(commands) == list.length(rows)
+        && valid_batch_commit_rows(rows, 1, None)
+      {
+        False ->
+          list.each(commands, fn(command) {
+            let assert CommitMessage(_, [], reply) = command
+            process.send(
+              reply,
+              Error(storage.Unavailable(
+                "PostgreSQL commit actor returned an invalid batch",
+              )),
+            )
+          })
+        True -> send_fast_commit_rows(commands, rows)
+      }
+  }
+}
+
+fn valid_batch_commit_rows(
+  rows: List(BatchCommitResult),
+  expected_index: Int,
+  previous_sequence: Option(Int),
+) -> Bool {
+  case rows {
+    [] -> True
+    [row, ..remaining] -> {
+      let #(valid_sequence, next_sequence) = case
+        row.succeeded,
+        row.sequence,
+        previous_sequence
+      {
+        True, Some(sequence), None -> #(sequence > 0, Some(sequence))
+        True, Some(sequence), Some(previous) -> #(
+          sequence > previous,
+          Some(sequence),
+        )
+        False, None, _ -> #(True, previous_sequence)
+        _, _, _ -> #(False, previous_sequence)
+      }
+      row.index == expected_index
+      && valid_sequence
+      && valid_batch_commit_rows(remaining, expected_index + 1, next_sequence)
+    }
+  }
+}
+
+fn send_fast_commit_rows(
+  commands: List(CommitCommand),
+  rows: List(BatchCommitResult),
+) -> Nil {
+  case commands, rows {
+    [], [] -> Nil
+    [CommitMessage(message, [], reply), ..remaining_commands],
+      [row, ..remaining_rows]
+    -> {
+      process.send(reply, case row.succeeded {
+        True -> Ok(message)
+        False -> Error(storage.Conflict("duplicate message ID"))
+      })
+      send_fast_commit_rows(remaining_commands, remaining_rows)
+    }
+    _, _ -> Nil
+  }
+}
+
 fn handle(state: State, command: Command) -> actor.Next(State, Command) {
   case command {
-    Save(message, reply) -> respond(state, reply, save(state, message))
-    Commit(message, jobs, reply) ->
-      respond(state, reply, commit(state, message, jobs))
     RunQuery(query, reply) -> respond(state, reply, run_query(state, query))
     HasAttachment(topic, key, reply) ->
       respond(state, reply, has_attachment(state.connection, topic, key))
@@ -446,78 +827,6 @@ fn migrate(connection: postgleam.Connection) -> Result(Nil, storage.Error) {
     use _ <- result.try(postgleam.simple_query(tx, migration))
     Ok(Nil)
   })
-  |> result.map_error(map_error)
-}
-
-fn save(state: State, message: Message) -> Result(Message, storage.Error) {
-  commit(state, message, [])
-}
-
-fn commit(
-  state: State,
-  message: Message,
-  jobs: List(delivery.NewJob),
-) -> Result(Message, storage.Error) {
-  let payload = message_json.encode_storage(message) |> json.to_string
-  case jobs {
-    [] -> fast_commit(state, message, payload)
-    _ -> transactional_commit(state, message, payload, jobs)
-  }
-}
-
-const fast_commit_query = "
-WITH commit_lock AS MATERIALIZED (
-  SELECT pg_advisory_xact_lock($8::bigint)
-), inserted_message AS (
-  INSERT INTO notify_messages(
-    id, topic, time, expires, scheduled, sequence_id, payload
-  )
-  SELECT
-    $1::text,
-    $2::text,
-    $3::bigint,
-    $4::bigint,
-    $5::boolean,
-    $6::text,
-    $7::jsonb
-  FROM commit_lock
-  RETURNING id
-), inserted_event AS (
-  INSERT INTO notify_event_log(
-    message_id, event, topic, time, origin_node, payload
-  )
-  SELECT
-    $1::text,
-    $9::text,
-    $2::text,
-    $3::bigint,
-    $10::text,
-    $7::jsonb
-  FROM inserted_message
-  RETURNING sequence
-)
-SELECT inserted_event.sequence, pg_notify('notify_events', $1::text)
-FROM inserted_event
-"
-
-fn fast_commit(
-  state: State,
-  message: Message,
-  payload: String,
-) -> Result(Message, storage.Error) {
-  postgleam.query(state.connection, fast_commit_query, [
-    postgleam.text(message.id),
-    postgleam.text(topic.to_string(message.topic)),
-    postgleam.int(message.time),
-    postgleam.nullable(message.expires, postgleam.int),
-    postgleam.bool(message.scheduled),
-    postgleam.nullable(message.sequence_id, postgleam.text),
-    postgleam.jsonb(payload),
-    postgleam.int(event_commit_lock_key),
-    postgleam.text(message.event |> message.event_to_string),
-    postgleam.text(state.node_id),
-  ])
-  |> result.map(fn(_) { message })
   |> result.map_error(map_error)
 }
 

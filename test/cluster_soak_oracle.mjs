@@ -9,6 +9,7 @@ import { evaluateReport } from "./cluster_soak.mjs";
 const messageIdPattern = /^[A-Za-z0-9]{12}$/;
 const topicPattern = /^[-_A-Za-z0-9]{1,64}$/;
 const maximumExamples = 100;
+const expectedClusterNodes = ["notify-a", "notify-b", "notify-c"];
 
 function addExample(examples, detail) {
   if (examples.length < maximumExamples) examples.push(detail);
@@ -69,6 +70,64 @@ export function validateDurableSequences(expectedByTopic, observedByTopic) {
   };
 }
 
+export function validateClusterCursors(database, expectedNodeIds) {
+  if (
+    !Number.isSafeInteger(database?.event_head) ||
+    database.event_head < 0 ||
+    !Array.isArray(database?.node_cursors) ||
+    !Array.isArray(expectedNodeIds) ||
+    expectedNodeIds.length === 0
+  ) {
+    throw new Error("database cursor snapshot is invalid");
+  }
+
+  const expected = new Set(expectedNodeIds);
+  if (expected.size !== expectedNodeIds.length) {
+    throw new Error("expected cluster node IDs are not unique");
+  }
+
+  const observed = new Set();
+  const nodes = database.node_cursors.map((cursor) => {
+    if (
+      typeof cursor?.node_id !== "string" ||
+      cursor.node_id.length === 0 ||
+      observed.has(cursor.node_id) ||
+      !Number.isSafeInteger(cursor.sequence) ||
+      cursor.sequence < 0 ||
+      cursor.sequence > database.event_head
+    ) {
+      throw new Error("database cursor snapshot contains an invalid node");
+    }
+    observed.add(cursor.node_id);
+    return {
+      nodeId: cursor.node_id,
+      sequence: cursor.sequence,
+      lag: database.event_head - cursor.sequence,
+    };
+  });
+
+  const missingNodes = expectedNodeIds.filter((nodeId) => !observed.has(nodeId));
+  const unexpectedNodes = nodes
+    .map((node) => node.nodeId)
+    .filter((nodeId) => !expected.has(nodeId));
+  const maximumLag = nodes.reduce(
+    (maximum, node) => Math.max(maximum, node.lag),
+    0,
+  );
+
+  return {
+    verified: true,
+    eventHead: database.event_head,
+    expectedNodes: expectedNodeIds.length,
+    observedNodes: nodes.length,
+    missingNodes,
+    unexpectedNodes,
+    laggingNodes: nodes.filter((node) => node.lag > 0).length,
+    maximumLag,
+    nodes,
+  };
+}
+
 function checkedPair(topic, messageId, source) {
   if (!topicPattern.test(topic) || !messageIdPattern.test(messageId)) {
     throw new Error(`${source} contains invalid topic or message ID`);
@@ -114,14 +173,21 @@ async function readEventLog(eventLogPath) {
   return byTopic;
 }
 
-export async function verifyReport(reportPath, sequencePath, eventLogPath) {
+export async function verifyReport(
+  reportPath,
+  sequencePath,
+  eventLogPath,
+  databasePath,
+) {
   const report = JSON.parse(await readFile(reportPath, "utf8"));
   if (report.schemaVersion !== 1 || report.configuration === undefined) {
     throw new Error("soak report is incomplete");
   }
   const expected = await readExpected(sequencePath);
   const observed = await readEventLog(eventLogPath);
+  const database = JSON.parse(await readFile(databasePath, "utf8"));
   report.durableEventLog = validateDurableSequences(expected, observed);
+  report.clusterCursors = validateClusterCursors(database, expectedClusterNodes);
   report.verdict = evaluateReport(report);
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, {
     encoding: "utf8",
@@ -131,13 +197,19 @@ export async function verifyReport(reportPath, sequencePath, eventLogPath) {
 }
 
 async function main() {
-  const [reportPath, sequencePath, eventLogPath] = process.argv.slice(2);
-  if (!reportPath || !sequencePath || !eventLogPath) {
+  const [reportPath, sequencePath, eventLogPath, databasePath] =
+    process.argv.slice(2);
+  if (!reportPath || !sequencePath || !eventLogPath || !databasePath) {
     throw new Error(
-      "usage: cluster_soak_oracle.mjs REPORT OBSERVED_SEQUENCES EVENT_LOG",
+      "usage: cluster_soak_oracle.mjs REPORT OBSERVED_SEQUENCES EVENT_LOG DATABASE",
     );
   }
-  const report = await verifyReport(reportPath, sequencePath, eventLogPath);
+  const report = await verifyReport(
+    reportPath,
+    sequencePath,
+    eventLogPath,
+    databasePath,
+  );
   process.stdout.write(`${JSON.stringify(report.durableEventLog)}\n`);
   if (!report.verdict.passed) process.exitCode = 1;
 }

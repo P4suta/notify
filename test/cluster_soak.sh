@@ -232,11 +232,31 @@ readonly event_log_path
     WHERE topic LIKE '$topic_prefix-%'
     ORDER BY sequence
   ) TO STDOUT WITH (FORMAT text)" >"$event_log_path"
+
+database_path="$report_directory/database.json"
+readonly database_path
+"${compose[@]}" exec -T postgres \
+  psql --username notify --dbname notify --tuples-only --no-align \
+  --command "SELECT json_build_object(
+    'messages', (SELECT COUNT(*) FROM notify_messages),
+    'events', (SELECT COUNT(*) FROM notify_event_log),
+    'event_head', (SELECT COALESCE(MAX(sequence), 0) FROM notify_event_log),
+    'node_cursor_count', (SELECT COUNT(*) FROM notify_node_cursors),
+    'node_cursors', (SELECT COALESCE(
+      json_agg(json_build_object(
+        'node_id', node_id,
+        'sequence', sequence
+      ) ORDER BY node_id),
+      '[]'::json
+    ) FROM notify_node_cursors),
+    'database_bytes', pg_database_size(current_database()))" \
+  | jq . >"$database_path"
 oracle_status=0
 node test/cluster_soak_oracle.mjs \
   "$report_directory/report.json" \
   "$report_directory/observed-sequences.ndjson" \
-  "$event_log_path" || oracle_status=$?
+  "$event_log_path" \
+  "$database_path" || oracle_status=$?
 if ((driver_status != 0 || oracle_status != 0)); then
   driver_status=1
 fi
@@ -247,15 +267,6 @@ if kill -0 "$resource_sampler_pid" 2>/dev/null; then
   wait "$resource_sampler_pid" 2>/dev/null || true
 fi
 resource_sampler_pid=""
-
-"${compose[@]}" exec -T postgres \
-  psql --username notify --dbname notify --tuples-only --no-align \
-  --command "SELECT json_build_object(
-    'messages', (SELECT COUNT(*) FROM notify_messages),
-    'events', (SELECT COUNT(*) FROM notify_event_log),
-    'node_cursors', (SELECT COUNT(*) FROM notify_node_cursors),
-    'database_bytes', pg_database_size(current_database()))" \
-  | jq . >"$report_directory/database.json"
 
 docker inspect --format '{{json .State}}' "${container_names[@]}" \
   | jq -s . >"$report_directory/container-states.json"

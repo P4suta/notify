@@ -374,10 +374,43 @@ pub fn postgres_storage_pool_recovers_and_serializes_commits_test() {
         )
       })
       assert process.receive(locked_commit, 50) == Error(Nil)
+
+      // Queue both duplicate writes behind the locked commit so the commit
+      // actor must evaluate them in the same database microbatch.
+      let batched_duplicate =
+        fixture_on_topic("PgBatchDupXY", False, 90, "postgres-concurrency")
+      let duplicate_commits = process.new_subject()
+      int.range(from: 1, to: 2, with: Nil, run: fn(_, _) {
+        process.spawn(fn() {
+          process.send(duplicate_commits, messages.save(batched_duplicate))
+        })
+        Nil
+      })
+      process.sleep(20)
+      assert process.receive(duplicate_commits, 50) == Error(Nil)
+
       let assert Ok(_) = postgleam.simple_query(admin, "ROLLBACK")
       assert process.receive(locked_commit, 5000)
         == Ok(
           Ok(fixture_on_topic("PgLocked01XY", False, 90, "postgres-concurrency")),
+        )
+      let assert Ok(first_duplicate_commit) =
+        process.receive(duplicate_commits, 5000)
+      let assert Ok(second_duplicate_commit) =
+        process.receive(duplicate_commits, 5000)
+      assert one_success_and_one_conflict(
+        first_duplicate_commit,
+        second_duplicate_commit,
+      )
+      let assert Ok(1) =
+        postgleam.query_one(
+          admin,
+          "SELECT COUNT(*)::bigint FROM notify_event_log WHERE message_id = $1",
+          [postgleam.text(batched_duplicate.id)],
+          {
+            use count <- decode.element(0, decode.int)
+            decode.success(count)
+          },
         )
 
       let duplicate =
@@ -1280,6 +1313,17 @@ fn page_id(index: Int) -> String {
 
 fn concurrent_id(index: Int) -> String {
   "C" <> string.pad_start(int.to_string(index), to: 11, with: "0")
+}
+
+fn one_success_and_one_conflict(
+  first: Result(message.Message, storage.Error),
+  second: Result(message.Message, storage.Error),
+) -> Bool {
+  case first, second {
+    Ok(_), Error(storage.Conflict(_)) -> True
+    Error(storage.Conflict(_)), Ok(_) -> True
+    _, _ -> False
+  }
 }
 
 @external(erlang, "notify_ffi", "getenv")

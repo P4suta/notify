@@ -9,7 +9,10 @@ import {
   validateEndpoints,
   validateTopicSequences,
 } from "./cluster_soak.mjs";
-import { validateDurableSequences } from "./cluster_soak_oracle.mjs";
+import {
+  validateClusterCursors,
+  validateDurableSequences,
+} from "./cluster_soak_oracle.mjs";
 
 test("target defaults are the production-readiness acceptance values", () => {
   const configuration = loadConfiguration({});
@@ -135,6 +138,51 @@ test("durable oracle compares subscriber order with event-log sequence", () => {
   });
 });
 
+test("cluster cursor oracle requires every node at the durable event head", () => {
+  const caughtUp = validateClusterCursors(
+    {
+      event_head: 42,
+      node_cursors: [
+        { node_id: "notify-a", sequence: 42 },
+        { node_id: "notify-b", sequence: 42 },
+        { node_id: "notify-c", sequence: 42 },
+      ],
+    },
+    ["notify-a", "notify-b", "notify-c"],
+  );
+  assert.equal(caughtUp.maximumLag, 0);
+  assert.equal(caughtUp.laggingNodes, 0);
+  assert.deepEqual(caughtUp.missingNodes, []);
+
+  const lagging = validateClusterCursors(
+    {
+      event_head: 42,
+      node_cursors: [
+        { node_id: "notify-a", sequence: 42 },
+        { node_id: "notify-b", sequence: 39 },
+        { node_id: "unexpected", sequence: 40 },
+      ],
+    },
+    ["notify-a", "notify-b", "notify-c"],
+  );
+  assert.equal(lagging.maximumLag, 3);
+  assert.equal(lagging.laggingNodes, 2);
+  assert.deepEqual(lagging.missingNodes, ["notify-c"]);
+  assert.deepEqual(lagging.unexpectedNodes, ["unexpected"]);
+
+  assert.throws(
+    () =>
+      validateClusterCursors(
+        {
+          event_head: 42,
+          node_cursors: [{ node_id: "notify-a", sequence: 43 }],
+        },
+        ["notify-a"],
+      ),
+    /invalid node/,
+  );
+});
+
 test("acceptance verdict is fail-closed across every target invariant", () => {
   const passing = {
     configuration: {
@@ -166,6 +214,15 @@ test("acceptance verdict is fail-closed across every target invariant", () => {
       eventsExpected: 10,
       eventsObserved: 10,
     },
+    clusterCursors: {
+      verified: true,
+      expectedNodes: 3,
+      observedNodes: 3,
+      missingNodes: [],
+      unexpectedNodes: [],
+      laggingNodes: 0,
+      maximumLag: 0,
+    },
   };
 
   assert.equal(evaluateReport(passing).passed, true);
@@ -183,6 +240,16 @@ test("acceptance verdict is fail-closed across every target invariant", () => {
   assert.ok(
     evaluateReport(unverified).failures.some((failure) =>
       failure.includes("not verified"),
+    ),
+  );
+
+  const lagging = structuredClone(passing);
+  lagging.clusterCursors.maximumLag = 1;
+  lagging.clusterCursors.laggingNodes = 1;
+  assert.equal(evaluateReport(lagging).passed, false);
+  assert.ok(
+    evaluateReport(lagging).failures.some((failure) =>
+      failure.includes("cursor lag"),
     ),
   );
 });

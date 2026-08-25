@@ -331,6 +331,24 @@ export function evaluateReport(report) {
     durable?.eventsObserved === expectedPublishes,
     `durable event-log observed events ${durable?.eventsObserved ?? "unknown"}/${expectedPublishes}`,
   );
+  const cursors = report.clusterCursors;
+  expect(cursors?.verified === true, "cluster cursor state was not verified");
+  expect(
+    cursors?.observedNodes === cursors?.expectedNodes,
+    `cluster cursors ${cursors?.observedNodes ?? "unknown"}/${cursors?.expectedNodes ?? "unknown"}`,
+  );
+  expect(
+    cursors?.missingNodes?.length === 0,
+    `missing cluster cursors ${(cursors?.missingNodes ?? []).join(",") || "unknown"}`,
+  );
+  expect(
+    cursors?.unexpectedNodes?.length === 0,
+    `unexpected cluster cursors ${(cursors?.unexpectedNodes ?? []).join(",") || "unknown"}`,
+  );
+  expect(
+    cursors?.laggingNodes === 0 && cursors?.maximumLag === 0,
+    `cluster cursor lag ${cursors?.maximumLag ?? "unknown"} events across ${cursors?.laggingNodes ?? "unknown"} nodes`,
+  );
   return { passed: failures.length === 0, failures };
 }
 
@@ -342,6 +360,15 @@ export function evaluatePreliminaryReport(report) {
       sequenceMismatches: 0,
       eventsExpected: report.publishes.planned,
       eventsObserved: report.publishes.committed,
+    },
+    clusterCursors: {
+      verified: true,
+      expectedNodes: report.configuration.endpoints.length,
+      observedNodes: report.configuration.endpoints.length,
+      missingNodes: [],
+      unexpectedNodes: [],
+      laggingNodes: 0,
+      maximumLag: 0,
     },
   });
 }
