@@ -11,8 +11,10 @@ mode.
 
 > **Development status:** Notify is not yet production-ready. The v2.27.0
 > differential corpus is intentionally pinned but still incomplete, the full
-> fault-injection matrix has not run, and the 10,000-subscription / 500
-> publish-per-second soak target has not been demonstrated. See the measured
+> fault-injection matrix has not run, and the measured steady-state soak is not
+> a production capacity certificate. The 10,000-subscription / 500
+> publish-per-second target has passed once on the environment recorded in the
+> operational limits. See the measured
 > [compatibility status](docs/compatibility.md) and
 > [operational limits](docs/operations.md) before testing a deployment.
 
@@ -220,25 +222,33 @@ the log, and proves duplicate wake-ups do not duplicate delivery. A separate
 three-node data-plane contract requires every node to consume both local- and
 remote-origin events in the same durable order, stops one bus actor, commits on
 both surviving origins, and requires the restarted node to resume both events
-in sequence from its durable cursor. A weekly/manual full-container contract additionally
-SIGKILLs one of three nodes, publishes through both survivors, restarts the
-failed node, and verifies ordered replay plus message-ID live resume.
-Simultaneous multi-node outage and long-duration soak coverage remain open.
+in sequence from its durable cursor. A weekly/manual full-container contract
+additionally SIGKILLs one of three nodes, publishes through both survivors,
+restarts the failed node, and verifies ordered replay plus message-ID live
+resume.
+The target-scale 10-minute steady-state JSON soak has passed on one recorded
+8-CPU environment. Simultaneous multi-node outage and prolonged fault-injection
+coverage remain open.
+
 SQLite uses WAL plus a per-database live-process lock and is strictly
 single-node.
 
-The PostgreSQL message adapter uses a bounded four-worker round-robin connection
-pool plus a separate dedicated LISTEN connection. Reads and cursor operations
-can use different workers. Transactions that append events take one database
-advisory transaction lock before allocating message/event sequence values, so
-concurrent commits cannot expose a higher cursor while a lower event remains
-uncommitted. Notify enables `TCP_NODELAY` for outbound Erlang client sockets
+The PostgreSQL message adapter uses a bounded four-worker round-robin query
+pool, one event-cursor connection, one ordered commit connection, and a
+separate LISTEN connection. The commit actor coalesces up to 64 ordinary
+message/event writes for at most one millisecond into one synchronous database
+transaction; writes with delivery jobs retain their dedicated atomic
+message/event/outbox transaction. Transactions that append events take one
+database advisory transaction lock before allocating message/event sequence
+values, so concurrent commits cannot expose a higher cursor while a lower event
+remains uncommitted. Notify enables `TCP_NODELAY` for outbound Erlang client sockets
 before opening the pool, while preserving other configured connect defaults;
 this avoids delayed-ACK stalls across PostgreSQL protocol round trips. A failed
 operation is returned to its caller without an ambiguous automatic write retry;
-that worker replaces its connection for subsequent
-operations. The fixed pool and forced-backend-termination recovery have
-real-PostgreSQL tests, but the target throughput is still unverified.
+that lane replaces its connection for subsequent operations. The fixed lanes,
+same-batch duplicate handling, forced-backend-termination recovery, and event
+sequence validation have real-PostgreSQL tests. The recorded target run is
+summarised in [operational limits](docs/operations.md).
 
 Delivery workers share the PostgreSQL outbox using `FOR UPDATE SKIP LOCKED`.
 The real-store contract verifies that another node cannot claim a live lease,
@@ -250,8 +260,8 @@ Within each node, the live broker indexes subscription IDs by topic and keeps
 credit state by subscription ID. A publish visits only registrations for its
 topic instead of scanning every connected subscriber. Duplicate topics in one
 subscription are collapsed, and unsubscribe or overflow removes every related
-index entry. This fixes the broker's fan-out cost model; it does not by itself
-demonstrate the cluster soak targets above.
+index entry. This fixes the broker's fan-out cost model; the recorded soak is
+the separate end-to-end evidence and is not a general hardware capacity claim.
 
 ## Implemented surface
 
@@ -296,10 +306,11 @@ replacement instead.
 
 The intended reconnect contract is at-least-once with de-duplication by the
 12-character message ID; exactly-once delivery across reconnects is not
-promised. Stable-connection zero-loss/zero-duplicate behavior remains a soak
-acceptance target, not a published performance claim. No outbound telemetry,
-tracking, CDN, or external fonts are used. Outbound traffic is limited to
-explicitly configured PostgreSQL, S3, Web Push endpoints, and mobile relay.
+promised. One recorded 10-minute target run observed zero stable-connection
+loss, duplicates, order mismatches, or disconnects; this does not strengthen
+the reconnect contract. No outbound telemetry, tracking, CDN, or external fonts
+are used. Outbound traffic is limited to explicitly configured PostgreSQL, S3,
+Web Push endpoints, and mobile relay.
 
 ## Builds and tests
 
@@ -404,10 +415,12 @@ second for 600 seconds, and a 200 ms publish-response p95 budget. It rejects
 non-loopback endpoints unless explicitly overridden, records host/container/
 PostgreSQL evidence, checks every subscriber for loss, duplicates,
 disconnection, and topic order, then compares that order with the authoritative
-PostgreSQL event sequence. The harness removes its exact Compose project and
-local image on every exit. The target workflow runs weekly and manually and
-retains its private evidence for seven days; it does not publish an image or
-release artifact.
+PostgreSQL event sequence. It also fails unless all three durable node cursors
+exist and finish at the event-log head. The harness removes its exact Compose
+project and local image on every exit. The target workflow runs weekly and
+manually and retains its private evidence for seven days; it does not publish
+an image or release artifact. The latest recorded local result and its scope are
+in [operational limits](docs/operations.md).
 
 Set `NOTIFY_TEST_POSTGRES_HOST` (plus optional `PORT` and `PASSWORD` variants)
 to enable the real PostgreSQL contract suite. Set `NOTIFY_TEST_S3_ENDPOINT`

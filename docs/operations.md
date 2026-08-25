@@ -1,7 +1,8 @@
 # Operational limits and recovery
 
 Notify is under production-readiness development. This document distinguishes
-enforced limits from acceptance targets that have not yet been demonstrated.
+enforced limits, measured acceptance results, and certification work that
+remains open.
 
 ## Enforced defaults
 
@@ -183,20 +184,53 @@ The browser acceptance suite terminates ephemeral loopback TLS in a test-only
 Node proxy. This lets Chromium, Firefox, and WebKit exercise the real Secure
 cookie policy; the server has no insecure-cookie test switch.
 
-## Not yet certified
+## Measured steady-state target and remaining certification
 
-The following are acceptance targets, not current benchmark results:
+The exact default steady-state target passed on 2026-08-25 at source commit
+`b0873a2a49dc73d9400fa43278b42f3ec5319ab3`. The fail-closed verdict included
+the live subscriber view, authoritative event-log sequence, final node cursors,
+container health, and OOM state.
 
-- 3 nodes, 10,000 simultaneous subscriptions, and 500 publishes/second for 10
-  minutes;
-- publish commit p95 at or below 200 ms;
-- no loss or duplicates on stable connections, bounded mailboxes/heap/storage,
-  slow-subscriber isolation, and catch-up after injected database, listener,
-  node, and object-store faults.
+| Measurement | Recorded result |
+| --- | ---: |
+| Nodes / subscriptions / topics | 3 / 10,000 / 1,000 |
+| Publish duration and planned commits | 600.02 s / 300,000 |
+| Achieved publish rate | 499.98/s |
+| Commit latency p50 / p95 / p99 / max | 16.76 / 21.63 / 30.68 / 90.35 ms |
+| Maximum driver scheduling lag | 66.36 ms |
+| Expected / received deliveries | 3,000,000 / 3,000,000 |
+| Missing / duplicate / unexpected / order mismatch | 0 / 0 / 0 / 0 |
+| Stable-connection disconnects / subscription errors | 0 / 0 |
+| Durable expected / observed events | 300,000 / 300,000 |
+| Final cursor lag (`notify-a`, `notify-b`, `notify-c`) | 0 / 0 / 0 events |
+| Maximum Notify memory observed (A / B / C) | 350.5 / 288.8 / 281.7 MiB |
+| Maximum Notify PIDs observed (A / B / C) | 40 / 39 / 39 |
+| Final PostgreSQL database size | 292,034,227 bytes |
 
-Do not use the project in a production environment on the strength of those
-numbers until a reproducible soak report records hardware, OS, database/object
-store versions, configuration, raw results, and the tested commit.
+The loopback Compose host had 8 logical x86-64 CPUs and 16,703,741,952 bytes
+of memory, Linux 6.8.0-138-generic, Docker 29.7.2, Compose 5.5.0,
+PostgreSQL 17.11, Node.js 26.7.0, and the pinned MinIO image from
+`compose.cluster.yml`. Eighty-seven resource samples were retained; the sampler
+sleeps five seconds between polls. All five containers were running, healthy
+where a healthcheck was defined, and not OOM-killed when the verdict was
+captured. The isolated containers, network, volumes, and local image were
+removed afterward. The recorded maxima are observations from this run, not a
+proof of a universal heap, mailbox, or storage bound.
+
+This is one single-host steady-state measurement, not a portable capacity
+certificate. It does not cover a database or object-store outage during the
+target load, simultaneous node failures, a slow-subscriber fault during the
+full 10 minutes, cross-host network latency, or target-scale raw/SSE/WebSocket
+streams. Those fault and transport cases remain required before production
+certification. Reconnect delivery remains at-least-once, never exactly-once.
+
+A pre-fix diagnostic attempt at commit `2d76633` was stopped without a passing
+verdict after about 15 minutes with only 208,956 of 300,000 commits complete.
+Each message still forced an individual WAL sync, the shared query pool was
+starved, and the three cursor lags had grown to 177,746–184,267 events. The
+dedicated commit microbatch and event-cursor lane in `b0873a2` address that
+observed failure mode. The incomplete attempt is not counted as a benchmark
+pass.
 
 The local acceptance command is `test/cluster_soak.sh`. It is loopback-only by
 default and starts an isolated three-node Compose project with PostgreSQL and
@@ -206,10 +240,12 @@ subscription open through the delivery-settle window. The final verifier
 requires every subscriber on a topic to have the same 12-character ID sequence
 with no loss or duplicates, exports `notify_event_log` in sequence order, and
 requires the observed live order to match that durable source of truth exactly.
-Missing oracle evidence makes the verdict fail. Environment, database size and
-row counts, container/OOM state, and five-second resource samples are separate
-report files. The weekly/manual workflow uses the exact defaults above and
-retains these private artifacts for seven days.
+It additionally requires exactly the expected three node cursors and zero final
+lag from the event-log head. Missing oracle evidence makes the verdict fail.
+Environment, database size and row counts, cursor positions, container/OOM
+state, and periodic resource samples are separate report files. The
+weekly/manual workflow uses the exact defaults above and retains these private
+artifacts for seven days.
 
 ## SQLite schema refusal and recovery
 
@@ -250,15 +286,27 @@ after the durable commit; in cluster mode it never fans out directly. The
 per-node event dispatcher is the single live-delivery path for both local and
 remote origins, keeping subscriber work outside publish commit latency.
 
-Message persistence has four round-robin worker connections per node. The
-LISTEN loop owns a separate connection and never borrows a query worker. Health
-checks cover all four workers. Before these clients connect, Notify enables
-`TCP_NODELAY` through Erlang's documented default connect options and retains
-all unrelated defaults. This prevents Nagle/delayed-ACK pauses from multiplying
-the PostgreSQL wire protocol's request/response round trips. After an unavailable
-operation, the affected worker attempts to establish a replacement connection for later calls; the
-failed call is still returned as an error and an ambiguous write is never
-silently retried.
+Message persistence has four round-robin general-query connections per node.
+Event fetch/ACK owns another connection, ordered publish commit owns another,
+and the LISTEN loop owns a seventh connection; none borrows a query worker.
+Health checks cover the query, event, and commit lanes. Before these clients
+connect, Notify enables `TCP_NODELAY` through Erlang's documented default
+connect options and retains all unrelated defaults. This prevents
+Nagle/delayed-ACK pauses from multiplying the PostgreSQL wire protocol's
+request/response round trips. After an
+unavailable operation, the affected lane attempts to establish a replacement
+connection for later calls; the failed call is still returned as an error and
+an ambiguous write is never silently retried.
+
+The commit actor waits at most one millisecond to coalesce up to 64 ordinary
+message/event writes. Its PostgreSQL function takes the shared advisory lock
+once, inserts every message and event in input order, returns the corresponding
+event sequences, and emits one wake-up. One synchronous statement transaction
+therefore durably commits the batch without one WAL sync per message. A
+duplicate ID returns a conflict for only that item and appends no event; the
+actor rejects malformed, missing, or non-monotonic batch results. Writes that
+also enqueue delivery jobs use the non-batched message/event/outbox transaction
+so all three remain atomic.
 
 Every transaction that appends to `notify_event_log`, including scheduled
 release, first takes the same PostgreSQL advisory transaction lock. Message and
@@ -266,15 +314,16 @@ event sequence allocation therefore follows commit order even though reads and
 unrelated operations use a pool. Without this barrier, a cursor could observe
 and acknowledge a higher committed sequence while a lower sequence was still
 uncommitted. The lock intentionally serializes event-producing transactions;
-the four-worker pool does not itself establish the publish-throughput target.
+the bounded microbatch amortises that ordered commit rather than weakening it.
 
 Cleanup first removes seven-day-stale cursors, then uses the minimum remaining
 cursor as a watermark. It deletes only event rows at or below that watermark
 whose message row no longer exists.
 
 The current contract exercises paging, cursor resume, dispatch-before-ACK,
-dispatch failure, ACK failure and at-least-once batch replay, concurrent pool
-commits, event-lock blocking, one forced backend termination and connection
+dispatch failure, ACK failure and at-least-once batch replay, concurrent ordered
+commits, same-batch duplicate conflict, event-lock blocking, one forced backend
+termination and connection
 replacement, scheduled release, and compaction. It also terminates the dedicated
 LISTEN backend, commits during the disconnect, waits for a different backend PID
 to reconnect and catch up from the event log, and injects duplicate wake-ups
