@@ -16,6 +16,10 @@ x-notify: &notify
     NOTIFY_POSTGRES_USERNAME: notify
     NOTIFY_POSTGRES_PASSWORD: notify-development-password
     NOTIFY_CLUSTER_ENABLED: "true"
+    NOTIFY_RATE_LIMIT_REQUESTS: "${NOTIFY_CLUSTER_RATE_LIMIT_REQUESTS:-120}"
+    NOTIFY_RATE_LIMIT_SUBSCRIPTIONS: "${NOTIFY_CLUSTER_RATE_LIMIT_SUBSCRIPTIONS:-30}"
+    NOTIFY_RATE_LIMIT_TOPIC_CREATIONS: "${NOTIFY_CLUSTER_RATE_LIMIT_TOPIC_CREATIONS:-60}"
+    NOTIFY_RATE_LIMIT_WINDOW_SECONDS: "${NOTIFY_CLUSTER_RATE_LIMIT_WINDOW_SECONDS:-60}"
     NOTIFY_ATTACHMENT_BACKEND: s3
     NOTIFY_S3_ENDPOINT: http://minio:9000
     NOTIFY_S3_BUCKET: notify
@@ -24,6 +28,10 @@ x-notify: &notify
     NOTIFY_S3_SECRET_KEY: notify-minio-development-password
     NOTIFY_S3_PATH_STYLE: "true"
   restart: unless-stopped
+  ulimits:
+    nofile:
+      soft: 65536
+      hard: 65536
 
 services:
   postgres:

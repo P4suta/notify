@@ -48,8 +48,8 @@ jobs:
       - name: Validate scripts, JavaScript, and OpenAPI
         run: |
           rg --files src test packages packaging web -g '*.sh' -g '*.bash' | xargs -r -n1 bash -n
-          rg --files src web/src test/e2e -g '*.mjs' -g '*.js' | xargs -r -n1 node --check
-          node --test test/pwa_contract_test.mjs
+          rg --files src web/src test -g '*.mjs' -g '*.js' | xargs -r -n1 node --check
+          node --test test/pwa_contract_test.mjs test/cluster_soak_contract_test.mjs
           jq -e . priv/public/openapi.json >/dev/null
 
   integration:

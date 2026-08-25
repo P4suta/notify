@@ -1,0 +1,879 @@
+#!/usr/bin/env node
+// SPDX-License-Identifier: Apache-2.0
+import { mkdir, writeFile } from "node:fs/promises";
+import http from "node:http";
+import https from "node:https";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { performance } from "node:perf_hooks";
+
+const messageIdPattern = /^[A-Za-z0-9]{12}$/;
+const topicPattern = /^[-_A-Za-z0-9]{1,64}$/;
+const maximumExamples = 100;
+
+function integer(environment, name, defaultValue, minimum, maximum) {
+  const raw = environment[name];
+  if (raw === undefined || raw === "") return defaultValue;
+  if (!/^[0-9]+$/.test(raw)) {
+    throw new Error(`${name} must be an integer from ${minimum} to ${maximum}`);
+  }
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new Error(`${name} must be an integer from ${minimum} to ${maximum}`);
+  }
+  return value;
+}
+
+export function loadConfiguration(environment = process.env) {
+  const subscriptions = integer(
+    environment,
+    "NOTIFY_SOAK_SUBSCRIPTIONS",
+    10_000,
+    1,
+    100_000,
+  );
+  const topics = integer(
+    environment,
+    "NOTIFY_SOAK_TOPICS",
+    1_000,
+    1,
+    10_000,
+  );
+  if (topics > subscriptions) {
+    throw new Error("topics cannot exceed subscriptions");
+  }
+  const endpoints = (
+    environment.NOTIFY_SOAK_ENDPOINTS ??
+    "http://127.0.0.1:8080,http://127.0.0.1:8081,http://127.0.0.1:8082"
+  )
+    .split(",")
+    .map((endpoint) => endpoint.trim())
+    .filter(Boolean);
+  if (endpoints.length !== 3) {
+    throw new Error("NOTIFY_SOAK_ENDPOINTS must contain exactly three URLs");
+  }
+  const topicPrefix =
+    environment.NOTIFY_SOAK_TOPIC_PREFIX ?? `soak-${process.pid}`;
+  if (!/^[-_A-Za-z0-9]{1,40}$/.test(topicPrefix)) {
+    throw new Error(
+      "NOTIFY_SOAK_TOPIC_PREFIX must be 1-40 ASCII letters, digits, '-' or '_'",
+    );
+  }
+  const allowRemote = environment.NOTIFY_SOAK_ALLOW_REMOTE === "1";
+  validateEndpoints(endpoints, { allowRemote });
+
+  return {
+    subscriptions,
+    topics,
+    publishRate: integer(
+      environment,
+      "NOTIFY_SOAK_PUBLISH_RATE",
+      500,
+      1,
+      10_000,
+    ),
+    durationSeconds: integer(
+      environment,
+      "NOTIFY_SOAK_DURATION_SECONDS",
+      600,
+      1,
+      86_400,
+    ),
+    commitP95BudgetMs: integer(
+      environment,
+      "NOTIFY_SOAK_COMMIT_P95_MS",
+      200,
+      1,
+      60_000,
+    ),
+    schedulingLagBudgetMs: integer(
+      environment,
+      "NOTIFY_SOAK_SCHEDULING_LAG_MS",
+      1_000,
+      1,
+      60_000,
+    ),
+    settleSeconds: integer(
+      environment,
+      "NOTIFY_SOAK_SETTLE_SECONDS",
+      60,
+      1,
+      600,
+    ),
+    connectionBatch: integer(
+      environment,
+      "NOTIFY_SOAK_CONNECTION_BATCH",
+      200,
+      1,
+      2_000,
+    ),
+    publishConcurrency: integer(
+      environment,
+      "NOTIFY_SOAK_PUBLISH_CONCURRENCY",
+      1_024,
+      1,
+      10_000,
+    ),
+    connectTimeoutSeconds: integer(
+      environment,
+      "NOTIFY_SOAK_CONNECT_TIMEOUT_SECONDS",
+      180,
+      1,
+      1_800,
+    ),
+    endpoints,
+    topicPrefix,
+    reportPath: environment.NOTIFY_SOAK_REPORT_PATH ?? "",
+    sequencePath: environment.NOTIFY_SOAK_SEQUENCE_PATH ?? "",
+    allowRemote,
+  };
+}
+
+export function validateEndpoints(endpoints, { allowRemote = false } = {}) {
+  for (const endpoint of endpoints) {
+    let parsed;
+    try {
+      parsed = new URL(endpoint);
+    } catch {
+      throw new Error(`invalid soak endpoint: ${endpoint}`);
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol)) {
+      throw new Error(`invalid soak endpoint protocol: ${parsed.protocol}`);
+    }
+    if (
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== "/" ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      throw new Error(`soak endpoint must be an origin without credentials: ${endpoint}`);
+    }
+    const loopback = ["127.0.0.1", "localhost", "[::1]"].includes(
+      parsed.hostname,
+    );
+    if (!loopback && !allowRemote) {
+      throw new Error(`refusing non-loopback soak endpoint: ${endpoint}`);
+    }
+  }
+}
+
+export function percentile(samples, fraction) {
+  if (samples.length === 0) return null;
+  if (!(fraction > 0 && fraction <= 1)) {
+    throw new Error("percentile fraction must be greater than zero and at most one");
+  }
+  const sorted = [...samples].sort((left, right) => left - right);
+  const rank = Math.max(0, Math.ceil(fraction * sorted.length) - 1);
+  return sorted[rank];
+}
+
+function addExample(examples, detail) {
+  if (examples.length < maximumExamples) examples.push(detail);
+}
+
+function arraysEqual(left, right) {
+  return (
+    left.length === right.length &&
+    left.every((value, index) => value === right[index])
+  );
+}
+
+export function validateTopicSequences(publishedByTopic, subscribers) {
+  const subscribersByTopic = new Map();
+  for (const subscriber of subscribers) {
+    const grouped = subscribersByTopic.get(subscriber.topic) ?? [];
+    grouped.push(subscriber);
+    subscribersByTopic.set(subscriber.topic, grouped);
+  }
+
+  let missingDeliveries = 0;
+  let duplicateDeliveries = 0;
+  let unexpectedDeliveries = 0;
+  let orderMismatches = 0;
+  const examples = [];
+
+  for (const [topic, published] of publishedByTopic) {
+    const topicSubscribers = subscribersByTopic.get(topic) ?? [];
+    const canonical = topicSubscribers[0]?.messageIds ?? [];
+    for (const subscriber of topicSubscribers) {
+      const counts = new Map();
+      for (const id of subscriber.messageIds) {
+        counts.set(id, (counts.get(id) ?? 0) + 1);
+      }
+      for (const [id, count] of counts) {
+        if (count > 1) {
+          duplicateDeliveries += count - 1;
+          addExample(examples, {
+            kind: "duplicate",
+            subscriber: subscriber.index,
+            topic,
+            messageId: id,
+            count,
+          });
+        }
+        if (!published.has(id)) {
+          unexpectedDeliveries += count;
+          addExample(examples, {
+            kind: "unexpected",
+            subscriber: subscriber.index,
+            topic,
+            messageId: id,
+          });
+        }
+      }
+      for (const id of published) {
+        if (!counts.has(id)) {
+          missingDeliveries += 1;
+          addExample(examples, {
+            kind: "missing",
+            subscriber: subscriber.index,
+            topic,
+            messageId: id,
+          });
+        }
+      }
+      if (!arraysEqual(subscriber.messageIds, canonical)) {
+        orderMismatches += 1;
+        addExample(examples, {
+          kind: "order",
+          subscriber: subscriber.index,
+          topic,
+        });
+      }
+    }
+  }
+
+  return {
+    missingDeliveries,
+    duplicateDeliveries,
+    unexpectedDeliveries,
+    orderMismatches,
+    examples,
+  };
+}
+
+export function evaluateReport(report) {
+  const failures = [];
+  const expect = (condition, failure) => {
+    if (!condition) failures.push(failure);
+  };
+  const configuration = report.configuration;
+  const expectedPublishes =
+    configuration.publishRate * configuration.durationSeconds;
+  expect(
+    report.subscriptions.ready === configuration.subscriptions,
+    `ready subscriptions ${report.subscriptions.ready}/${configuration.subscriptions}`,
+  );
+  expect(
+    report.subscriptions.errors === 0,
+    `subscription errors ${report.subscriptions.errors}`,
+  );
+  expect(
+    report.subscriptions.disconnected === 0,
+    `stable-connection disconnects ${report.subscriptions.disconnected}`,
+  );
+  expect(
+    report.publishes.planned === expectedPublishes,
+    `planned publishes ${report.publishes.planned}/${expectedPublishes}`,
+  );
+  expect(
+    report.publishes.committed === expectedPublishes,
+    `committed publishes ${report.publishes.committed}/${expectedPublishes}`,
+  );
+  expect(report.publishes.errors === 0, `publish errors ${report.publishes.errors}`);
+  expect(
+    report.publishes.achievedRate >= configuration.publishRate * 0.99,
+    `achieved publish rate ${report.publishes.achievedRate.toFixed(2)}/${configuration.publishRate}`,
+  );
+  expect(
+    report.publishes.maximumSchedulingLagMs <=
+      (configuration.schedulingLagBudgetMs ?? 1_000),
+    `maximum scheduling lag ${report.publishes.maximumSchedulingLagMs.toFixed(2)} ms`,
+  );
+  expect(
+    report.publishes.commitLatencyMs.p95 !== null &&
+      report.publishes.commitLatencyMs.p95 <= configuration.commitP95BudgetMs,
+    `publish commit p95 ${report.publishes.commitLatencyMs.p95} ms exceeds ${configuration.commitP95BudgetMs} ms`,
+  );
+  expect(
+    report.deliveries.received === report.deliveries.expected,
+    `received deliveries ${report.deliveries.received}/${report.deliveries.expected}`,
+  );
+  expect(report.deliveries.missing === 0, `missing deliveries ${report.deliveries.missing}`);
+  expect(
+    report.deliveries.duplicates === 0,
+    `duplicates ${report.deliveries.duplicates}`,
+  );
+  expect(
+    report.deliveries.unexpected === 0,
+    `unexpected deliveries ${report.deliveries.unexpected}`,
+  );
+  expect(
+    report.deliveries.orderMismatches === 0,
+    `topic-order mismatches ${report.deliveries.orderMismatches}`,
+  );
+  const durable = report.durableEventLog;
+  expect(
+    durable?.verified === true,
+    "durable event-log order was not verified",
+  );
+  expect(
+    durable?.sequenceMismatches === 0,
+    `durable event-log sequence mismatches ${durable?.sequenceMismatches ?? "unknown"}`,
+  );
+  expect(
+    durable?.eventsExpected === expectedPublishes,
+    `durable event-log expected events ${durable?.eventsExpected ?? "unknown"}/${expectedPublishes}`,
+  );
+  expect(
+    durable?.eventsObserved === expectedPublishes,
+    `durable event-log observed events ${durable?.eventsObserved ?? "unknown"}/${expectedPublishes}`,
+  );
+  return { passed: failures.length === 0, failures };
+}
+
+export function evaluatePreliminaryReport(report) {
+  return evaluateReport({
+    ...report,
+    durableEventLog: {
+      verified: true,
+      sequenceMismatches: 0,
+      eventsExpected: report.publishes.planned,
+      eventsObserved: report.publishes.committed,
+    },
+  });
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function transport(url) {
+  return url.protocol === "https:" ? https : http;
+}
+
+function createAgent(endpoint, maximumSockets) {
+  const parsed = new URL(endpoint);
+  const Agent = parsed.protocol === "https:" ? https.Agent : http.Agent;
+  return new Agent({
+    keepAlive: true,
+    maxSockets: maximumSockets,
+    maxFreeSockets: 512,
+    scheduling: "fifo",
+  });
+}
+
+function messagePath(topic) {
+  return `/${encodeURIComponent(topic)}`;
+}
+
+function subscriptionPath(topic) {
+  return `${messagePath(topic)}/json?since=none`;
+}
+
+function parseNdjson(state, chunk, onMessage, onError) {
+  state.buffer += chunk;
+  for (;;) {
+    const newline = state.buffer.indexOf("\n");
+    if (newline < 0) break;
+    const line = state.buffer.slice(0, newline).trim();
+    state.buffer = state.buffer.slice(newline + 1);
+    if (!line) continue;
+    let event;
+    try {
+      event = JSON.parse(line);
+    } catch (error) {
+      onError(`subscriber ${state.index} received invalid JSON: ${error.message}`);
+      continue;
+    }
+    if (event.event === "open") {
+      state.opened = true;
+      state.resolveOpen();
+      continue;
+    }
+    if (event.event === "keepalive") continue;
+    if (event.event !== "message") {
+      onError(`subscriber ${state.index} received unexpected event`);
+      continue;
+    }
+    if (!messageIdPattern.test(event.id) || event.topic !== state.topic) {
+      onError(`subscriber ${state.index} received malformed message metadata`);
+      continue;
+    }
+    state.messageIds.push(event.id);
+    onMessage(event.id);
+  }
+}
+
+function connectSubscriber(
+  state,
+  endpoint,
+  agent,
+  timeoutMilliseconds,
+  onMessage,
+  onError,
+) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finishOpen = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve();
+    };
+    const failOpen = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(error);
+    };
+    state.resolveOpen = finishOpen;
+    const url = new URL(subscriptionPath(state.topic), endpoint);
+    const request = transport(url).request(url, {
+      agent,
+      method: "GET",
+      headers: { accept: "application/x-ndjson" },
+    });
+    state.request = request;
+    const timer = setTimeout(() => {
+      request.destroy();
+      failOpen(new Error(`subscriber ${state.index} open timed out`));
+    }, timeoutMilliseconds);
+
+    request.on("response", (response) => {
+      state.response = response;
+      if (response.statusCode !== 200) {
+        response.resume();
+        failOpen(
+          new Error(
+            `subscriber ${state.index} returned HTTP ${response.statusCode}`,
+          ),
+        );
+        return;
+      }
+      response.setEncoding("utf8");
+      response.on("data", (chunk) =>
+        parseNdjson(state, chunk, onMessage, onError),
+      );
+      const disconnected = (reason) => {
+        if (!state.closing && !state.disconnected) {
+          state.disconnected = true;
+          onError(`subscriber ${state.index} disconnected: ${reason}`);
+        }
+        if (!state.opened) failOpen(new Error(`subscriber ${state.index} disconnected`));
+      };
+      response.on("aborted", () => disconnected("aborted"));
+      response.on("error", (error) => disconnected(error.message));
+      response.on("end", () => disconnected("end of stream"));
+    });
+    request.on("error", (error) => {
+      if (!state.opened) failOpen(error);
+      else if (!state.closing && !state.disconnected) {
+        state.disconnected = true;
+        onError(`subscriber ${state.index} request failed: ${error.message}`);
+      }
+    });
+    request.end();
+  });
+}
+
+async function openSubscribers(configuration, topics, agents, errors) {
+  const subscribers = Array.from(
+    { length: configuration.subscriptions },
+    (_, index) => ({
+      index,
+      topic: topics[index % topics.length],
+      endpointIndex:
+        Math.floor(index / topics.length) % configuration.endpoints.length,
+      buffer: "",
+      messageIds: [],
+      opened: false,
+      disconnected: false,
+      closing: false,
+      request: null,
+      response: null,
+      resolveOpen: () => {},
+    }),
+  );
+  let received = 0;
+  const onMessage = () => {
+    received += 1;
+  };
+  const onError = (detail) => addExample(errors, detail);
+  const timeoutMilliseconds = configuration.connectTimeoutSeconds * 1_000;
+
+  for (
+    let offset = 0;
+    offset < subscribers.length;
+    offset += configuration.connectionBatch
+  ) {
+    const batch = subscribers.slice(
+      offset,
+      offset + configuration.connectionBatch,
+    );
+    await Promise.all(
+      batch.map((subscriber) =>
+        connectSubscriber(
+          subscriber,
+          configuration.endpoints[subscriber.endpointIndex],
+          agents[subscriber.endpointIndex],
+          timeoutMilliseconds,
+          onMessage,
+          onError,
+        ),
+      ),
+    );
+    if (
+      subscribers.length >= 1_000 &&
+      (offset + batch.length) % 1_000 === 0
+    ) {
+      process.stderr.write(
+        `ready subscriptions: ${offset + batch.length}/${subscribers.length}\n`,
+      );
+    }
+  }
+  return { subscribers, received: () => received };
+}
+
+function publishOne(index, topic, endpoint, agent) {
+  const url = new URL(messagePath(topic), endpoint);
+  const payload = `soak-${index}`;
+  const startedAt = performance.now();
+  return new Promise((resolve, reject) => {
+    const request = transport(url).request(url, {
+      agent,
+      method: "POST",
+      headers: {
+        "content-type": "text/plain; charset=utf-8",
+        "content-length": Buffer.byteLength(payload),
+      },
+    });
+    request.on("response", (response) => {
+      response.setEncoding("utf8");
+      let body = "";
+      response.on("data", (chunk) => {
+        body += chunk;
+        if (body.length > 65_536) request.destroy();
+      });
+      response.on("error", reject);
+      response.on("end", () => {
+        const latencyMs = performance.now() - startedAt;
+        if (response.statusCode !== 200) {
+          reject(new Error(`publish ${index} returned HTTP ${response.statusCode}`));
+          return;
+        }
+        let event;
+        try {
+          event = JSON.parse(body);
+        } catch (error) {
+          reject(new Error(`publish ${index} returned invalid JSON: ${error.message}`));
+          return;
+        }
+        if (
+          event.event !== "message" ||
+          event.topic !== topic ||
+          event.message !== payload ||
+          !messageIdPattern.test(event.id)
+        ) {
+          reject(new Error(`publish ${index} returned malformed message metadata`));
+          return;
+        }
+        resolve({ id: event.id, topic, latencyMs, completedAt: performance.now() });
+      });
+    });
+    request.on("error", reject);
+    request.end(payload);
+  });
+}
+
+async function publishAtRate(configuration, topics, agents, errors) {
+  const planned = configuration.publishRate * configuration.durationSeconds;
+  const intervalMilliseconds = 1_000 / configuration.publishRate;
+  const latencies = [];
+  const publishedByTopic = new Map(topics.map((topic) => [topic, new Set()]));
+  const allIds = new Set();
+  const inFlight = new Set();
+  let next = 0;
+  let committed = 0;
+  let publishErrors = 0;
+  let maximumSchedulingLagMs = 0;
+  let lastCompletedAt = 0;
+  const startedAt = performance.now();
+
+  const launch = (index) => {
+    const intendedAt = startedAt + index * intervalMilliseconds;
+    maximumSchedulingLagMs = Math.max(
+      maximumSchedulingLagMs,
+      performance.now() - intendedAt,
+    );
+    const topic = topics[index % topics.length];
+    const endpointIndex =
+      Math.floor(index / topics.length) % configuration.endpoints.length;
+    const task = publishOne(
+      index,
+      topic,
+      configuration.endpoints[endpointIndex],
+      agents[endpointIndex],
+    )
+      .then((published) => {
+        if (allIds.has(published.id)) {
+          throw new Error(`publish generated duplicate message ID ${published.id}`);
+        }
+        allIds.add(published.id);
+        publishedByTopic.get(topic).add(published.id);
+        latencies.push(published.latencyMs);
+        committed += 1;
+        lastCompletedAt = Math.max(lastCompletedAt, published.completedAt);
+      })
+      .catch((error) => {
+        publishErrors += 1;
+        addExample(errors, error.message);
+      })
+      .finally(() => inFlight.delete(task));
+    inFlight.add(task);
+  };
+
+  while (next < planned) {
+    const elapsed = performance.now() - startedAt;
+    const due = Math.min(
+      planned,
+      Math.floor(elapsed / intervalMilliseconds) + 1,
+    );
+    while (
+      next < due &&
+      next < planned &&
+      inFlight.size < configuration.publishConcurrency
+    ) {
+      launch(next);
+      next += 1;
+    }
+    if (inFlight.size >= configuration.publishConcurrency) {
+      await Promise.race(inFlight);
+    } else if (next < planned) {
+      const nextAt = startedAt + next * intervalMilliseconds;
+      await delay(Math.max(0, Math.min(10, nextAt - performance.now())));
+    }
+  }
+  await Promise.all(inFlight);
+  const completedDurationSeconds =
+    (Math.max(lastCompletedAt, performance.now()) - startedAt) / 1_000;
+  return {
+    planned,
+    committed,
+    errors: publishErrors,
+    achievedRate: committed / completedDurationSeconds,
+    maximumSchedulingLagMs,
+    completedDurationSeconds,
+    latencies,
+    publishedByTopic,
+  };
+}
+
+function latencySummary(samples) {
+  if (samples.length === 0) {
+    return { minimum: null, p50: null, p95: null, p99: null, maximum: null, mean: null };
+  }
+  let total = 0;
+  let minimum = Number.POSITIVE_INFINITY;
+  let maximum = 0;
+  for (const sample of samples) {
+    total += sample;
+    minimum = Math.min(minimum, sample);
+    maximum = Math.max(maximum, sample);
+  }
+  return {
+    minimum,
+    p50: percentile(samples, 0.5),
+    p95: percentile(samples, 0.95),
+    p99: percentile(samples, 0.99),
+    maximum,
+    mean: total / samples.length,
+  };
+}
+
+function expectedDeliveries(publishedByTopic, subscribers) {
+  const subscribersPerTopic = new Map();
+  for (const subscriber of subscribers) {
+    subscribersPerTopic.set(
+      subscriber.topic,
+      (subscribersPerTopic.get(subscriber.topic) ?? 0) + 1,
+    );
+  }
+  let expected = 0;
+  for (const [topic, published] of publishedByTopic) {
+    expected += published.size * (subscribersPerTopic.get(topic) ?? 0);
+  }
+  return expected;
+}
+
+async function waitForDeliveries(received, expected, settleSeconds) {
+  const deadline = performance.now() + settleSeconds * 1_000;
+  while (received() < expected && performance.now() < deadline) {
+    await delay(100);
+  }
+  if (received() >= expected) await delay(1_000);
+}
+
+function closeSubscribers(subscribers, agents) {
+  for (const subscriber of subscribers) {
+    subscriber.closing = true;
+    subscriber.response?.destroy();
+    subscriber.request?.destroy();
+  }
+  for (const agent of agents) agent.destroy();
+}
+
+function rounded(value) {
+  return value === null ? null : Math.round(value * 100) / 100;
+}
+
+function roundedLatency(summary) {
+  return Object.fromEntries(
+    Object.entries(summary).map(([name, value]) => [name, rounded(value)]),
+  );
+}
+
+export async function runSoak(configuration) {
+  const startedAt = new Date();
+  const errors = [];
+  const maximumSockets =
+    Math.ceil(configuration.subscriptions / configuration.endpoints.length) +
+    configuration.publishConcurrency;
+  const agents = configuration.endpoints.map((endpoint) =>
+    createAgent(endpoint, maximumSockets),
+  );
+  const topics = Array.from({ length: configuration.topics }, (_, index) => {
+    const topic = `${configuration.topicPrefix}-${index.toString().padStart(4, "0")}`;
+    if (!topicPattern.test(topic)) throw new Error(`generated invalid topic: ${topic}`);
+    return topic;
+  });
+  let subscribers = [];
+  try {
+    const opened = await openSubscribers(configuration, topics, agents, errors);
+    subscribers = opened.subscribers;
+    const published = await publishAtRate(configuration, topics, agents, errors);
+    const expected = expectedDeliveries(published.publishedByTopic, subscribers);
+    await waitForDeliveries(opened.received, expected, configuration.settleSeconds);
+    const validation = validateTopicSequences(
+      published.publishedByTopic,
+      subscribers,
+    );
+    const report = {
+      schemaVersion: 1,
+      startedAt: startedAt.toISOString(),
+      finishedAt: new Date().toISOString(),
+      environment: {
+        node: process.version,
+        platform: os.platform(),
+        release: os.release(),
+        architecture: os.arch(),
+        logicalCpus: os.availableParallelism(),
+        totalMemoryBytes: os.totalmem(),
+      },
+      configuration: {
+        subscriptions: configuration.subscriptions,
+        topics: configuration.topics,
+        publishRate: configuration.publishRate,
+        durationSeconds: configuration.durationSeconds,
+        commitP95BudgetMs: configuration.commitP95BudgetMs,
+        schedulingLagBudgetMs: configuration.schedulingLagBudgetMs,
+        settleSeconds: configuration.settleSeconds,
+        endpoints: configuration.endpoints,
+      },
+      subscriptions: {
+        ready: subscribers.filter((subscriber) => subscriber.opened).length,
+        disconnected: subscribers.filter((subscriber) => subscriber.disconnected)
+          .length,
+        errors: errors.filter((error) => error.startsWith("subscriber ")).length,
+        perNode: configuration.endpoints.map((endpoint, endpointIndex) => ({
+          endpoint,
+          ready: subscribers.filter(
+            (subscriber) =>
+              subscriber.endpointIndex === endpointIndex && subscriber.opened,
+          ).length,
+        })),
+      },
+      publishes: {
+        planned: published.planned,
+        committed: published.committed,
+        errors: published.errors,
+        achievedRate: rounded(published.achievedRate),
+        maximumSchedulingLagMs: rounded(published.maximumSchedulingLagMs),
+        completedDurationSeconds: rounded(published.completedDurationSeconds),
+        commitLatencyMs: roundedLatency(latencySummary(published.latencies)),
+      },
+      deliveries: {
+        expected,
+        received: opened.received(),
+        missing: validation.missingDeliveries,
+        duplicates: validation.duplicateDeliveries,
+        unexpected: validation.unexpectedDeliveries,
+        orderMismatches: validation.orderMismatches,
+      },
+      examples: [...errors, ...validation.examples].slice(0, maximumExamples),
+    };
+    report.preliminaryVerdict = evaluatePreliminaryReport(report);
+    await persistObservedSequences(
+      subscribers,
+      topics,
+      configuration.sequencePath,
+    );
+    return report;
+  } finally {
+    closeSubscribers(subscribers, agents);
+  }
+}
+
+async function persistObservedSequences(subscribers, topics, sequencePath) {
+  if (!sequencePath) return;
+  const firstByTopic = new Map();
+  for (const subscriber of subscribers) {
+    if (!firstByTopic.has(subscriber.topic)) {
+      firstByTopic.set(subscriber.topic, subscriber.messageIds);
+    }
+  }
+  const encoded = topics
+    .map((topic) =>
+      JSON.stringify({ topic, messageIds: firstByTopic.get(topic) ?? [] }),
+    )
+    .join("\n");
+  await mkdir(path.dirname(path.resolve(sequencePath)), { recursive: true });
+  await writeFile(sequencePath, `${encoded}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+}
+
+async function persistReport(report, reportPath) {
+  const encoded = `${JSON.stringify(report, null, 2)}\n`;
+  process.stdout.write(encoded);
+  if (reportPath) {
+    await mkdir(path.dirname(path.resolve(reportPath)), { recursive: true });
+    await writeFile(reportPath, encoded, { encoding: "utf8", mode: 0o600 });
+  }
+}
+
+async function main() {
+  const configuration = loadConfiguration();
+  const report = await runSoak(configuration);
+  await persistReport(report, configuration.reportPath);
+  if (!report.preliminaryVerdict.passed) process.exitCode = 1;
+}
+
+const invokedPath = process.argv[1] ? pathToFileURL(path.resolve(process.argv[1])).href : "";
+if (import.meta.url === invokedPath) {
+  main().catch(async (error) => {
+    const failure = {
+      schemaVersion: 1,
+      finishedAt: new Date().toISOString(),
+      verdict: { passed: false, failures: [error.message] },
+    };
+    try {
+      await persistReport(failure, process.env.NOTIFY_SOAK_REPORT_PATH ?? "");
+    } finally {
+      process.exitCode = 1;
+    }
+  });
+}

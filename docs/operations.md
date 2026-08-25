@@ -198,6 +198,19 @@ Do not use the project in a production environment on the strength of those
 numbers until a reproducible soak report records hardware, OS, database/object
 store versions, configuration, raw results, and the tested commit.
 
+The local acceptance command is `test/cluster_soak.sh`. It is loopback-only by
+default and starts an isolated three-node Compose project with PostgreSQL and
+MinIO. The driver paces publish starts independently of completion, records
+request-to-response commit latency and scheduler lag, and holds every
+subscription open through the delivery-settle window. The final verifier
+requires every subscriber on a topic to have the same 12-character ID sequence
+with no loss or duplicates, exports `notify_event_log` in sequence order, and
+requires the observed live order to match that durable source of truth exactly.
+Missing oracle evidence makes the verdict fail. Environment, database size and
+row counts, container/OOM state, and five-second resource samples are separate
+report files. The weekly/manual workflow uses the exact defaults above and
+retains these private artifacts for seven days.
+
 ## SQLite schema refusal and recovery
 
 Notify never resets an unknown database automatically. If startup reports an

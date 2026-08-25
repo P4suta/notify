@@ -398,6 +398,17 @@ The harness uses a unique Compose project/image and removes its containers,
 volumes, temporary files, and image on every exit. The same test runs weekly
 and on manual dispatch; it is intentionally outside the pull-request fast path.
 
+`test/cluster_soak.sh` is the fail-closed target load gate. Its defaults are
+three nodes, 10,000 live JSON subscriptions, 1,000 topics, 500 publishes per
+second for 600 seconds, and a 200 ms publish-response p95 budget. It rejects
+non-loopback endpoints unless explicitly overridden, records host/container/
+PostgreSQL evidence, checks every subscriber for loss, duplicates,
+disconnection, and topic order, then compares that order with the authoritative
+PostgreSQL event sequence. The harness removes its exact Compose project and
+local image on every exit. The target workflow runs weekly and manually and
+retains its private evidence for seven days; it does not publish an image or
+release artifact.
+
 Set `NOTIFY_TEST_POSTGRES_HOST` (plus optional `PORT` and `PASSWORD` variants)
 to enable the real PostgreSQL contract suite. Set `NOTIFY_TEST_S3_ENDPOINT`
 (plus optional `ACCESS_KEY` and `SECRET_KEY` variants) for the MinIO contract,
