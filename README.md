@@ -110,7 +110,8 @@ checked with constant-time binary comparison.
 
 Rate limits use continuously refilled token buckets keyed by the effective
 client IP. The default 60-second refill period has independent capacities for
-all requests (120), subscription attempts (30), publish/topic-creation
+all requests (120), live subscription attempts (30; bounded polls use only the
+request bucket), publish/topic-creation
 attempts (60), authentication failures (10), attachment transfer MiB (120),
 and attachment upload attempts (20). Configure them under `[rate_limit]`, with
 the corresponding `NOTIFY_RATE_LIMIT_*` variables, or with the documented CLI

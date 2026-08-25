@@ -4,6 +4,7 @@ import gleam/int
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
+import gleam/string
 import notify/http/parameter
 import notify/rate_limit.{type Bucket}
 
@@ -73,13 +74,21 @@ fn specific_charges(
 }
 
 fn subscription_attempt(request: Request(body)) -> Bool {
-  case request.method, request.path_segments(request) {
-    Get, [_, suffix]
+  case request.method, request.path_segments(request), poll_requested(request) {
+    Get, [_, suffix], False
       if suffix == "json" || suffix == "raw" || suffix == "sse" || suffix == "ws"
     -> True
-    Post, ["v1", "webpush"] -> True
-    _, _ -> False
+    Post, ["v1", "webpush"], _ -> True
+    _, _, _ -> False
   }
+}
+
+fn poll_requested(request: Request(body)) -> Bool {
+  parameter.read(request, ["x-poll", "poll", "po"])
+  |> option.map(fn(value) {
+    list.contains(["1", "true", "yes", "on"], string.lowercase(value))
+  })
+  |> option.unwrap(False)
 }
 
 fn publication_attempt(request: Request(body)) -> Bool {
