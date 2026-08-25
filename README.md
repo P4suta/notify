@@ -209,7 +209,11 @@ single URL, after which reuse is rejected across the cluster.
 
 The durable PostgreSQL event log is authoritative. LISTEN/NOTIFY only wakes
 nodes; each node resumes from its stored cursor after lost notifications or a
-restart. A node advances its cursor only after the broker has synchronously
+restart. The listener blocks on PostgreSQL notification frames instead of
+polling with queries, coalesces queued wakes for five milliseconds, and still
+performs a catch-up after a one-second quiet timeout. Event cursor heartbeat
+and the next 256-row page are read in one statement. A node advances its cursor
+only after the broker has synchronously
 applied every non-scheduled event, including its own origin, in sequence; a
 dispatch or cursor-write failure leaves the batch available for at-least-once
 retry. Cursor heartbeats protect
@@ -253,7 +257,9 @@ this avoids delayed-ACK stalls across PostgreSQL protocol round trips. A failed
 operation is returned to its caller without an ambiguous automatic write retry;
 that lane replaces its connection for subsequent operations. The fixed lanes,
 same-batch duplicate handling, forced-backend-termination recovery, and event
-sequence validation have real-PostgreSQL tests. The recorded target run is
+sequence validation have real-PostgreSQL tests. A regression assertion also
+requires an idle listener's last PostgreSQL query to remain `LISTEN`, preventing
+a query-based busy poll from returning. The recorded target run is
 summarised in [operational limits](docs/operations.md).
 
 Delivery workers share the PostgreSQL outbox using `FOR UPDATE SKIP LOCKED`.

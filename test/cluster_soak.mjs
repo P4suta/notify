@@ -419,6 +419,16 @@ function messagePath(topic) {
   return `/${encodeURIComponent(topic)}`;
 }
 
+export function publishEndpointIndex(index, endpointCount) {
+  if (!Number.isSafeInteger(index) || index < 0) {
+    throw new Error("publish index must be a non-negative safe integer");
+  }
+  if (!Number.isSafeInteger(endpointCount) || endpointCount < 1) {
+    throw new Error("endpoint count must be a positive safe integer");
+  }
+  return index % endpointCount;
+}
+
 export function subscriptionPath(topic, format) {
   const suffix = format === "websocket" ? "ws" : format;
   return `${messagePath(topic)}/${suffix}?since=none`;
@@ -961,8 +971,10 @@ async function publishAtRate(configuration, topics, agents, errors) {
       performance.now() - intendedAt,
     );
     const topic = topics[index % topics.length];
-    const endpointIndex =
-      Math.floor(index / topics.length) % configuration.endpoints.length;
+    const endpointIndex = publishEndpointIndex(
+      index,
+      configuration.endpoints.length,
+    );
     const task = publishOne(
       index,
       topic,

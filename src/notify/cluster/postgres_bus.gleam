@@ -3,20 +3,30 @@ import gleam/list
 import gleam/otp/actor
 import gleam/otp/supervision.{type ChildSpecification}
 import gleam/result
+import gleam/string
 import notify/core/message.{type Message}
 import notify/storage
 import notify/storage/postgres.{type Adapter}
 import postgleam/config as postgres_config
 import postgleam/connection
+import postgleam/error as postgres_error
+import postgleam/message as postgres_message
 import postgleam/notifications
 
-const batch_size = 100
+const batch_size = 256
 
 const reconnect_milliseconds = 1000
 
+const notification_wait_milliseconds = 1000
+
+const wake_coalesce_milliseconds = 5
+
+const flush_timeout_milliseconds = 5000
+
 /// Starts the PostgreSQL cluster wake-up listener. LISTEN/NOTIFY only reduces
 /// latency: the durable event log and per-node cursor remain the source of
-/// truth, and every loop drains the cursor even if a notification was lost.
+/// truth, and every wake or quiet timeout drains the cursor so a lost
+/// notification cannot strand committed events.
 pub fn start(
   config: postgres_config.Config,
   adapter: Adapter,
@@ -56,8 +66,10 @@ fn connect_loop(
           process.sleep(reconnect_milliseconds)
           connect_loop(config, adapter, node_id, dispatch)
         }
-        Ok(listening) ->
+        Ok(listening) -> {
+          let _ = drain_all(adapter, node_id, dispatch)
           listen_loop(listening, config, adapter, node_id, dispatch)
+        }
       }
   }
 }
@@ -69,15 +81,64 @@ fn listen_loop(
   node_id: String,
   dispatch: fn(Message) -> Result(Nil, storage.Error),
 ) -> Nil {
-  let _ = drain_all(adapter, node_id, dispatch)
-  case notifications.receive_notifications(state, reconnect_milliseconds) {
-    Error(_) -> {
-      connection.disconnect(state)
-      connect_loop(config, adapter, node_id, dispatch)
+  case connection.receive_message(state, notification_wait_milliseconds) {
+    Ok(#(postgres_message.NotificationResponse(_, _, _), next_state)) -> {
+      // Give concurrent commits a very small window to coalesce. Reissuing
+      // the idempotent LISTEN command then drains queued NotificationResponse frames before one
+      // authoritative event-log catch-up, rather than polling PostgreSQL in a
+      // tight loop or issuing one cursor read for every wake-up.
+      process.sleep(wake_coalesce_milliseconds)
+      case flush_notifications(next_state) {
+        Error(_) ->
+          reconnect_listener(next_state, config, adapter, node_id, dispatch)
+        Ok(flushed_state) -> {
+          let _ = drain_all(adapter, node_id, dispatch)
+          listen_loop(flushed_state, config, adapter, node_id, dispatch)
+        }
+      }
     }
-    Ok(#(_, next_state)) ->
+    Ok(#(postgres_message.NoticeResponse(_), next_state)) ->
       listen_loop(next_state, config, adapter, node_id, dispatch)
+    Ok(#(_, next_state)) ->
+      reconnect_listener(next_state, config, adapter, node_id, dispatch)
+    Error(error) ->
+      case receive_timed_out(error) {
+        True -> {
+          // LISTEN/NOTIFY is only a wake-up hint. The timeout catch-up also
+          // covers notifications lost while a listener was reconnecting.
+          let _ = drain_all(adapter, node_id, dispatch)
+          listen_loop(state, config, adapter, node_id, dispatch)
+        }
+        False -> reconnect_listener(state, config, adapter, node_id, dispatch)
+      }
   }
+}
+
+fn flush_notifications(
+  state: connection.ConnectionState,
+) -> Result(connection.ConnectionState, postgres_error.Error) {
+  notifications.listen(state, "notify_events", flush_timeout_milliseconds)
+}
+
+fn receive_timed_out(error: postgres_error.Error) -> Bool {
+  case error {
+    postgres_error.SocketError(detail) ->
+      string.contains(detail, "timed out")
+      || string.ends_with(detail, "timeout")
+    _ -> False
+  }
+}
+
+fn reconnect_listener(
+  state: connection.ConnectionState,
+  config: postgres_config.Config,
+  adapter: Adapter,
+  node_id: String,
+  dispatch: fn(Message) -> Result(Nil, storage.Error),
+) -> Nil {
+  connection.disconnect(state)
+  process.sleep(reconnect_milliseconds)
+  connect_loop(config, adapter, node_id, dispatch)
 }
 
 fn listener_config(

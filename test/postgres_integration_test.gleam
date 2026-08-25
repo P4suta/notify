@@ -808,10 +808,16 @@ pub fn postgres_cluster_bus_recovers_listener_and_ignores_duplicate_wakes_test()
 
       let assert Ok(first_listener_pid) =
         wait_for_listener_pid(admin, listener_name, 0, 100)
+      // A healthy listener blocks on PostgreSQL NotificationResponse frames.
+      // Its last query therefore remains LISTEN; an accidental SELECT-based
+      // poll loop changes this field and is caught here.
+      process.sleep(100)
+      assert wait_for_blocking_listener(admin, first_listener_pid, 20)
       let first =
         fixture_on_topic("PgFault001XY", False, 400, "postgres-cluster-fault")
       assert origin_messages.save(first) == Ok(first)
       assert process.receive(deliveries, 10_000) == Ok(first.id)
+      assert wait_for_blocking_listener(admin, first_listener_pid, 20)
       send_duplicate_wakes(admin)
       assert process.receive(deliveries, 1500) == Error(Nil)
 
@@ -831,7 +837,10 @@ pub fn postgres_cluster_bus_recovers_listener_and_ignores_duplicate_wakes_test()
       let assert Ok(second_listener_pid) =
         wait_for_listener_pid(admin, listener_name, first_listener_pid, 100)
       assert second_listener_pid != first_listener_pid
+      process.sleep(100)
+      assert wait_for_blocking_listener(admin, second_listener_pid, 20)
       assert process.receive(deliveries, 10_000) == Ok(second.id)
+      assert wait_for_blocking_listener(admin, second_listener_pid, 20)
       send_duplicate_wakes(admin)
       assert process.receive(deliveries, 1500) == Error(Nil)
 
@@ -1399,6 +1408,34 @@ fn wait_for_node_cursor(
             minimum_sequence,
             remaining - 1,
           )
+        }
+      }
+  }
+}
+
+fn wait_for_blocking_listener(
+  connection: postgleam.Connection,
+  listener_pid: Int,
+  remaining: Int,
+) -> Bool {
+  case remaining {
+    0 -> False
+    _ ->
+      case
+        postgleam.query_one(
+          connection,
+          "SELECT COALESCE(query LIKE 'LISTEN %notify_events%', FALSE) FROM pg_stat_activity WHERE pid = $1",
+          [postgleam.int(listener_pid)],
+          {
+            use waiting <- decode.element(0, decode.bool)
+            decode.success(waiting)
+          },
+        )
+      {
+        Ok(True) -> True
+        _ -> {
+          process.sleep(20)
+          wait_for_blocking_listener(connection, listener_pid, remaining - 1)
         }
       }
   }

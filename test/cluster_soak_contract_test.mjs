@@ -8,6 +8,7 @@ import {
   loadConfiguration,
   parseSubscriptionChunk,
   percentile,
+  publishEndpointIndex,
   subscriptionPath,
   validateEndpoints,
   validateTopicSequences,
@@ -49,6 +50,22 @@ test("all streaming transports are explicit validated configuration", () => {
     subscriptionPath("alerts", "websocket"),
     "/alerts/ws?since=none",
   );
+});
+
+test("cluster publishes are balanced continuously and rotate topic origins", () => {
+  assert.deepEqual(
+    Array.from({ length: 12 }, (_, index) => publishEndpointIndex(index, 3)),
+    [0, 1, 2, 0, 1, 2, 0, 1, 2, 0, 1, 2],
+  );
+
+  const topicCount = 1_000;
+  assert.deepEqual(
+    Array.from({ length: 3 }, (_, round) =>
+      publishEndpointIndex(17 + round * topicCount, 3),
+    ),
+    [2, 0, 1],
+  );
+  assert.throws(() => publishEndpointIndex(0, 0), /endpoint count/);
 });
 
 test("JSON, SSE, and raw parsers accept split frames without losing identity", () => {

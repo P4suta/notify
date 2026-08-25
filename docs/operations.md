@@ -244,8 +244,9 @@ The local acceptance command is `test/cluster_soak.sh`. It is loopback-only by
 default and starts an isolated three-node Compose project with PostgreSQL and
 MinIO. `NOTIFY_SOAK_FORMAT` selects JSON, raw, SSE, or WebSocket; the
 weekly/manual workflow runs the target once per format. The driver paces
-publish starts independently of completion, records request-to-response commit
-latency and scheduler lag, and holds every
+publish starts independently of completion, continuously distributes them
+round-robin across all three nodes, rotates each topic's origin across rounds,
+records request-to-response commit latency and scheduler lag, and holds every
 subscription open through the delivery-settle window. The final verifier
 requires every subscriber on a topic to have the same 12-character ID sequence
 with no loss or duplicates, exports `notify_event_log` in sequence order, and
@@ -298,6 +299,16 @@ clients de-duplicate with the 12-character message ID. HTTP publish returns
 after the durable commit; in cluster mode it never fans out directly. The
 per-node event dispatcher is the single live-delivery path for both local and
 remote origins, keeping subscriber work outside publish commit latency.
+
+The dedicated listener waits directly for PostgreSQL `NotificationResponse`
+frames. After a wake it allows five milliseconds for concurrent commits to
+coalesce, flushes queued wake frames, and drains the authoritative log once.
+A one-second receive timeout triggers the same catch-up so a lost wake cannot
+strand committed events. The event connection combines cursor creation or
+heartbeat and the next 256-row page in one SQL statement; ACK remains a
+separate write after the synchronous broker barrier. The real-PostgreSQL
+regression suite checks that an idle listener's last backend query remains
+`LISTEN`, which rejects a query-based busy-poll implementation.
 
 Message persistence has four round-robin general-query connections per node.
 Event fetch/ACK owns another connection, ordered publish commit owns another,
