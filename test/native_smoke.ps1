@@ -49,15 +49,18 @@ function Invoke-ErlangNifProbe {
     if ($ertsExecutables.Count -ne 1) {
         throw "native install did not contain exactly one erl.exe"
     }
-    $libraryRoot = Join-Path $env:NOTIFY_INSTALL_DIR "lib"
-    $applicationDirectories = @(Get-ChildItem -LiteralPath $libraryRoot `
-        -Directory -Filter "$Application-*")
-    if ($applicationDirectories.Count -ne 1) {
-        throw "native install did not contain exactly one $Application application"
+    $libraries = @(Get-ChildItem -LiteralPath $env:NOTIFY_INSTALL_DIR `
+        -Recurse -File -Filter $LibraryName)
+    if ($libraries.Count -ne 1) {
+        throw "native install did not contain exactly one $LibraryName"
     }
-    $nifPath = Join-Path $applicationDirectories[0].FullName "priv/$LibraryName"
-    if (-not (Test-Path -LiteralPath $nifPath -PathType Leaf)) {
-        throw "native install omitted $LibraryName"
+    $applicationDirectory = $libraries[0].Directory.Parent
+    if ($applicationDirectory.Name -notlike "$Application-*") {
+        throw "$LibraryName was outside the expected $Application application"
+    }
+    $ebinPath = Join-Path $applicationDirectory.FullName "ebin"
+    if (-not (Test-Path -LiteralPath $ebinPath -PathType Container)) {
+        throw "$Application application omitted its ebin directory"
     }
 
     $previousNativeErrorPreference = $PSNativeCommandUseErrorActionPreference
@@ -65,7 +68,7 @@ function Invoke-ErlangNifProbe {
         $PSNativeCommandUseErrorActionPreference = $false
         $probeOutput = @(& $ertsExecutables[0].FullName `
             -noshell `
-            -pa (Join-Path $applicationDirectories[0].FullName "ebin") `
+            -pa $ebinPath `
             -eval $Expression 2>&1 | ForEach-Object { "$_" })
         $exitCode = $LASTEXITCODE
     }
