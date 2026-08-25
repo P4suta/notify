@@ -213,8 +213,11 @@ active readers, cursors stale for seven days are removed, and compaction deletes
 only acknowledged event rows whose message has already expired. Scheduled
 publication uses `FOR UPDATE SKIP LOCKED` and commits the released message plus
 its event in one transaction. These paths have real-PostgreSQL contract
-coverage; multi-node outage and long-duration soak coverage remain open. SQLite
-uses WAL plus a per-database live-process lock and is strictly single-node.
+coverage. The contract also terminates the dedicated LISTEN backend, commits an
+event while it is disconnected, requires a new listener PID to catch up from
+the log, and proves duplicate wake-ups do not duplicate delivery. Multi-node
+process outage and long-duration soak coverage remain open. SQLite uses WAL
+plus a per-database live-process lock and is strictly single-node.
 
 The PostgreSQL message adapter uses a bounded four-worker round-robin connection
 pool plus a separate dedicated LISTEN connection. Reads and cursor operations
@@ -383,6 +386,11 @@ NOTIFY_TEST_S3_ACCESS_KEY=notify-minio \
 NOTIFY_TEST_S3_SECRET_KEY=notify-minio-development-password \
 gleam test
 ```
+
+The `CI / PostgreSQL and MinIO` pull-request check starts these services in an
+isolated Compose project and runs the same suite. It is the required real-store
+counterpart to the default SQLite server test; failure logs are retained only
+inside the workflow run and its volumes are always removed.
 
 The pinned differential corpus lives in `test/compat`. Run it against the
 local `compose.compat.yml` stack to compare normalised status codes, media

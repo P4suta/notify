@@ -250,9 +250,12 @@ whose message row no longer exists.
 The current contract exercises paging, cursor resume, dispatch-before-ACK,
 dispatch failure, ACK failure and at-least-once batch replay, concurrent pool
 commits, event-lock blocking, one forced backend termination and connection
-replacement, scheduled release, and compaction; persistence cases run against
-real PostgreSQL. Listener disconnect, multi-node crash, lease expiry, duplicate
-wake-up, and prolonged outage tests remain required before production
+replacement, scheduled release, and compaction. It also terminates the dedicated
+LISTEN backend, commits during the disconnect, waits for a different backend PID
+to reconnect and catch up from the event log, and injects duplicate wake-ups
+without duplicate delivery. These persistence cases run against real
+PostgreSQL in the pull-request gate. Multi-node process crash, lease expiry, and
+prolonged database/object-store outage tests remain required before production
 certification.
 
 ## Durable delivery recovery

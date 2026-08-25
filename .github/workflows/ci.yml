@@ -52,6 +52,44 @@ jobs:
           node --test test/pwa_contract_test.mjs
           jq -e . priv/public/openapi.json >/dev/null
 
+  integration:
+    name: PostgreSQL and MinIO
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      COMPOSE_PROJECT_NAME: notify-integration-${{ github.run_id }}-${{ github.run_attempt }}
+      NOTIFY_TEST_POSTGRES_HOST: 127.0.0.1
+      NOTIFY_TEST_POSTGRES_PORT: "15432"
+      NOTIFY_TEST_POSTGRES_PASSWORD: notify-development-password
+      NOTIFY_TEST_S3_ENDPOINT: http://127.0.0.1:19000
+      NOTIFY_TEST_S3_ACCESS_KEY: notify-minio
+      NOTIFY_TEST_S3_SECRET_KEY: notify-minio-development-password
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Gleam and Erlang
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: ${{ env.OTP_VERSION }}
+          gleam-version: ${{ env.GLEAM_VERSION }}
+          rebar3-version: "3"
+      - name: Download dependencies
+        run: gleam deps download
+      - name: Start PostgreSQL and MinIO
+        run: |
+          docker compose -f compose.cluster.yml up --detach --wait --wait-timeout 120 postgres minio
+          docker compose -f compose.cluster.yml run --rm --no-deps minio-init
+      - name: Test real storage and cluster contracts
+        run: gleam test
+      - name: Print service logs after failure
+        if: failure()
+        run: docker compose -f compose.cluster.yml logs --no-color
+      - name: Stop integration services
+        if: always()
+        run: docker compose -f compose.cluster.yml down --volumes --remove-orphans
+
   core:
     name: Core
     runs-on: ubuntu-24.04

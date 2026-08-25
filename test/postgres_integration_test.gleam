@@ -10,6 +10,7 @@ import notify/attachment_store
 import notify/attachment_store/postgres as attachment_postgres
 import notify/audit
 import notify/audit/postgres as audit_postgres
+import notify/cluster/postgres_bus
 import notify/core/acl
 import notify/core/filter
 import notify/core/message
@@ -536,6 +537,73 @@ pub fn postgres_storage_event_replay_and_paging_contract_test() {
   }
 }
 
+pub fn postgres_cluster_bus_recovers_listener_and_ignores_duplicate_wakes_test() {
+  case test_database() {
+    Error(_) -> Nil
+    Ok(database) -> {
+      process.trap_exits(True)
+      let TestDatabase(configuration:, admin:, ..) = database
+      let config.Config(extra_parameters:, ..) = configuration
+      let listener_name = "notify-fault-" <> string.lowercase(random_id())
+      let listener_configuration =
+        config.extra_parameters(
+          configuration,
+          list.append(extra_parameters, [
+            #("application_name", listener_name),
+          ]),
+        )
+      let assert Ok(origin) = postgres.start(configuration, "fault-origin")
+      let assert Ok(receiver) = postgres.start(configuration, "fault-receiver")
+      let postgres.Adapter(storage: origin_messages, ..) = origin
+      let deliveries = process.new_subject()
+      let listener =
+        postgres_bus.start(
+          listener_configuration,
+          receiver,
+          "fault-receiver",
+          fn(value) {
+            process.send(deliveries, value.id)
+            Ok(Nil)
+          },
+        )
+
+      let assert Ok(first_listener_pid) =
+        wait_for_listener_pid(admin, listener_name, 0, 100)
+      let first =
+        fixture_on_topic("PgFault001XY", False, 400, "postgres-cluster-fault")
+      assert origin_messages.save(first) == Ok(first)
+      assert process.receive(deliveries, 10_000) == Ok(first.id)
+      send_duplicate_wakes(admin)
+      assert process.receive(deliveries, 1500) == Error(Nil)
+
+      let assert Ok(True) =
+        postgleam.query_one(
+          admin,
+          "SELECT pg_terminate_backend($1)",
+          [postgleam.int(first_listener_pid)],
+          {
+            use terminated <- decode.element(0, decode.bool)
+            decode.success(terminated)
+          },
+        )
+      let second =
+        fixture_on_topic("PgFault002XY", False, 401, "postgres-cluster-fault")
+      assert origin_messages.save(second) == Ok(second)
+      let assert Ok(second_listener_pid) =
+        wait_for_listener_pid(admin, listener_name, first_listener_pid, 100)
+      assert second_listener_pid != first_listener_pid
+      assert process.receive(deliveries, 10_000) == Ok(second.id)
+      send_duplicate_wakes(admin)
+      assert process.receive(deliveries, 1500) == Error(Nil)
+
+      process.kill(listener)
+      assert wait_for_process_stop(listener, 100)
+      process.trap_exits(False)
+      drop_test_database(database)
+    }
+  }
+}
+
 pub fn postgres_identity_setup_contract_test() {
   case test_database() {
     Error(_) -> Nil
@@ -850,6 +918,63 @@ fn receive_rate_decisions(subject, remaining: Int, accumulated) {
     _ -> {
       let assert Ok(decision) = process.receive(subject, 30_000)
       receive_rate_decisions(subject, remaining - 1, [decision, ..accumulated])
+    }
+  }
+}
+
+fn wait_for_listener_pid(
+  admin: postgleam.Connection,
+  application_name: String,
+  excluded_pid: Int,
+  remaining: Int,
+) -> Result(Int, Nil) {
+  case remaining {
+    0 -> Error(Nil)
+    _ ->
+      case
+        postgleam.query_one(
+          admin,
+          "SELECT COALESCE(MAX(pid), 0)::bigint FROM pg_stat_activity WHERE application_name = $1 AND pid <> $2",
+          [postgleam.text(application_name), postgleam.int(excluded_pid)],
+          {
+            use pid <- decode.element(0, decode.int)
+            decode.success(pid)
+          },
+        )
+      {
+        Ok(pid) if pid > 0 -> Ok(pid)
+        _ -> {
+          process.sleep(100)
+          wait_for_listener_pid(
+            admin,
+            application_name,
+            excluded_pid,
+            remaining - 1,
+          )
+        }
+      }
+  }
+}
+
+fn send_duplicate_wakes(admin: postgleam.Connection) -> Nil {
+  let assert Ok(_) =
+    postgleam.query(admin, "SELECT pg_notify('notify_events', $1)", [
+      postgleam.text("duplicate-a"),
+    ])
+  let assert Ok(_) =
+    postgleam.query(admin, "SELECT pg_notify('notify_events', $1)", [
+      postgleam.text("duplicate-b"),
+    ])
+  Nil
+}
+
+fn wait_for_process_stop(pid: process.Pid, remaining: Int) -> Bool {
+  case process.is_alive(pid), remaining {
+    False, _ -> True
+    True, 0 -> False
+    True, _ -> {
+      process.sleep(50)
+      wait_for_process_stop(pid, remaining - 1)
     }
   }
 }
