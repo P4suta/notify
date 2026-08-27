@@ -82,6 +82,7 @@ trap 'exit 130' INT
 trap 'exit 143' HUP TERM
 
 mkdir -p "$stage/packages/notify_core"
+: >"$stage/.notify-native-runtime-stage"
 for file in gleam.toml mix.exs mix.lock; do
   cp "$file" "$stage/$file"
 done
@@ -100,6 +101,7 @@ export MIX_ENV=prod
 cd "$stage"
 mix archive.check
 mix deps.get --only prod --check-locked
+"$root/packaging/native/stage_runtime_gleam_dependencies.sh" "$stage"
 elixir "$root/packaging/native/patch_burrito_launcher.exs" \
   deps/burrito/src/erlang_launcher.zig
 mix deps.compile

@@ -34,6 +34,7 @@ jobs:
       - name: Test locked inventory and license policy
         run: |
           python3 test/supply_chain_inventory_test.py
+          python3 test/native_http3_dependency_contract_test.py
           python3 test/refresh_locked_licenses_test.py
           python3 test/check_licenses_test.py
           python3 test/check_licenses.py --root .

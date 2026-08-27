@@ -48,8 +48,10 @@ jobs:
       - name: Validate scripts, JavaScript, and OpenAPI
         run: |
           test/syntax_check.sh
+          test/native_gleam_dependency_stage_test.sh
           test/native_zig_install_test.sh
           test/windows_nif_headers_test.sh
+          python3 test/native_http3_dependency_contract_test.py
           node --test test/pwa_contract_test.mjs test/cluster_soak_contract_test.mjs
           jq -e . priv/public/openapi.json >/dev/null
 

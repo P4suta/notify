@@ -42,6 +42,9 @@ defmodule Notify.MixProject do
       {:gleam_stdlib, "== 1.0.5"},
       # The Hex package is named hpack_erl, but it publishes the :hpack OTP app.
       {:hpack_erl, "== 0.3.0", app: false, override: true},
+      # Native builds resolve the same immutable repository revision as Gleam.
+      {:http3,
+       git: "https://github.com/P4suta/http3.git", ref: "48a8b3b0a609b7c33ff54c571c9c5935ad41336f"},
       {:mist, "== 6.0.3"},
       {:notify_core, path: "packages/notify_core"},
       {:postgleam, "== 0.8.0"},
