@@ -375,7 +375,9 @@ explicitly configured PostgreSQL, S3, Web Push endpoints, and mobile relay.
 gleam format --check src test packages/notify_core/src packages/notify_core/test
 test/lint.sh
 test/security_lint.sh
+test/native_gleam_dependency_stage_test.sh
 test/native_zig_install_test.sh
+python3 test/native_http3_dependency_contract_test.py
 python3 test/check_licenses.py --root .
 gleam test
 (cd packages/notify_core && gleam test)

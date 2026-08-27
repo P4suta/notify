@@ -20,15 +20,19 @@ With PowerShell on a supported Linux or macOS build host:
 ./packaging/native/build.ps1
 ```
 
-Outputs are written to `burrito_out/`. The scheduled/manual native workflow
-builds and runs every POSIX target on its matching standard runner. Linux
+Outputs are written to `burrito_out/`. The pull-request, main, scheduled, and
+manual native workflow builds and runs every POSIX target on its matching
+standard runner. Linux
 rebuilds the bcrypt, SQLite, and Argon2id NIFs in a digest-pinned Alpine image,
 rejects glibc symbol versions, and then packages them with Burrito's musl ERTS.
 The compiler receives the exact ERTS NIF headers from the selected host OTP
 rather than depending on an Erlang version inside the compiler image.
 
-The build first stages runtime source only, so Gleam test modules and their
-development-only dependencies are excluded. MixGleam 0.6.2 derives OTP
+The build first stages runtime source only, so Notify test modules and their
+development-only dependencies are excluded. The immutable `http3` Mix Git
+dependency is the same commit used by Gleam and the source SBOM; after fetching
+it, the temporary stage removes only the `http3` and nested `gleam_quic` test
+trees before compilation. MixGleam 0.6.2 derives OTP
 dependency names from Gleam package names, while `hpack_erl` publishes the
 `hpack` OTP application. The build validates both application files and
 atomically normalizes that single generated `mist.app` dependency before
