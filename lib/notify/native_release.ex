@@ -13,10 +13,114 @@ defmodule Notify.NativeRelease do
     :notify@core@message_json,
     :notify@core@topic
   ]
+  @runtime_dependency_modules %{
+    gleam_quic: [
+      :gleam_quic,
+      :"gleam_quic@client",
+      :"gleam_quic@server",
+      :gleam_quic_crypto_ffi,
+      :gleam_quic_tls_ffi,
+      :gleam_quic_udp_ffi
+    ],
+    http3: [
+      :http3,
+      :"http3@client",
+      :"http3@server",
+      :"http3@websocket",
+      :http3_address_ffi,
+      :http3_websocket_ffi
+    ]
+  }
+  @development_modules %{
+    gleam_quic: [:gleam_quic_test_ffi, :qlog_test_ffi],
+    http3: [
+      :gleam_quic_test_ffi,
+      :http3_benchmark_ffi,
+      :http3_diagnostic_ffi,
+      :http3_phase4_interop,
+      :http3_quicgo_interop,
+      :http3_test_ffi
+    ]
+  }
 
   def prepare_runtime_boot(release) do
     validate_notify_core!(release)
+    prune_development_modules!(release)
+    validate_runtime_dependencies!(release)
     normalize_hpack_boot(release)
+  end
+
+  defp prune_development_modules!(release) do
+    Enum.each(@development_modules, fn {application, development_modules} ->
+      [directory] =
+        release.path
+        |> Path.join("lib/#{application}-*/ebin")
+        |> Path.wildcard()
+
+      application_path = Path.join(directory, "#{application}.app")
+
+      properties =
+        case :file.consult(String.to_charlist(application_path)) do
+          {:ok, [{:application, ^application, configured}]} -> configured
+          _ -> raise "release contains invalid #{application} application metadata"
+        end
+
+      runtime_modules = Keyword.fetch!(properties, :modules) -- development_modules
+      updated = Keyword.put(properties, :modules, runtime_modules)
+      encoded = :io_lib.format(~c"~p.~n", [{:application, application, updated}])
+      File.write!(application_path, encoded)
+
+      Enum.each(development_modules, fn module ->
+        File.rm(Path.join(directory, Atom.to_string(module) <> ".beam"))
+      end)
+    end)
+  end
+
+  defp validate_runtime_dependencies!(release) do
+    Enum.each(@runtime_dependency_modules, fn {application, required_modules} ->
+      directories =
+        release.path
+        |> Path.join("lib/#{application}-*/ebin")
+        |> Path.wildcard()
+
+      directory =
+        case directories do
+          [path] -> path
+          _ -> raise "release must contain exactly one #{application} application directory"
+        end
+
+      application_path = Path.join(directory, "#{application}.app")
+
+      configured_modules =
+        case :file.consult(String.to_charlist(application_path)) do
+          {:ok, [{:application, ^application, properties}]} ->
+            Keyword.fetch!(properties, :modules)
+
+          _ ->
+            raise "release contains invalid #{application} application metadata"
+        end
+
+      Enum.each(required_modules, fn module ->
+        beam_path = Path.join(directory, Atom.to_string(module) <> ".beam")
+
+        unless File.regular?(beam_path) do
+          raise "release is missing #{application} runtime module #{module}"
+        end
+
+        if String.contains?(Atom.to_string(module), "@") and
+             module not in configured_modules do
+          raise "#{application}.app omits required runtime module #{module}"
+        end
+      end)
+
+      Enum.each(Map.fetch!(@development_modules, application), fn module ->
+        beam = Atom.to_string(module) <> ".beam"
+
+        if File.exists?(Path.join(directory, beam)) or module in configured_modules do
+          raise "release contains forbidden development module #{module}"
+        end
+      end)
+    end)
   end
 
   defp validate_notify_core!(release) do

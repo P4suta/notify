@@ -9,7 +9,8 @@
          monotonic_milliseconds/0, random_id/0,
          random_token_entropy/0, sha256_hex/1, sha256_hex_bytes/1,
          sha256_init/0, sha256_update/2, sha256_final_hex/1,
-         file_sha256/1, path_exists/1, read_binary_file/1, write_binary_file/2,
+         file_sha256/1, path_exists/1, read_binary_file/1,
+         certificate_der_from_pem/1, write_binary_file/2,
          attachment_ensure_directory/1, attachment_put/5, attachment_head/2,
          attachment_upload_begin/2, attachment_upload_write/3,
          attachment_upload_finish/6, attachment_upload_abort/2,
@@ -28,6 +29,7 @@
          s3_multipart_complete/4, s3_multipart_abort/3,
          s3_promote_staging/5,
          s3_health/1, valid_ip_address/1, same_ip_address/2,
+         mist_http_protocol/1,
          sqlite_backup/2, sqlite_verify/1, sqlite_restore/2,
          sqlite_process_lock/1, sqlite_process_unlock/1,
          sqlite_windows_tasklist_has_pid/2,
@@ -43,6 +45,16 @@ argv() ->
         undefined -> init:get_plain_arguments()
     end,
     [unicode:characters_to_binary(Arg) || Arg <- Arguments].
+
+%% Mist 6.0.3 represents an HTTP/2 request body with its internal Stream
+%% constructor. Notify pins that version and keeps this private adapter at the
+%% transport boundary so structured logs do not mislabel HTTP/2 as HTTP/1.1.
+mist_http_protocol({connection, {stream, _, _, _, _}, _, _, _}) ->
+    <<"h2">>;
+mist_http_protocol({connection, _, _, _, _}) ->
+    <<"http/1.1">>;
+mist_http_protocol(_) ->
+    <<"tcp">>.
 
 configure_tcp_clients() ->
     Existing = case application:get_env(kernel, inet_default_connect_options) of
@@ -935,6 +947,24 @@ read_binary_file(Path) ->
         {ok, Data} -> {ok, Data};
         {error, Reason} -> {error, atom_to_binary(Reason)}
     end.
+
+certificate_der_from_pem(Pem) when is_binary(Pem) ->
+    try public_key:pem_decode(Pem) of
+        Entries when is_list(Entries) -> first_certificate_der(Entries);
+        _ -> {error, <<"invalid_certificate">>}
+    catch
+        _:_ -> {error, <<"invalid_certificate">>}
+    end;
+certificate_der_from_pem(_) ->
+    {error, <<"invalid_certificate">>}.
+
+first_certificate_der([{'Certificate', Der, not_encrypted} | _])
+        when is_binary(Der) ->
+    {ok, Der};
+first_certificate_der([_ | Rest]) ->
+    first_certificate_der(Rest);
+first_certificate_der([]) ->
+    {error, <<"certificate_not_found">>}.
 
 write_binary_file(Path, Data) ->
     case file:write_file(binary_to_list(Path), Data, [binary, exclusive, sync]) of

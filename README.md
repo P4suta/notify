@@ -99,7 +99,10 @@ gleam run -- doctor --config notify.toml
 database and outbox writability, attachment-store read/write access, TLS file
 permissions, trusted-proxy policy, Web Push, relay configuration, cluster
 storage sharing, and (with PostgreSQL) host/database clock skew. It reports all
-failures in one run with an actionable `FIX` line and exits non-zero.
+failures in one run with an actionable `FIX` line and exits non-zero. When
+embedded HTTP/3 is enabled it also starts, or reaches an already-running,
+same-port UDP listener and performs a certificate-verified H3 `/healthz`
+request to the exact local address.
 
 Sensitive PostgreSQL, S3, Web Push, and relay credentials are accepted from
 environment variables and are never printed by `config show`. Request logs do
@@ -107,6 +110,41 @@ not include bodies, authorization headers, or query strings. Human log fields
 are quoted and escape control characters; JSON logs use structural encoding.
 Set `NOTIFY_LOG_FORMAT=json` for structured logs. Session CSRF digests are
 checked with constant-time binary comparison.
+
+### Transparent HTTP/3
+
+`http3.mode` accepts `auto` (the default), `required`, or `off`; the equivalent
+environment variable is `NOTIFY_HTTP3_MODE` and the CLI flag is
+`--http3-mode`. With certificate and key files configured, `auto` starts a QUIC
+listener on the same bind address and numeric port as Mist, using UDP while
+Mist retains TCP HTTP/1.1, HTTP/2, and conventional WebSocket compatibility.
+Without local TLS configuration, `auto` leaves embedded HTTP/3 off, which is
+the expected mode when a reverse proxy terminates TLS and HTTP/3.
+
+`required` fails startup and readiness when TLS, runtime crypto support, or
+the UDP listener is unavailable. `auto` keeps TCP serving and reports a
+degraded listener, retrying a failed UDP listener. `off` runs Mist only. A TCP
+response advertises `Alt-Svc: h3=":<port>"; ma=86400` only while the UDP
+listener is ready; every other state sends `Alt-Svc: clear`. Existing ntfy CLI,
+mobile, curl, EventSource, and HTTP/1.1 WebSocket clients need no transport
+setting. HTTP/3-capable clients may cache Alt-Svc and move automatically. A DNS
+HTTPS record can reduce discovery latency but is optional.
+
+QUIC transport Ping runs every 20 seconds, below the idle timeout, while the
+ntfy-visible JSON/raw/SSE/WebSocket keepalive remains 45 seconds. 0-RTT stays
+disabled. HTTP/3 rate limits and audit records use only the QUIC-validated peer
+IP; forwarded headers are ignored on this transport. Mist alone retains the
+configured trusted-proxy behavior. Normal logs omit peer ports, payload bodies,
+qlog, certificates, and keys.
+
+Container deployments must publish both protocols, for example
+`8080:8080/tcp` and `8080:8080/udp`. The shipped healthcheck intentionally
+continues to use TCP for compatibility. `/readyz`, detailed system health, and
+Prometheus metrics report the redacted HTTP/3 mode, state, UDP port, stream
+counters, failures, listener restarts, and loopback-probe result/counters. The
+detailed system health endpoint performs a fresh probe; `required` loses
+readiness on failure, while `auto` keeps the TCP compatibility path available
+and clears Alt-Svc until a probe succeeds again.
 
 Rate limits use continuously refilled token buckets keyed by the effective
 client IP. The default 60-second refill period has independent capacities for
@@ -345,6 +383,7 @@ gleam test
 (cd packages/notify_core && gleam run -m birdie help)
 (cd web && gleam test)
 gleam export erlang-shipment
+escript packaging/erlang_shipment/finalize.escript build/erlang-shipment
 docker build --check .
 docker build --tag notify:security .
 test/container_smoke.sh notify:security

@@ -8,6 +8,22 @@
       ],
       "source": "https://raw.githubusercontent.com/P4suta/gleam-mutants/21f2798f5b7eaebe6cdbb2067f38e35dac2b6b1d/gleam.toml"
     },
+    "pkg:github/P4suta/http3@073ebe18a500d3aecd817147d907890ff6d65cba": {
+      "commit": "073ebe18a500d3aecd817147d907890ff6d65cba",
+      "licenses": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "source": "https://raw.githubusercontent.com/P4suta/http3/073ebe18a500d3aecd817147d907890ff6d65cba/gleam.toml"
+    },
+    "pkg:github/P4suta/http3@073ebe18a500d3aecd817147d907890ff6d65cba#packages/gleam_quic": {
+      "commit": "073ebe18a500d3aecd817147d907890ff6d65cba",
+      "licenses": [
+        "Apache-2.0",
+        "MIT"
+      ],
+      "source": "https://raw.githubusercontent.com/P4suta/http3/073ebe18a500d3aecd817147d907890ff6d65cba/packages/gleam_quic/gleam.toml"
+    },
     "pkg:hex/argus@1.0.4": {
       "license_source": "contents.tar.gz/gleam.toml",
       "licenses": [

@@ -27,6 +27,17 @@ fn contract(store: attachment_store.Store) {
   assert partial.total_size == 6
   assert partial.start == 1
   assert partial.end == 3
+  let assert Ok(opened) =
+    store.open(stored.key, Some(attachment_store.ByteRange(1, 3)))
+  assert attachment_store.download_total_size(opened) == 6
+  assert attachment_store.download_start(opened) == 1
+  assert attachment_store.download_end(opened) == 3
+  assert attachment_store.read(opened, 2)
+    == Ok(attachment_store.DownloadChunk(<<"bc":utf8>>))
+  assert attachment_store.read(opened, 2)
+    == Ok(attachment_store.DownloadChunk(<<"d":utf8>>))
+  assert attachment_store.read(opened, 2) == Ok(attachment_store.DownloadEnd)
+  attachment_store.close(opened)
   assert store.get(stored.key, Some(attachment_store.ByteRange(4, 9)))
     == Error(attachment_store.InvalidRange)
 
@@ -158,6 +169,39 @@ pub fn filesystem_exposes_only_valid_content_addressed_blob_paths_test() {
     == Error(attachment_store.NotFound)
 }
 
+pub fn filesystem_download_cursor_pulls_at_most_one_mib_test() {
+  let assert Ok(directory) = filesystem.temporary_directory()
+  let content =
+    string.repeat("x", times: attachment_store.maximum_download_chunk_bytes * 2)
+    <> "tail"
+  let data = bit_array.from_string(content)
+  let assert Ok(store) =
+    filesystem.start(
+      directory,
+      max_file_bytes: 3_000_000,
+      max_total_bytes: 3_000_000,
+    )
+  let assert Ok(stored) = store.put(attachment_store.Upload(data, expires: 100))
+  let assert Ok(opened) = store.open(stored.key, None)
+  let assert Ok(attachment_store.DownloadChunk(first)) =
+    attachment_store.read(opened, attachment_store.maximum_download_chunk_bytes)
+  let assert Ok(attachment_store.DownloadChunk(second)) =
+    attachment_store.read(opened, attachment_store.maximum_download_chunk_bytes)
+  let assert Ok(attachment_store.DownloadChunk(tail)) =
+    attachment_store.read(opened, attachment_store.maximum_download_chunk_bytes)
+  assert bit_array.byte_size(first)
+    == attachment_store.maximum_download_chunk_bytes
+  assert bit_array.byte_size(second)
+    == attachment_store.maximum_download_chunk_bytes
+  assert tail == <<"tail":utf8>>
+  assert attachment_store.read(
+      opened,
+      attachment_store.maximum_download_chunk_bytes,
+    )
+    == Ok(attachment_store.DownloadEnd)
+  attachment_store.close(opened)
+}
+
 fn concurrent_quota_contract(store: attachment_store.Store) {
   let assert Ok(first) = store.begin(attachment_store.BeginUpload(100))
   let assert Ok(second) = store.begin(attachment_store.BeginUpload(100))
@@ -256,6 +300,18 @@ pub fn s3_compatible_attachment_store_contract_test() {
           Some(attachment_store.ByteRange(5_242_879, 5_242_881)),
         )
       assert boundary.data == <<"xyz":utf8>>
+      let assert Ok(boundary_cursor) =
+        multipart_store.open(
+          stored.key,
+          Some(attachment_store.ByteRange(5_242_879, 5_242_881)),
+        )
+      assert attachment_store.read(boundary_cursor, 2)
+        == Ok(attachment_store.DownloadChunk(<<"xy":utf8>>))
+      assert attachment_store.read(boundary_cursor, 2)
+        == Ok(attachment_store.DownloadChunk(<<"z":utf8>>))
+      assert attachment_store.read(boundary_cursor, 2)
+        == Ok(attachment_store.DownloadEnd)
+      attachment_store.close(boundary_cursor)
       let assert Ok(_) = multipart_store.delete(stored.key)
       orphan_grace_contract(multipart_store)
       management_page_contract(multipart_store)

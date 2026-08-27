@@ -7,6 +7,7 @@ import notify/audit.{type Store as AuditStore}
 import notify/cluster/health.{type Store as ClusterHealthStore}
 import notify/core/message.{type Message}
 import notify/delivery.{type Store as DeliveryStore}
+import notify/http3_listener
 import notify/rate_limit.{type Limiter}
 import notify/storage.{type Storage}
 import notify/webpush.{type Store as WebPushStore}
@@ -62,6 +63,7 @@ pub type Runtime {
     rate_limiter: Option(Limiter),
     audit: Option(AuditStore),
     cluster_health: Option(ClusterHealthStore),
+    http3: Option(http3_listener.Runtime),
     template_directory: String,
     committer: Committer,
   )
@@ -91,6 +93,7 @@ pub fn new(
     rate_limiter: None,
     audit: None,
     cluster_health: None,
+    http3: None,
     template_directory: "",
     committer: Committer(fn(message, _) {
       storage.save(message) |> result.map_error(CommitPersistence)
@@ -189,6 +192,13 @@ pub fn with_cluster_health(
   store: ClusterHealthStore,
 ) -> Runtime {
   Runtime(..runtime, cluster_health: Some(store))
+}
+
+pub fn with_http3(
+  runtime: Runtime,
+  listener: http3_listener.Runtime,
+) -> Runtime {
+  Runtime(..runtime, http3: Some(listener))
 }
 
 pub fn with_template_directory(runtime: Runtime, directory: String) -> Runtime {

@@ -10,6 +10,9 @@ packaging/*
 !packaging/native/
 packaging/native/*
 !packaging/native/compile_linux_nifs.sh
+!packaging/erlang_shipment/
+packaging/erlang_shipment/*
+!packaging/erlang_shipment/finalize.escript
 requirements
 scripts
 supply-chain

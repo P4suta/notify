@@ -251,6 +251,23 @@ pub fn admin_can_inspect_delivery_failures_without_payload_content_test() {
   assert !string.contains(body, "secret-endpoint")
 }
 
+pub fn detailed_health_reports_redacted_http3_probe_state_test() {
+  let #(runtime, setup_token) = managed_runtime()
+  complete_setup(runtime, setup_token)
+  let response =
+    admin_request(http.Get, "/api/v1/system/health", "")
+    |> router.handle(runtime)
+  // This fixture intentionally has no audit store, so detailed health is
+  // unavailable independently of the disabled HTTP/3 subsystem.
+  assert response.status == 503
+  let assert Ok(body) = bit_array.to_string(response.body)
+  assert string.contains(body, "\"loopback_probe\":\"not_applicable\"")
+  assert string.contains(body, "\"probe_successes\":0")
+  assert string.contains(body, "\"probe_failures\":0")
+  assert !string.contains(body, "certificate")
+  assert !string.contains(body, "private_key")
+}
+
 pub fn cluster_health_is_admin_only_redacted_and_keyset_paginated_test() {
   let #(initial, setup_token) = managed_runtime()
   let nodes = [

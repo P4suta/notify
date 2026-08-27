@@ -26,6 +26,44 @@ remains open.
   inactive for seven days is stale; cleanup may then compact acknowledged event
   rows after their messages have expired.
 
+## HTTP transport lifecycle
+
+Mist and embedded HTTP/3 share the router, authentication, rate limits,
+broker, storage, audit log, and ntfy encoders. Mist listens on TCP and HTTP/3
+listens on UDP at the same numeric port. `auto` requires local TLS before it
+attempts UDP; bind/listener failure degrades only HTTP/3 and schedules a retry.
+`required` makes the same failure close startup/readiness, while `off` never
+opens UDP.
+
+Alt-Svc is derived from live listener state, not configuration intent. Only a
+ready listener produces `h3=":<port>"; ma=86400`; starting, degraded, and off
+states produce `clear`. A listener crash removes the advertisement before its
+retry. DNS HTTPS records are an optional deployment optimization and must not
+advertise an endpoint the operator is not independently monitoring.
+
+Required startup, `notify doctor`, and the detailed system health endpoint
+perform a real bounded H3 GET to `/healthz`. The client dials the exact local
+listener address while retaining the configured public hostname for SNI and
+certificate identity verification. A failed probe clears Alt-Svc and is
+reported through redacted success/failure counters; it never enables an
+insecure TLS mode. The container's default healthcheck remains TCP for client
+compatibility.
+
+HTTP/3 subscriptions use pull/bounded transport queues and the same 128-event
+broker credit as Mist. JSON, raw, SSE, and RFC 9220 WebSocket streams do not
+have a cumulative response-body ceiling. Individual QUIC frames, unread bytes,
+mailboxes, flow-control windows, attachment reads, and operations remain
+finite. Attachments are sent in at most 1 MiB chunks and their download handle
+is closed on success or disconnect. Mist keeps filesystem sendfile for full
+and Range downloads.
+
+The H3 adapter derives client identity from QUIC path validation and never
+uses `Forwarded` or `X-Forwarded-For`; NAT rebinding and migration take effect
+only after the transport validates the new path. TCP proxy deployments retain
+the existing explicit trusted-proxy contract. A 20-second transport Ping keeps
+QUIC below its idle timeout without changing the application-visible
+45-second ntfy keepalive, and early data remains disabled.
+
 ## Live fan-out bounds
 
 Each node stores subscriber state by numeric subscription ID and maintains a

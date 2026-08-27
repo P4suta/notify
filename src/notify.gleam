@@ -98,6 +98,7 @@ fn print_help() -> Nil {
     "  --config PATH            TOML file (default: notify.toml)",
     "  --listen-host HOST       Bind address (default: 127.0.0.1)",
     "  --port PORT              HTTP port (default: 8080)",
+    "  --http3-mode MODE        HTTP/3: auto, required, or off (default: auto)",
     "  --database PATH          SQLite path (default: data/notify.db)",
     "  --retention-seconds N    Message cache retention (default: 43200)",
     "  --max-request-bytes N    Reject larger request bodies",

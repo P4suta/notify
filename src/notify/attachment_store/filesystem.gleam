@@ -112,6 +112,27 @@ pub fn start(
       get: fn(key, range) {
         process.call(subject, 30_000, fn(reply) { Get(key, range, reply) })
       },
+      open: fn(key, range) {
+        use metadata <- result.try(
+          process.call(subject, 10_000, fn(reply) { Head(key, reply) }),
+        )
+        use bounds <- result.try(attachment_store.download_bounds(
+          metadata.size,
+          range,
+        ))
+        Ok(
+          attachment_store.open_reader(
+            metadata.size,
+            bounds.0,
+            bounds.1,
+            fn(offset, length) {
+              attachment_read_range(directory, key, offset, offset + length - 1)
+              |> result.map_error(map_external_error)
+            },
+            fn() { Nil },
+          ),
+        )
+      },
       list: fn() { process.call(subject, 30_000, List) },
       page: fn(after, limit) {
         process.call(subject, 30_000, fn(reply) { Page(after, limit, reply) })

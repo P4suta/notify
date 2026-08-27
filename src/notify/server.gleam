@@ -1,4 +1,3 @@
-import gleam/bit_array
 import gleam/bytes_tree
 import gleam/erlang/process.{type Pid}
 import gleam/http
@@ -29,9 +28,13 @@ import notify/delivery/postgres as delivery_postgres
 import notify/delivery/relay as delivery_relay
 import notify/delivery/sqlite as delivery_sqlite
 import notify/delivery/worker as delivery_worker
+import notify/http/attachment_upload
+import notify/http/h3
 import notify/http/live
 import notify/http/rate_policy
 import notify/http/router
+import notify/http/transport
+import notify/http3_listener
 import notify/identity
 import notify/identity/postgres as identity_postgres
 import notify/identity/sqlite as identity_sqlite
@@ -56,6 +59,7 @@ pub type Error {
   StorageError(storage.Error)
   BrokerStartError(actor.StartError)
   HttpStartError(actor.StartError)
+  Http3StartError(http3_listener.StartError)
   DatabaseDirectoryError(String)
   IdentityStartError(identity.Error)
   AccessStartError(access.Error)
@@ -70,9 +74,14 @@ pub type Error {
 pub opaque type Started {
   Started(
     supervisor: Pid,
+    http3: http3_listener.Started,
     owned_processes: List(Pid),
     sqlite_lock: Option(sqlite_lock.Lock),
   )
+}
+
+type StartedServers {
+  StartedServers(supervisor: Pid, http3: http3_listener.Started)
 }
 
 type Persistence {
@@ -93,7 +102,8 @@ pub fn start(config: Config) -> Result(Started, Error) {
       case start_after_lock(config) {
         Ok(started) ->
           Ok(Started(
-            supervisor: started.pid,
+            supervisor: started.supervisor,
+            http3: started.http3,
             owned_processes: newly_linked_processes(existing_processes),
             sqlite_lock: sqlite_process_lock,
           ))
@@ -113,9 +123,7 @@ pub fn start(config: Config) -> Result(Started, Error) {
   outcome
 }
 
-fn start_after_lock(
-  config: Config,
-) -> Result(actor.Started(static_supervisor.Supervisor), Error) {
+fn start_after_lock(config: Config) -> Result(StartedServers, Error) {
   use persistence <- result.try(start_storage(config))
   let Persistence(persistent_storage, atomic_commit, postgres_adapter) =
     persistence
@@ -175,6 +183,19 @@ fn start_after_lock(
         ),
       )
   }
+  use http3_started <- result.try(
+    http3_listener.start(config, fn(http3_runtime, request) {
+      h3.handle(
+        request,
+        runtime.with_http3(runtime, http3_runtime),
+        bus,
+        config,
+      )
+    })
+    |> result.map_error(Http3StartError),
+  )
+  let runtime =
+    runtime.with_http3(runtime, http3_listener.runtime(http3_started))
   let body_too_large =
     response.new(413)
     |> response.set_header("content-type", "application/json; charset=utf-8")
@@ -187,6 +208,7 @@ fn start_after_lock(
   let http_server =
     mist.new(fn(request) {
       let started_at = monotonic_milliseconds()
+      let http_protocol = mist_http_protocol(request.body)
       let request_id = router.correlation_id(request)
       let client_ip = effective_client_ip(request, config.trusted_proxies)
       let request =
@@ -248,10 +270,16 @@ fn start_after_lock(
         client_ip:,
         method: http.method_to_string(request.method),
         target: "/" <> string.join(request.path_segments(request), "/"),
+        http_protocol:,
         status: reply.status,
         duration_ms: int.max(0, monotonic_milliseconds() - started_at),
       )
-      response.set_header(reply, "x-request-id", request_id)
+      reply
+      |> response.set_header("x-request-id", request_id)
+      |> response.set_header(
+        "alt-svc",
+        http3_listener.alt_svc(http3_listener.runtime(http3_started)),
+      )
     })
     |> mist.bind(config.bind)
     |> mist.port(config.port)
@@ -324,20 +352,25 @@ fn start_after_lock(
     }
     _, _ -> supervision
   }
-  use supervisor <- result.try(
-    static_supervisor.start(supervision) |> result.map_error(HttpStartError),
-  )
-  case setup_token {
-    None -> Nil
-    Some(token) ->
-      io.println(
-        "One-time setup URL (expires in 15 minutes): "
-        <> public_base_url(config)
-        <> "/setup?token="
-        <> token,
-      )
+  case static_supervisor.start(supervision) {
+    Error(error) -> {
+      http3_listener.stop(http3_started)
+      Error(HttpStartError(error))
+    }
+    Ok(supervisor) -> {
+      case setup_token {
+        None -> Nil
+        Some(token) ->
+          io.println(
+            "One-time setup URL (expires in 15 minutes): "
+            <> public_base_url(config)
+            <> "/setup?token="
+            <> token,
+          )
+      }
+      Ok(StartedServers(supervisor.pid, http3_started))
+    }
   }
-  Ok(supervisor)
 }
 
 /// Stop accepting new connections, wait for the supervised workers to stop,
@@ -346,7 +379,8 @@ fn start_after_lock(
 /// Returns `False` when the supervisor exceeded the deadline and had to be
 /// killed. The lock is still released after the forced stop completes.
 pub fn stop(started: Started, timeout_milliseconds: Int) -> Bool {
-  let Started(supervisor, owned_processes, sqlite_process_lock) = started
+  let Started(supervisor, http3, owned_processes, sqlite_process_lock) = started
+  http3_listener.stop(http3)
   let listener_stopped = shutdown_process(supervisor, timeout_milliseconds)
   let remaining_processes =
     list.filter(owned_processes, fn(pid) { pid != supervisor })
@@ -776,8 +810,6 @@ fn to_mist_response(reply: Response(BitArray)) -> Response(mist.ResponseData) {
   })
 }
 
-const attachment_stream_chunk_bytes = 1_048_576
-
 fn stream_attachment(
   request: request.Request(mist.Connection),
   store: attachment_store.Store,
@@ -788,66 +820,24 @@ fn stream_attachment(
     Error(_) ->
       Error(attachment_store.Unavailable("request body stream is malformed"))
     Ok(consume) ->
-      case store.begin(attachment_store.BeginUpload(expires:)) {
-        Error(error) -> Error(error)
-        Ok(handle) ->
-          consume_attachment(consume, store, handle, maximum_request_bytes, 0)
-      }
-  }
-}
-
-fn consume_attachment(
-  consume: fn(Int) -> Result(mist.Chunk, mist.ReadError),
-  store: attachment_store.Store,
-  handle: attachment_store.UploadHandle,
-  maximum_request_bytes: Int,
-  bytes_read: Int,
-) -> Result(attachment_store.Stored, attachment_store.Error) {
-  case consume(attachment_stream_chunk_bytes) {
-    Error(_) ->
-      abort_attachment(
+      attachment_upload.consume(
+        transport.body_reader(
+          consume,
+          fn(consume, maximum_bytes) {
+            case consume(maximum_bytes) {
+              Error(_) -> Error(transport.BodyUnavailable)
+              Ok(mist.Done) -> Ok(#(transport.BodyEnd, consume))
+              Ok(mist.Chunk(chunk, next)) ->
+                Ok(#(transport.BodyChunk(chunk), next))
+            }
+          },
+          fn(_) { Nil },
+        ),
         store,
-        handle,
-        attachment_store.Unavailable("request body stream was interrupted"),
+        expires,
+        maximum_request_bytes,
       )
-    Ok(mist.Done) ->
-      case store.finish(handle) {
-        Ok(stored) -> Ok(stored)
-        Error(error) -> abort_attachment(store, handle, error)
-      }
-    Ok(mist.Chunk(chunk, next)) -> {
-      let actual = bytes_read + bit_array.byte_size(chunk)
-      case actual > maximum_request_bytes {
-        True ->
-          abort_attachment(
-            store,
-            handle,
-            attachment_store.TooLarge(maximum_request_bytes, actual),
-          )
-        False ->
-          case store.write(handle, chunk) {
-            Error(error) -> abort_attachment(store, handle, error)
-            Ok(_) ->
-              consume_attachment(
-                next,
-                store,
-                handle,
-                maximum_request_bytes,
-                actual,
-              )
-          }
-      }
-    }
   }
-}
-
-fn abort_attachment(
-  store: attachment_store.Store,
-  handle: attachment_store.UploadHandle,
-  error: attachment_store.Error,
-) -> Result(attachment_store.Stored, attachment_store.Error) {
-  let _ = store.abort(handle)
-  Error(error)
 }
 
 fn filesystem_download(
@@ -953,6 +943,7 @@ pub fn error_message(error: Error) -> String {
       "unsupported database schema: " <> detail
     BrokerStartError(_) -> "live subscription broker could not start"
     HttpStartError(_) -> "HTTP listener could not start"
+    Http3StartError(_) -> "HTTP/3 listener could not start"
     DatabaseDirectoryError(path) ->
       "cannot create the database directory for " <> path
     IdentityStartError(identity.Unavailable(detail)) ->
@@ -1021,6 +1012,9 @@ fn ensure_parent(path: String) -> Result(Nil, Nil)
 
 @external(erlang, "notify_ffi", "monotonic_milliseconds")
 fn monotonic_milliseconds() -> Int
+
+@external(erlang, "notify_ffi", "mist_http_protocol")
+fn mist_http_protocol(connection: mist.Connection) -> String
 
 @external(erlang, "notify_ffi", "shutdown_process")
 fn shutdown_process(pid: Pid, timeout_milliseconds: Int) -> Bool

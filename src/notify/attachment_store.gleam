@@ -36,6 +36,22 @@ pub type Download {
   Download(data: BitArray, total_size: Int, start: Int, end: Int)
 }
 
+/// One finite pull from an open attachment download.
+pub type DownloadRead {
+  DownloadChunk(BitArray)
+  DownloadEnd
+}
+
+type DownloadSource
+
+/// An explicitly closeable attachment download cursor.
+pub opaque type DownloadHandle {
+  DownloadHandle(source: DownloadSource, total_size: Int, start: Int, end: Int)
+}
+
+/// Maximum chunk accepted by the cross-transport download port.
+pub const maximum_download_chunk_bytes = 1_048_576
+
 pub type Error {
   TooLarge(limit: Int, actual: Int)
   QuotaExceeded(limit: Int)
@@ -54,12 +70,104 @@ pub type Store {
     put: fn(Upload) -> Result(Stored, Error),
     head: fn(String) -> Result(Stored, Error),
     get: fn(String, Option(ByteRange)) -> Result(Download, Error),
+    open: fn(String, Option(ByteRange)) -> Result(DownloadHandle, Error),
     list: fn() -> Result(List(Stored), Error),
     page: fn(Option(String), Int) -> Result(Page(Stored), Error),
     delete: fn(String) -> Result(Nil, Error),
     cleanup: fn(Int) -> Result(Int, Error),
     health: fn() -> Result(Nil, Error),
   )
+}
+
+/// Open a cursor over a backend download without changing its range metadata.
+pub fn open_download(download: Download) -> DownloadHandle {
+  DownloadHandle(
+    source: open_binary_download(download.data),
+    total_size: download.total_size,
+    start: download.start,
+    end: download.end,
+  )
+}
+
+/// Open a bounded pull cursor backed by a range reader.
+///
+/// `read_at` is invoked only with a positive length no greater than the
+/// caller's requested chunk size. The cursor owns the offset and invokes
+/// `cleanup` when it is closed or when its opening process terminates.
+pub fn open_reader(
+  total_size: Int,
+  start: Int,
+  end: Int,
+  read_at: fn(Int, Int) -> Result(BitArray, Error),
+  cleanup: fn() -> Nil,
+) -> DownloadHandle {
+  DownloadHandle(
+    source: open_range_download(read_at, cleanup, start, end),
+    total_size:,
+    start:,
+    end:,
+  )
+}
+
+/// Resolve and validate the inclusive bounds for an attachment download.
+pub fn download_bounds(
+  total_size: Int,
+  range: Option(ByteRange),
+) -> Result(#(Int, Int), Error) {
+  case total_size, range {
+    0, None -> Ok(#(0, -1))
+    0, Some(_) -> Error(InvalidRange)
+    _, _ -> {
+      let #(start, end) = case range {
+        None -> #(0, total_size - 1)
+        Some(ByteRange(start, end)) -> #(start, end)
+      }
+      case start < 0 || end < start || end >= total_size {
+        True -> Error(InvalidRange)
+        False -> Ok(#(start, end))
+      }
+    }
+  }
+}
+
+/// Read at most one MiB from an open attachment cursor.
+pub fn read(
+  handle: DownloadHandle,
+  maximum_bytes: Int,
+) -> Result(DownloadRead, Error) {
+  case maximum_bytes >= 1 && maximum_bytes <= maximum_download_chunk_bytes {
+    False ->
+      Error(Unavailable(
+        "attachment download chunk must be between 1 byte and 1 MiB",
+      ))
+    True ->
+      case read_binary_download(handle.source, maximum_bytes) {
+        Error(_) -> Error(Unavailable("attachment download stream unavailable"))
+        Ok(#(1, bytes)) -> Ok(DownloadChunk(bytes))
+        Ok(#(2, _)) -> Ok(DownloadEnd)
+        Ok(_) -> Error(Unavailable("attachment download stream unavailable"))
+      }
+  }
+}
+
+/// Idempotently close an attachment download and release backend resources.
+pub fn close(handle: DownloadHandle) -> Nil {
+  close_binary_download(handle.source)
+}
+
+/// Return the complete object size before range selection.
+pub fn download_total_size(handle: DownloadHandle) -> Int {
+  handle.total_size
+}
+
+/// Return the inclusive first byte selected for this download.
+pub fn download_start(handle: DownloadHandle) -> Int {
+  handle.start
+}
+
+/// Return the inclusive final byte selected for this download.
+pub fn download_end(handle: DownloadHandle) -> Int {
+  handle.end
 }
 
 pub fn put_in_chunks(
@@ -173,3 +281,23 @@ fn sha256_final_hex(hasher: Hasher) -> String
 
 @external(erlang, "notify_ffi", "random_id")
 fn random_id() -> String
+
+@external(erlang, "notify_attachment_stream_ffi", "open_binary")
+fn open_binary_download(data: BitArray) -> DownloadSource
+
+@external(erlang, "notify_attachment_stream_ffi", "open_reader")
+fn open_range_download(
+  read_at: fn(Int, Int) -> Result(BitArray, Error),
+  cleanup: fn() -> Nil,
+  start: Int,
+  end: Int,
+) -> DownloadSource
+
+@external(erlang, "notify_attachment_stream_ffi", "read")
+fn read_binary_download(
+  source: DownloadSource,
+  maximum_bytes: Int,
+) -> Result(#(Int, BitArray), String)
+
+@external(erlang, "notify_attachment_stream_ffi", "close")
+fn close_binary_download(source: DownloadSource) -> Nil

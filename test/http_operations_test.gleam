@@ -51,6 +51,11 @@ pub fn liveness_readiness_and_prometheus_endpoints_are_distinct_test() {
   assert string.contains(body, "notify_scheduled_messages 0")
   assert string.contains(body, "notify_event_log_entries 0")
   assert string.contains(body, "notify_audit_up 1")
+  assert string.contains(body, "notify_http3_loopback_probe_up 0")
+  assert string.contains(
+    body,
+    "notify_http3_loopback_probes_total{result=\"success\"} 0",
+  )
 }
 
 pub fn prometheus_reports_delivery_jobs_by_kind_and_state_test() {
