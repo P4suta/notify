@@ -3,12 +3,15 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
 import gleam/string
+import http3
+import http3/server as h3_server
 import notify/access
 import notify/attachment_store
 import notify/config.{type Config}
 import notify/delivery
 import notify/delivery/postgres as delivery_postgres
 import notify/delivery/sqlite as delivery_sqlite
+import notify/http3_listener
 import notify/identity
 import notify/identity/postgres as identity_postgres
 import notify/identity/sqlite as identity_sqlite
@@ -49,6 +52,7 @@ pub fn run(configuration: Config) -> List(Diagnostic) {
   |> list.append(delivery_checks(configuration))
   |> list.append(webpush_checks(configuration))
   |> list.append(tls_checks(configuration))
+  |> list.append(http3_probe_checks(configuration))
   |> list.append([clock_for_configuration(configuration, now())])
 }
 
@@ -59,6 +63,7 @@ pub fn static_checks(configuration: Config) -> List(Diagnostic) {
     base_url_check(configuration),
     cluster_check(configuration),
     trusted_proxy_check(configuration),
+    http3_check(configuration),
     optional_check(
       "TLS",
       !string.is_empty(configuration.tls_certificate),
@@ -78,6 +83,119 @@ pub fn static_checks(configuration: Config) -> List(Diagnostic) {
       "disabled",
     ),
   ]
+}
+
+fn http3_check(configuration: Config) -> Diagnostic {
+  let tls_configured =
+    !string.is_empty(configuration.tls_certificate)
+    && !string.is_empty(configuration.tls_key)
+  case
+    http3_listener.startup_policy(
+      configuration.http3_mode,
+      tls_configured,
+      http3.is_supported(),
+    )
+  {
+    http3_listener.DoNotStart(http3_listener.Disabled) ->
+      informational("HTTP/3", "disabled by http3.mode")
+    http3_listener.DoNotStart(http3_listener.TlsNotConfigured) ->
+      informational(
+        "HTTP/3",
+        "auto mode is off because TLS terminates elsewhere or is not configured",
+      )
+    http3_listener.StartOptional ->
+      passed(
+        "HTTP/3",
+        "runtime crypto is available; startup will probe the same-numbered UDP port",
+      )
+    http3_listener.StartRequired ->
+      passed(
+        "HTTP/3",
+        "required mode has TLS and runtime crypto; UDP bind is fail-closed at startup",
+      )
+    http3_listener.ContinueDegraded(_) ->
+      Diagnostic(
+        Warning,
+        "HTTP/3",
+        "runtime crypto is unavailable; TCP will continue with Alt-Svc: clear",
+        Some("use a supported OTP crypto runtime or set http3.mode = \"off\""),
+      )
+    http3_listener.FailStartup(_) ->
+      failed(
+        "HTTP/3",
+        "required mode cannot start with the current TLS or runtime capability",
+        "configure readable TLS credentials and a supported OTP crypto runtime",
+      )
+    http3_listener.DoNotStart(_) ->
+      failed(
+        "HTTP/3",
+        "HTTP/3 startup policy is invalid",
+        "review http3.mode and TLS configuration",
+      )
+  }
+}
+
+fn http3_probe_checks(configuration: Config) -> List(Diagnostic) {
+  let tls_configured =
+    !string.is_empty(configuration.tls_certificate)
+    && !string.is_empty(configuration.tls_key)
+  case
+    http3_listener.startup_policy(
+      configuration.http3_mode,
+      tls_configured,
+      http3.is_supported(),
+    )
+  {
+    http3_listener.StartOptional | http3_listener.StartRequired -> [
+      http3_probe_check(configuration),
+    ]
+    _ -> []
+  }
+}
+
+fn http3_probe_check(configuration: Config) -> Diagnostic {
+  let outcome = case
+    http3_listener.start(configuration, fn(_, request) {
+      h3_server.respond(request, 200, [], <<>>) |> result.is_ok
+    })
+  {
+    Ok(started) -> {
+      let outcome = case http3_listener.probe(http3_listener.runtime(started)) {
+        http3_listener.ProbeNotApplicable ->
+          http3_listener.probe_configuration(configuration)
+        outcome -> outcome
+      }
+      http3_listener.stop(started)
+      outcome
+    }
+    Error(_) -> http3_listener.probe_configuration(configuration)
+  }
+  case outcome, configuration.http3_mode {
+    http3_listener.ProbeSucceeded, _ ->
+      passed(
+        "HTTP/3 loopback",
+        "certificate-verified HTTP/3 GET reached the same-numbered UDP listener",
+      )
+    http3_listener.ProbeFailed, config.Http3Auto ->
+      Diagnostic(
+        Warning,
+        "HTTP/3 loopback",
+        "the local HTTP/3 request could not complete; TCP remains available",
+        Some(
+          "verify the TLS identity, local UDP bind policy, and firewall, then rerun `notify doctor`",
+        ),
+      )
+    http3_listener.ProbeFailed, config.Http3Required ->
+      failed(
+        "HTTP/3 loopback",
+        "the required local HTTP/3 request could not complete",
+        "verify the TLS identity, local UDP bind policy, and firewall, then rerun `notify doctor`",
+      )
+    http3_listener.ProbeNotApplicable, _ ->
+      informational("HTTP/3 loopback", "not applicable in the current mode")
+    _, _ ->
+      informational("HTTP/3 loopback", "not applicable in the current mode")
+  }
 }
 
 pub fn clock_check(local_time: Int, reference_time: Option(Int)) -> Diagnostic {

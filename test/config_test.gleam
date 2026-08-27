@@ -224,6 +224,33 @@ pub fn tls_and_trusted_proxy_configuration_is_typed_test() {
   assert config.validate(incomplete) == Error(config.InvalidTlsConfiguration)
 }
 
+pub fn http3_mode_is_typed_precedence_aware_and_redacted_test() {
+  let assert Ok(toml) = config.parse_toml("[http3]\nmode = \"required\"\n")
+  let environment =
+    config.Partial(..config.empty_partial(), http3_mode: Some(config.Http3Off))
+  let flags =
+    config.Partial(..config.empty_partial(), http3_mode: Some(config.Http3Auto))
+  let resolved = config.resolve(config.defaults(), toml, environment, flags)
+  assert resolved.http3_mode == config.Http3Auto
+  assert string.contains(config.to_toml(resolved), "[http3]\nmode = \"auto\"")
+
+  let required_without_tls =
+    config.Config(..config.defaults(), http3_mode: config.Http3Required)
+  assert config.validate(required_without_tls) == Error(config.Http3RequiresTls)
+
+  let required =
+    config.Config(
+      ..required_without_tls,
+      tls_certificate: "certificate.pem",
+      tls_key: "key.pem",
+    )
+  assert config.validate(required) == Ok(required)
+
+  let assert Ok(off) =
+    config.load(["--config", "/missing-notify-config", "--http3-mode", "off"])
+  assert off.http3_mode == config.Http3Off
+}
+
 pub fn request_limits_follow_toml_environment_flag_precedence_test() {
   let assert Ok(toml) =
     config.parse_toml(

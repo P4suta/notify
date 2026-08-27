@@ -188,6 +188,76 @@ packages = [
         self.assertEqual(npm["licenses"], [{"license": {"id": "MPL-2.0"}}])
         self.assertEqual(npm["scope"], "optional")
 
+    def test_includes_external_local_gleam_dependencies_in_sbom_only(self) -> None:
+        with tempfile.TemporaryDirectory() as external_directory:
+            external = Path(external_directory)
+            (external / "gleam.toml").write_text(
+                'name = "http3"\nversion = "0.1.0"\nlicences = ["MIT", "Apache-2.0"]\n',
+                encoding="utf-8",
+            )
+            manifest = (self.root / "manifest.toml").read_text(encoding="utf-8")
+            (self.root / "manifest.toml").write_text(
+                manifest.replace(
+                    "]\n",
+                    f'  {{ name = "http3", version = "0.1.0", source = "local", path = "{external.as_posix()}" }},\n]\n',
+                ),
+                encoding="utf-8",
+            )
+
+            inventory = supply_chain_inventory.collect_inventory(self.root)
+            local = next(component for component in inventory if component.name == "http3")
+            self.assertEqual(local.purl, "pkg:generic/http3@0.1.0")
+            self.assertEqual(local.licenses, ("Apache-2.0", "MIT"))
+            osv_packages = supply_chain_inventory.osv_document(inventory)["results"][0][
+                "packages"
+            ]
+            self.assertNotIn(
+                {"ecosystem": "Local", "name": "http3", "version": "0.1.0"},
+                [entry["package"] for entry in osv_packages],
+            )
+            bom = supply_chain_inventory.cyclonedx_document(self.root, inventory)
+            entry = next(
+                component
+                for component in bom["components"]
+                if component["purl"] == "pkg:generic/http3@0.1.0"
+            )
+            self.assertIn(
+                {"name": "notify:inventory:mutable-local", "value": "true"},
+                entry["properties"],
+            )
+
+    def test_distinguishes_git_subpackages_from_the_repository_root(self) -> None:
+        commit = "dddddddddddddddddddddddddddddddddddddddd"
+        common = {
+            "version": "0.1.0",
+            "source": "git",
+            "repo": "https://github.com/P4suta/http3.git",
+            "commit": commit,
+        }
+
+        root = supply_chain_inventory._github_component(
+            {**common, "name": "http3"}, "manifest.toml"
+        )
+        subpackage = supply_chain_inventory._github_component(
+            {**common, "name": "gleam_quic", "path": "packages/gleam_quic"},
+            "manifest.toml",
+        )
+
+        self.assertEqual(root.purl, f"pkg:github/P4suta/http3@{commit}")
+        self.assertEqual(
+            subpackage.purl,
+            f"pkg:github/P4suta/http3@{commit}#packages/gleam_quic",
+        )
+
+        with self.assertRaisesRegex(
+            supply_chain_inventory.InventoryError,
+            "invalid git dependency subpath",
+        ):
+            supply_chain_inventory._github_component(
+                {**common, "name": "gleam_quic", "path": "../gleam_quic"},
+                "manifest.toml",
+            )
+
     def test_rejects_a_missing_mix_lock(self) -> None:
         (self.root / "mix.lock").unlink()
 

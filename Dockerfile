@@ -15,12 +15,15 @@ RUN gleam run -m lustre/dev build \
       --minify=true --no-html=true --no-tailwind=true \
       --outdir=../priv/public
 WORKDIR /source
-RUN gleam export erlang-shipment
+RUN gleam export erlang-shipment \
+  && escript packaging/erlang_shipment/finalize.escript build/erlang-shipment
 
 FROM erlang:29-alpine@sha256:77074ad338ad7303c2f127eb686759721dffbff952f7c8db162bb4adac1e1e1c AS runtime
 RUN apk add --no-cache \
       ca-certificates=20260611-r0 \
+      libcrypto3=3.5.8-r0 \
       libgcc=15.2.0-r2 \
+      libssl3=3.5.8-r0 \
       libstdc++=15.2.0-r2 \
   && addgroup -S -g 10001 notify \
   && adduser -S -u 10001 -G notify -h /app notify \
@@ -30,7 +33,7 @@ COPY --from=build --chown=notify:notify /source/build/erlang-shipment /app
 USER 10001:10001
 WORKDIR /app
 VOLUME ["/data"]
-EXPOSE 8080
+EXPOSE 8080/tcp 8080/udp
 ENV NOTIFY_DATABASE_PATH=/data/notify.db \
     NOTIFY_ATTACHMENT_DIRECTORY=/data/attachments \
     NOTIFY_LOG_FORMAT=json

@@ -26,6 +26,7 @@ import notify/http/auth as http_auth
 import notify/http/compat_account
 import notify/http/filter_params
 import notify/http/parameter as http_parameter
+import notify/http3_listener
 import notify/runtime.{type Runtime}
 import notify/service
 import notify/since
@@ -83,6 +84,159 @@ pub fn streamed_attachment(
       })
     _, _, _, _ -> None
   }
+}
+
+/// A transport-neutral attachment download decision.
+pub type AttachmentDownloadPlan {
+  AttachmentDownloadResponse(Response(BitArray))
+  AttachmentDownloadStream(
+    status: Int,
+    headers: List(#(String, String)),
+    handle: attachment_store.DownloadHandle,
+  )
+}
+
+/// Prepare a validated GET attachment for chunked transports.
+///
+/// Mist retains its dedicated filesystem sendfile path. HTTP/3 uses this
+/// plan so storage is read through the explicit open/read/close port.
+pub fn streamed_download(
+  req: Request(BitArray),
+  runtime: Runtime,
+) -> Option(AttachmentDownloadPlan) {
+  case req.method, request.path_segments(req) {
+    Get, ["file", topic_name, key, filename] ->
+      Some(prepare_streamed_download(
+        req,
+        topic_name,
+        key,
+        Some(filename),
+        runtime,
+      ))
+    Get, ["file", topic_name, key] ->
+      Some(prepare_streamed_download(req, topic_name, key, None, runtime))
+    _, _ -> None
+  }
+}
+
+fn prepare_streamed_download(
+  req: Request(BitArray),
+  topic_name: String,
+  key: String,
+  filename: Option(String),
+  runtime: Runtime,
+) -> AttachmentDownloadPlan {
+  case topic_or_error(topic_name), runtime.attachments {
+    Error(reply), _ -> AttachmentDownloadResponse(reply)
+    _, None ->
+      AttachmentDownloadResponse(ntfy_error(
+        404,
+        40_401,
+        "attachment not found",
+        ntfy_docs,
+      ))
+    Ok(parsed_topic), Some(store) ->
+      case authorize_request(req, [parsed_topic], acl.Read, runtime) {
+        Error(reply) -> AttachmentDownloadResponse(reply)
+        Ok(Nil) ->
+          prepare_authorized_streamed_download(
+            req,
+            parsed_topic,
+            key,
+            filename,
+            runtime,
+            store,
+          )
+      }
+  }
+}
+
+fn prepare_authorized_streamed_download(
+  req: Request(BitArray),
+  parsed_topic: topic.Topic,
+  key: String,
+  filename: Option(String),
+  runtime: Runtime,
+  store: attachment_store.Store,
+) -> AttachmentDownloadPlan {
+  case attachment_store.valid_content_key(key) {
+    False ->
+      AttachmentDownloadResponse(ntfy_error(
+        404,
+        40_401,
+        "attachment not found",
+        ntfy_docs,
+      ))
+    True ->
+      case runtime.storage.has_attachment(parsed_topic, key) {
+        Ok(False) ->
+          AttachmentDownloadResponse(ntfy_error(
+            404,
+            40_401,
+            "attachment not found",
+            ntfy_docs,
+          ))
+        Error(_) -> AttachmentDownloadResponse(attachment_unavailable())
+        Ok(True) ->
+          case store.head(key) {
+            Error(attachment_store.NotFound) ->
+              AttachmentDownloadResponse(ntfy_error(
+                404,
+                40_401,
+                "attachment not found",
+                ntfy_docs,
+              ))
+            Error(_) -> AttachmentDownloadResponse(attachment_unavailable())
+            Ok(metadata) ->
+              open_streamed_download(req, key, filename, metadata.size, store)
+          }
+      }
+  }
+}
+
+fn open_streamed_download(
+  req: Request(BitArray),
+  key: String,
+  filename: Option(String),
+  total: Int,
+  store: attachment_store.Store,
+) -> AttachmentDownloadPlan {
+  let etag = "\"" <> key <> "\""
+  let filename = attachment_download_name(filename)
+  case matches_etag(request.get_header(req, "if-none-match"), etag) {
+    True ->
+      AttachmentDownloadResponse(
+        response.new(304)
+        |> response.set_header("etag", etag)
+        |> response.set_header("cache-control", "private, max-age=3600")
+        |> response.set_body(<<>>),
+      )
+    False ->
+      case parse_range(request.get_header(req, "range"), total) {
+        Error(_) -> AttachmentDownloadResponse(range_not_satisfiable(total))
+        Ok(range) ->
+          case store.open(key, range) {
+            Error(attachment_store.InvalidRange) ->
+              AttachmentDownloadResponse(range_not_satisfiable(total))
+            Error(attachment_store.NotFound) ->
+              AttachmentDownloadResponse(ntfy_error(
+                404,
+                40_401,
+                "attachment not found",
+                ntfy_docs,
+              ))
+            Error(_) -> AttachmentDownloadResponse(attachment_unavailable())
+            Ok(handle) -> {
+              let head = attachment_head_response(total, range, etag, filename)
+              AttachmentDownloadStream(head.status, head.headers, handle)
+            }
+          }
+      }
+  }
+}
+
+fn attachment_unavailable() -> Response(BitArray) {
+  ntfy_error(503, 50_301, "attachment storage unavailable", ntfy_docs)
 }
 
 pub fn correlation_id(req: Request(body)) -> String {
@@ -1895,26 +2049,40 @@ fn with_authorization(
   runtime: Runtime,
   next: fn() -> Response(BitArray),
 ) -> Response(BitArray) {
+  case authorize_request(req, topics, operation, runtime) {
+    Ok(Nil) -> next()
+    Error(reply) -> reply
+  }
+}
+
+fn authorize_request(
+  req: Request(body),
+  topics: List(topic.Topic),
+  operation: acl.Operation,
+  runtime: Runtime,
+) -> Result(Nil, Response(BitArray)) {
   let runtime.Clock(now) = runtime.clock
   case
     operation == acl.Write
     && http_auth.uses_session(req)
     && !http_auth.valid_csrf(req)
   {
-    True -> ntfy_error(403, 40_303, "CSRF token required", ntfy_docs)
+    True -> Error(ntfy_error(403, 40_303, "CSRF token required", ntfy_docs))
     False ->
       case http_auth.check(req, runtime.access, topics, operation, now()) {
-        Ok(_) -> next()
+        Ok(_) -> Ok(Nil)
         Error(http_auth.MalformedCredentials)
         | Error(http_auth.Unauthenticated) ->
-          ntfy_error(401, 40_101, "unauthorized", auth_docs)
-          |> response.set_header("www-authenticate", "Basic realm=\"notify\"")
+          Error(
+            ntfy_error(401, 40_101, "unauthorized", auth_docs)
+            |> response.set_header("www-authenticate", "Basic realm=\"notify\""),
+          )
         Error(http_auth.Forbidden) ->
-          ntfy_error(403, 40_303, "forbidden", ntfy_docs)
+          Error(ntfy_error(403, 40_303, "forbidden", ntfy_docs))
         Error(http_auth.SetupRequired) ->
-          ntfy_error(503, 50_301, "server setup is required", ntfy_docs)
+          Error(ntfy_error(503, 50_301, "server setup is required", ntfy_docs))
         Error(http_auth.Unavailable) ->
-          ntfy_error(503, 50_301, "authorization unavailable", ntfy_docs)
+          Error(ntfy_error(503, 50_301, "authorization unavailable", ntfy_docs))
       }
   }
 }
@@ -1963,7 +2131,16 @@ fn runtime_ready(runtime: Runtime) -> Bool {
     None -> False
     Some(store) -> store.health() |> result.is_ok
   }
-  storage_ok && attachments_ok && deliveries_ok && webpush_ok && audit_ok
+  let http3_ok = case runtime.http3 {
+    None -> True
+    Some(listener) -> http3_listener.readiness(listener)
+  }
+  storage_ok
+  && attachments_ok
+  && deliveries_ok
+  && webpush_ok
+  && audit_ok
+  && http3_ok
 }
 
 fn metrics(runtime: Runtime) -> Response(BitArray) {
@@ -1985,6 +2162,62 @@ fn metrics(runtime: Runtime) -> Response(BitArray) {
         True -> 1
         False -> 0
       }
+  }
+  let http3_metrics = case runtime.http3 {
+    None ->
+      "\n# HELP notify_http3_listener_up Whether the embedded HTTP/3 listener is ready.\n# TYPE notify_http3_listener_up gauge\nnotify_http3_listener_up 0\n# HELP notify_http3_loopback_probe_up Whether the most recent certificate-verified local H3 probe succeeded.\n# TYPE notify_http3_loopback_probe_up gauge\nnotify_http3_loopback_probe_up 0\n# HELP notify_http3_loopback_probes_total Local H3 probe outcomes.\n# TYPE notify_http3_loopback_probes_total counter\nnotify_http3_loopback_probes_total{result=\"success\"} 0\nnotify_http3_loopback_probes_total{result=\"failure\"} 0\n"
+    Some(listener) -> {
+      let http3_listener.Snapshot(
+        state:,
+        udp_port:,
+        accepted_streams:,
+        active_streams:,
+        completed_streams:,
+        failed_streams:,
+        listener_restarts:,
+        probe_successes:,
+        probe_failures:,
+        last_probe_succeeded:,
+        ..,
+      ) = http3_listener.snapshot(listener)
+      let listener_up = case state {
+        http3_listener.Ready -> 1
+        _ -> 0
+      }
+      let probe_up = case last_probe_succeeded {
+        Some(True) -> 1
+        _ -> 0
+      }
+      "\n# HELP notify_http3_listener_up Whether the embedded HTTP/3 listener is ready.\n"
+      <> "# TYPE notify_http3_listener_up gauge\nnotify_http3_listener_up "
+      <> int.to_string(listener_up)
+      <> "\n# HELP notify_http3_udp_port Bound embedded HTTP/3 UDP port.\n"
+      <> "# TYPE notify_http3_udp_port gauge\nnotify_http3_udp_port "
+      <> int.to_string(option.unwrap(udp_port, 0))
+      <> "\n# HELP notify_http3_streams HTTP/3 stream lifecycle counters.\n"
+      <> "# TYPE notify_http3_streams gauge\n"
+      <> "notify_http3_streams{state=\"accepted\"} "
+      <> int.to_string(accepted_streams)
+      <> "\nnotify_http3_streams{state=\"active\"} "
+      <> int.to_string(active_streams)
+      <> "\nnotify_http3_streams{state=\"completed\"} "
+      <> int.to_string(completed_streams)
+      <> "\nnotify_http3_streams{state=\"failed\"} "
+      <> int.to_string(failed_streams)
+      <> "\n# HELP notify_http3_listener_restarts HTTP/3 listener recovery count.\n"
+      <> "# TYPE notify_http3_listener_restarts counter\nnotify_http3_listener_restarts "
+      <> int.to_string(listener_restarts)
+      <> "\n# HELP notify_http3_loopback_probe_up Whether the most recent certificate-verified local H3 probe succeeded.\n"
+      <> "# TYPE notify_http3_loopback_probe_up gauge\nnotify_http3_loopback_probe_up "
+      <> int.to_string(probe_up)
+      <> "\n# HELP notify_http3_loopback_probes_total Local H3 probe outcomes.\n"
+      <> "# TYPE notify_http3_loopback_probes_total counter\n"
+      <> "notify_http3_loopback_probes_total{result=\"success\"} "
+      <> int.to_string(probe_successes)
+      <> "\nnotify_http3_loopback_probes_total{result=\"failure\"} "
+      <> int.to_string(probe_failures)
+      <> "\n"
+    }
   }
   let body =
     "# HELP notify_up Whether all readiness dependencies are healthy.\n"
@@ -2017,6 +2250,7 @@ fn metrics(runtime: Runtime) -> Response(BitArray) {
     <> "\nnotify_delivery_jobs{kind=\"mobile_relay\",state=\"dead_letter\"} "
     <> int.to_string(delivery_statistics.mobile_relay_dead_letter)
     <> "\n"
+    <> http3_metrics
   text_response(body, 200, "text/plain; version=0.0.4; charset=utf-8")
 }
 

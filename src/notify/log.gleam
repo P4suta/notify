@@ -16,12 +16,14 @@ pub fn request_line(
   client_ip client_ip: String,
   method method: String,
   target target: String,
+  http_protocol http_protocol: String,
   status status: Int,
   duration_ms duration_ms: Int,
 ) -> String {
   let request_id = single_line(request_id)
   let client_ip = single_line(client_ip)
   let method = single_line(method)
+  let http_protocol = single_line(http_protocol)
   let path = target |> without_query |> single_line
   case format {
     Json ->
@@ -32,6 +34,7 @@ pub fn request_line(
         #("request_id", json.string(request_id)),
         #("client_ip", json.string(client_ip)),
         #("method", json.string(method)),
+        #("http_protocol", json.string(http_protocol)),
         #("path", json.string(path)),
         #("status", json.int(status)),
         #("duration_ms", json.int(duration_ms)),
@@ -46,6 +49,8 @@ pub fn request_line(
       <> human_field(client_ip)
       <> " method="
       <> human_field(method)
+      <> " http_protocol="
+      <> human_field(http_protocol)
       <> " path="
       <> human_field(path)
       <> " status="
@@ -62,6 +67,7 @@ pub fn request(
   client_ip client_ip: String,
   method method: String,
   target target: String,
+  http_protocol http_protocol: String,
   status status: Int,
   duration_ms duration_ms: Int,
 ) -> Nil {
@@ -72,6 +78,7 @@ pub fn request(
     client_ip:,
     method:,
     target:,
+    http_protocol:,
     status:,
     duration_ms:,
   )

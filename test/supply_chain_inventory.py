@@ -122,6 +122,23 @@ def _github_component(package: dict[str, Any], source: str) -> Component:
         f"pkg:github/{quote(owner, safe='')}/{quote(repository_name, safe='')}"
         f"@{quote(commit, safe='')}"
     )
+    subpath = package.get("path")
+    if subpath is not None:
+        if not isinstance(subpath, str):
+            raise InventoryError(
+                f"invalid git dependency subpath in {source}: {subpath!r}"
+            )
+        segments = subpath.split("/")
+        if (
+            not subpath
+            or subpath.startswith("/")
+            or "\\" in subpath
+            or any(segment in ("", ".", "..") for segment in segments)
+        ):
+            raise InventoryError(
+                f"invalid git dependency subpath in {source}: {subpath!r}"
+            )
+        purl = f"{purl}#{'/'.join(quote(segment, safe='') for segment in segments)}"
     return Component(
         name=name,
         version=commit,
@@ -130,6 +147,48 @@ def _github_component(package: dict[str, Any], source: str) -> Component:
         sources=(source,),
         repository=canonical_repository,
         commit=commit,
+    )
+
+
+def _local_component(
+    root: Path, package: dict[str, Any], source: str
+) -> Component | None:
+    name = package.get("name")
+    version = package.get("version")
+    local_path = package.get("path")
+    if not all(
+        isinstance(value, str) and value for value in (name, version, local_path)
+    ):
+        raise InventoryError(f"incomplete local dependency in {source}: {package!r}")
+
+    package_root = (root / local_path).resolve()
+    try:
+        package_root.relative_to(root.resolve())
+        # Packages inside Notify are part of the root component, not third-party
+        # dependencies. External workspace packages must remain visible in a
+        # development SBOM until their immutable Git lock is available.
+        return None
+    except ValueError:
+        pass
+
+    manifest_path = package_root / "gleam.toml"
+    manifest = _read_toml(manifest_path)
+    if manifest.get("name") != name or manifest.get("version") != version:
+        raise InventoryError(
+            f"local dependency identity does not match {manifest_path}: {name}@{version}"
+        )
+    licenses = _normalise_licenses(
+        manifest.get("licenses", manifest.get("licences"))
+    )
+    if not licenses:
+        raise InventoryError(f"local dependency has no declared licenses: {name}")
+    return Component(
+        name=name,
+        version=version,
+        ecosystem="Local",
+        purl=f"pkg:generic/{quote(name, safe='')}@{quote(version, safe='')}",
+        sources=(source,),
+        licenses=licenses,
     )
 
 
@@ -147,6 +206,11 @@ def _collect_gleam(
                 raise InventoryError(f"invalid package in {relative_path}: {package!r}")
             source = package.get("source")
             if source == "local":
+                component = _local_component(
+                    root, package, relative_path.as_posix()
+                )
+                if component is not None:
+                    _add_component(components, component)
                 continue
             name = package.get("name")
             version = package.get("version")
@@ -391,6 +455,10 @@ def collect_inventory(
 def osv_document(inventory: list[Component]) -> dict[str, Any]:
     packages: list[dict[str, Any]] = []
     for component in inventory:
+        if component.ecosystem == "Local":
+            # A mutable development checkout has no trustworthy OSV identity.
+            # It remains in CycloneDX and becomes queryable after a Git SHA pin.
+            continue
         if component.ecosystem == "Git":
             package = {
                 "name": component.repository,
@@ -442,6 +510,13 @@ def cyclonedx_document(root: Path, inventory: list[Component]) -> dict[str, Any]
             ]
         if component.sha256 is not None:
             entry["hashes"] = [{"alg": "SHA-256", "content": component.sha256}]
+        if component.ecosystem == "Local":
+            entry["properties"].append(
+                {
+                    "name": "notify:inventory:mutable-local",
+                    "value": "true",
+                }
+            )
         components.append(entry)
 
     return {

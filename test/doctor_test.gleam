@@ -49,6 +49,7 @@ pub fn static_checks_describe_cluster_and_optional_services_test() {
   assert list_has(checks, "base URL", doctor.Pass)
   assert list_has(checks, "cluster", doctor.Pass)
   assert list_has(checks, "trusted proxy", doctor.Pass)
+  assert list_has(checks, "HTTP/3", doctor.Pass)
   assert list_has(checks, "Web Push", doctor.Pass)
   assert list_has(checks, "mobile relay", doctor.Pass)
 }

@@ -14,11 +14,13 @@ import notify/access
 import notify/attachment_store
 import notify/audit
 import notify/cluster/health as cluster_health_model
+import notify/config
 import notify/core/acl
 import notify/delivery
 import notify/http/audit_log
 import notify/http/auth
 import notify/http/cursor
+import notify/http3_listener
 import notify/identity
 import notify/runtime.{type Runtime}
 import notify/security/token
@@ -748,8 +750,27 @@ fn system_health(runtime: Runtime) -> Response(BitArray) {
     None -> False
     Some(store) -> store.health() |> result.is_ok
   }
+  let http3_probe = case runtime.http3 {
+    None -> http3_listener.ProbeNotApplicable
+    Some(listener) -> http3_listener.probe(listener)
+  }
+  let http3_ok = case runtime.http3 {
+    None -> True
+    Some(listener) ->
+      case http3_listener.snapshot(listener) {
+        http3_listener.Snapshot(mode: config.Http3Required, ..) ->
+          http3_listener.readiness(listener)
+          && http3_probe == http3_listener.ProbeSucceeded
+        _ -> http3_listener.readiness(listener)
+      }
+  }
   let healthy =
-    storage_ok && attachment_ok && delivery_ok && webpush_ok && audit_ok
+    storage_ok
+    && attachment_ok
+    && delivery_ok
+    && webpush_ok
+    && audit_ok
+    && http3_ok
   json_response(
     case healthy {
       True -> 200
@@ -799,9 +820,68 @@ fn system_health(runtime: Runtime) -> Response(BitArray) {
           Some(_) -> "configured"
         }),
       ),
+      #("http3", http3_health(runtime.http3, http3_probe)),
       #("compatibility", json.string("ntfy v2.27.0")),
     ]),
   )
+}
+
+fn http3_health(
+  listener: Option(http3_listener.Runtime),
+  probe: http3_listener.ProbeResult,
+) -> json.Json {
+  case listener {
+    None ->
+      json.object([
+        #("mode", json.string("off")),
+        #("state", json.string("off")),
+        #("reason", json.string("not_started")),
+        #("udp_port", json.null()),
+        #("accepted_streams", json.int(0)),
+        #("active_streams", json.int(0)),
+        #("completed_streams", json.int(0)),
+        #("failed_streams", json.int(0)),
+        #("listener_restarts", json.int(0)),
+        #("loopback_probe", json.string(http3_listener.probe_string(probe))),
+        #("probe_successes", json.int(0)),
+        #("probe_failures", json.int(0)),
+        #("last_probe_succeeded", json.null()),
+      ])
+    Some(listener) -> {
+      let http3_listener.Snapshot(
+        mode:,
+        state:,
+        reason:,
+        udp_port:,
+        accepted_streams:,
+        active_streams:,
+        completed_streams:,
+        failed_streams:,
+        listener_restarts:,
+        probe_successes:,
+        probe_failures:,
+        last_probe_succeeded:,
+      ) = http3_listener.snapshot(listener)
+      json.object([
+        #("mode", json.string(config.http3_mode_string(mode))),
+        #("state", json.string(http3_listener.state_string(state))),
+        #("reason", json.string(http3_listener.reason_string(reason))),
+        #("udp_port", json.nullable(udp_port, json.int)),
+        #("accepted_streams", json.int(accepted_streams)),
+        #("active_streams", json.int(active_streams)),
+        #("completed_streams", json.int(completed_streams)),
+        #("failed_streams", json.int(failed_streams)),
+        #("listener_restarts", json.int(listener_restarts)),
+        #("loopback_probe", json.string(http3_listener.probe_string(probe))),
+        #("probe_successes", json.int(probe_successes)),
+        #("probe_failures", json.int(probe_failures)),
+        #(
+          "last_probe_succeeded",
+          json.nullable(last_probe_succeeded, json.bool),
+        ),
+      ])
+    }
+  }
 }
 
 fn cluster_health(

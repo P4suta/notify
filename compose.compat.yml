@@ -93,7 +93,8 @@ services:
       NOTIFY_WEBPUSH_PRIVATE_KEY: yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw
       NOTIFY_WEBPUSH_SUBSCRIBER: admin@example.test
     ports:
-      - "18081:8080"
+      - "18081:8080/tcp"
+      - "18081:8080/udp"
     volumes:
       - notify-compat-data:/data
 

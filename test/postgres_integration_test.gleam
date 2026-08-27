@@ -1028,6 +1028,26 @@ pub fn postgres_attachment_streaming_and_quota_contract_test() {
           Some(attachment_store.ByteRange(1_048_575, 1_048_576)),
         )
       assert chunk_boundary.data == <<"xx":utf8>>
+      let assert Ok(chunk_cursor) = chunked_blobs.open(chunked.key, None)
+      let assert Ok(attachment_store.DownloadChunk(first_chunk)) =
+        attachment_store.read(
+          chunk_cursor,
+          attachment_store.maximum_download_chunk_bytes,
+        )
+      let assert Ok(attachment_store.DownloadChunk(last_byte)) =
+        attachment_store.read(
+          chunk_cursor,
+          attachment_store.maximum_download_chunk_bytes,
+        )
+      assert bit_array.byte_size(first_chunk)
+        == attachment_store.maximum_download_chunk_bytes
+      assert last_byte == <<"x":utf8>>
+      assert attachment_store.read(
+          chunk_cursor,
+          attachment_store.maximum_download_chunk_bytes,
+        )
+        == Ok(attachment_store.DownloadEnd)
+      attachment_store.close(chunk_cursor)
       assert chunked_blobs.cleanup(200) == Ok(1)
 
       let assert Ok(quota_a) =

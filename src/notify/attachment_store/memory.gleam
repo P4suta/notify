@@ -110,6 +110,10 @@ pub fn start(
       get: fn(key, range) {
         process.call(subject, 5000, fn(reply) { Get(key, range, reply) })
       },
+      open: fn(key, range) {
+        process.call(subject, 5000, fn(reply) { Get(key, range, reply) })
+        |> result.map(attachment_store.open_download)
+      },
       list: fn() { process.call(subject, 5000, List) },
       page: fn(after, limit) {
         process.call(subject, 5000, fn(reply) { Page(after, limit, reply) })

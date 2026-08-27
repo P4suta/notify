@@ -3,7 +3,8 @@ services:
   notify:
     build: .
     ports:
-      - "8080:8080"
+      - "8080:8080/tcp"
+      - "8080:8080/udp"
     environment:
       NOTIFY_BIND: 0.0.0.0
       NOTIFY_BASE_URL: http://localhost:8080

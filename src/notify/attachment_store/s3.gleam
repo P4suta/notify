@@ -67,6 +67,7 @@ type Command {
     Option(attachment_store.ByteRange),
     Subject(Result(attachment_store.Download, attachment_store.Error)),
   )
+  ReadRange(String, Int, Int, Subject(Result(BitArray, attachment_store.Error)))
   List(Subject(Result(List(attachment_store.Stored), attachment_store.Error)))
   Page(
     Option(String),
@@ -119,6 +120,28 @@ pub fn start(
       },
       get: fn(key, range) {
         process.call(subject, 60_000, fn(reply) { Get(key, range, reply) })
+      },
+      open: fn(key, range) {
+        use metadata <- result.try(
+          process.call(subject, 30_000, fn(reply) { Head(key, reply) }),
+        )
+        use bounds <- result.try(attachment_store.download_bounds(
+          metadata.size,
+          range,
+        ))
+        Ok(
+          attachment_store.open_reader(
+            metadata.size,
+            bounds.0,
+            bounds.1,
+            fn(offset, length) {
+              process.call(subject, 60_000, fn(reply) {
+                ReadRange(key, offset, length, reply)
+              })
+            },
+            fn() { Nil },
+          ),
+        )
       },
       list: fn() { process.call(subject, 60_000, List) },
       page: fn(after, limit) {
@@ -184,6 +207,17 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
     }
     Get(key, range, reply) -> {
       process.send(reply, get(state.config, key, range))
+      actor.continue(state)
+    }
+    ReadRange(key, offset, length, reply) -> {
+      let response =
+        get(
+          state.config,
+          key,
+          Some(attachment_store.ByteRange(offset, offset + length - 1)),
+        )
+        |> result.map(fn(download) { download.data })
+      process.send(reply, response)
       actor.continue(state)
     }
     List(reply) -> {

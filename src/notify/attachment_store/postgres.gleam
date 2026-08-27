@@ -60,6 +60,7 @@ type Command {
     Option(attachment_store.ByteRange),
     Subject(Result(attachment_store.Download, attachment_store.Error)),
   )
+  ReadRange(String, Int, Int, Subject(Result(BitArray, attachment_store.Error)))
   List(Subject(Result(List(attachment_store.Stored), attachment_store.Error)))
   Page(
     Option(String),
@@ -171,6 +172,28 @@ fn start_actor(state: State) -> Result(Store, attachment_store.Error) {
       get: fn(key, range) {
         process.call(subject, 30_000, fn(reply) { Get(key, range, reply) })
       },
+      open: fn(key, range) {
+        use metadata <- result.try(
+          process.call(subject, 30_000, fn(reply) { Head(key, reply) }),
+        )
+        use bounds <- result.try(attachment_store.download_bounds(
+          metadata.size,
+          range,
+        ))
+        Ok(
+          attachment_store.open_reader(
+            metadata.size,
+            bounds.0,
+            bounds.1,
+            fn(offset, length) {
+              process.call(subject, 30_000, fn(reply) {
+                ReadRange(key, offset, length, reply)
+              })
+            },
+            fn() { Nil },
+          ),
+        )
+      },
       list: fn() { process.call(subject, 30_000, List) },
       page: fn(after, limit) {
         process.call(subject, 30_000, fn(reply) { Page(after, limit, reply) })
@@ -215,6 +238,8 @@ fn handle_ready(state: State, command: Command) -> actor.Next(State, Command) {
     Head(key, reply) -> respond(state, reply, head(state.connection, key))
     Get(key, range, reply) ->
       respond(state, reply, get(state.connection, key, range))
+    ReadRange(key, offset, length, reply) ->
+      respond(state, reply, read_range(state.connection, key, offset, length))
     List(reply) -> respond(state, reply, list_objects(state.connection))
     Page(after, limit, reply) ->
       respond(state, reply, page_objects(state.connection, after, limit))
@@ -258,6 +283,7 @@ fn reject_command(
     Put(_, reply) -> process.send(reply, Error(error))
     Head(_, reply) -> process.send(reply, Error(error))
     Get(_, _, reply) -> process.send(reply, Error(error))
+    ReadRange(_, _, _, reply) -> process.send(reply, Error(error))
     List(reply) -> process.send(reply, Error(error))
     Page(_, _, reply) -> process.send(reply, Error(error))
     Delete(_, reply) -> process.send(reply, Error(error))
@@ -841,6 +867,69 @@ fn read_chunks(
   })
   |> result.map(fn(response) { response.rows })
   |> result.map_error(map_error)
+}
+
+fn read_range(
+  connection: postgleam.Connection,
+  key: String,
+  start: Int,
+  length: Int,
+) -> Result(BitArray, attachment_store.Error) {
+  let end = start + length - 1
+  use chunks <- result.try(read_chunk_range(connection, key, start, end))
+  let data = chunks |> list.map(fn(chunk) { chunk.1 }) |> bit_array.concat
+  case bit_array.byte_size(data) == length {
+    True -> Ok(data)
+    False -> read_legacy_range(connection, key, start, length)
+  }
+}
+
+fn read_chunk_range(
+  connection: postgleam.Connection,
+  key: String,
+  start: Int,
+  end: Int,
+) -> Result(List(#(Int, BitArray)), attachment_store.Error) {
+  postgleam.query_with(
+    connection,
+    "SELECT GREATEST(byte_offset, $2), substring(data FROM (GREATEST(byte_offset, $2) - byte_offset + 1)::integer FOR (LEAST(byte_offset + octet_length(data) - 1, $3) - GREATEST(byte_offset, $2) + 1)::integer) FROM notify_attachment_chunks WHERE key = $1 AND byte_offset <= $3 AND byte_offset + octet_length(data) > $2 ORDER BY byte_offset",
+    [postgleam.text(key), postgleam.int(start), postgleam.int(end)],
+    {
+      use byte_offset <- decode.element(0, decode.int)
+      use data <- decode.element(1, decode.bytea)
+      decode.success(#(byte_offset, data))
+    },
+  )
+  |> result.map(fn(response) { response.rows })
+  |> result.map_error(map_error)
+}
+
+fn read_legacy_range(
+  connection: postgleam.Connection,
+  key: String,
+  start: Int,
+  length: Int,
+) -> Result(BitArray, attachment_store.Error) {
+  use response <- result.try(
+    postgleam.query_with(
+      connection,
+      "SELECT substring(data FROM ($2 + 1)::integer FOR $3::integer) FROM notify_attachments WHERE key = $1",
+      [postgleam.text(key), postgleam.int(start), postgleam.int(length)],
+      {
+        use data <- decode.element(0, decode.bytea)
+        decode.success(data)
+      },
+    )
+    |> result.map_error(map_error),
+  )
+  use data <- result.try(response.rows |> one_or_not_found)
+  case bit_array.byte_size(data) == length {
+    True -> Ok(data)
+    False ->
+      Error(attachment_store.Unavailable(
+        "PostgreSQL attachment chunks are incomplete",
+      ))
+  }
 }
 
 fn legacy_data(

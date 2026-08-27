@@ -29,6 +29,12 @@ pub type LogFormat {
   JsonLogs
 }
 
+pub type Http3Mode {
+  Http3Auto
+  Http3Required
+  Http3Off
+}
+
 pub type Config {
   Config(
     bind: String,
@@ -73,6 +79,7 @@ pub type Config {
     relay_token: String,
     tls_certificate: String,
     tls_key: String,
+    http3_mode: Http3Mode,
     trusted_proxies: List(String),
     log_format: LogFormat,
   )
@@ -122,6 +129,7 @@ pub type Partial {
     relay_token: Option(String),
     tls_certificate: Option(String),
     tls_key: Option(String),
+    http3_mode: Option(Http3Mode),
     trusted_proxies: Option(List(String)),
     log_format: Option(LogFormat),
   )
@@ -144,6 +152,7 @@ pub type Error {
   InvalidWebPushConfiguration
   InvalidRelayConfiguration
   InvalidTlsConfiguration
+  Http3RequiresTls
   InvalidTrustedProxy(String)
   InvalidInteger(String, String)
   InvalidBoolean(String, String)
@@ -195,6 +204,7 @@ pub fn defaults() -> Config {
     relay_token: "",
     tls_certificate: "",
     tls_key: "",
+    http3_mode: Http3Auto,
     trusted_proxies: [],
     log_format: HumanLogs,
   )
@@ -244,6 +254,7 @@ pub fn empty_partial() -> Partial {
     relay_token: None,
     tls_certificate: None,
     tls_key: None,
+    http3_mode: None,
     trusted_proxies: None,
     log_format: None,
   )
@@ -496,6 +507,12 @@ pub fn resolve(
       toml.tls_key,
       defaults.tls_key,
     ),
+    http3_mode: choose(
+      flags.http3_mode,
+      environment.http3_mode,
+      toml.http3_mode,
+      defaults.http3_mode,
+    ),
     trusted_proxies: choose(
       flags.trusted_proxies,
       environment.trusted_proxies,
@@ -633,6 +650,8 @@ fn validate_transport(config: Config) -> Result(Config, Error) {
   let key_present = !string.is_empty(string.trim(config.tls_key))
   case certificate_present != key_present {
     True -> Error(InvalidTlsConfiguration)
+    False if config.http3_mode == Http3Required && !certificate_present ->
+      Error(Http3RequiresTls)
     False ->
       case
         list.find(config.trusted_proxies, fn(address) {
@@ -912,6 +931,9 @@ fn set_toml_value(
     "tls.certificate" | "tls.cert" ->
       Ok(Partial(..partial, tls_certificate: Some(unquote(raw_value))))
     "tls.key" -> Ok(Partial(..partial, tls_key: Some(unquote(raw_value))))
+    "http3.mode" ->
+      parse_http3_mode(raw_value)
+      |> result.map(fn(value) { Partial(..partial, http3_mode: Some(value)) })
     "proxy.trusted" | "server.trusted_proxies" ->
       Ok(
         Partial(
@@ -994,6 +1016,12 @@ fn from_environment() -> Result(Partial, Error) {
     |> option.map(parse_log_format)
     |> transpose,
   )
+  use http3_mode <- result.try(
+    getenv("NOTIFY_HTTP3_MODE")
+    |> option.from_result
+    |> option.map(parse_http3_mode)
+    |> transpose,
+  )
   use s3_path_style <- result.try(optional_env_bool("NOTIFY_S3_PATH_STYLE"))
   use attachment_file_size <- result.try(optional_env_int(
     "NOTIFY_ATTACHMENT_FILE_SIZE_BYTES",
@@ -1058,6 +1086,7 @@ fn from_environment() -> Result(Partial, Error) {
     ),
     tls_certificate: getenv("NOTIFY_TLS_CERTIFICATE") |> option.from_result,
     tls_key: getenv("NOTIFY_TLS_KEY") |> option.from_result,
+    http3_mode:,
     trusted_proxies: getenv("NOTIFY_TRUSTED_PROXIES")
       |> option.from_result
       |> option.map(parse_address_list),
@@ -1271,6 +1300,10 @@ fn parse_flag_loop(
       parse_flag_loop(rest, Partial(..partial, tls_certificate: Some(value)))
     ["--tls-key", value, ..rest] ->
       parse_flag_loop(rest, Partial(..partial, tls_key: Some(value)))
+    ["--http3-mode", value, ..rest] -> {
+      use mode <- result.try(parse_http3_mode(value))
+      parse_flag_loop(rest, Partial(..partial, http3_mode: Some(mode)))
+    }
     ["--trusted-proxies", value, ..rest] ->
       parse_flag_loop(
         rest,
@@ -1351,6 +1384,18 @@ fn parse_log_format(raw: String) -> Result(LogFormat, Error) {
     "json" -> Ok(JsonLogs)
     value ->
       Error(InvalidToml("logging.format must be human or json, got " <> value))
+  }
+}
+
+fn parse_http3_mode(raw: String) -> Result(Http3Mode, Error) {
+  case raw |> unquote |> string.lowercase {
+    "auto" -> Ok(Http3Auto)
+    "required" -> Ok(Http3Required)
+    "off" -> Ok(Http3Off)
+    value ->
+      Error(InvalidToml(
+        "http3.mode must be auto, required, or off, got " <> value,
+      ))
   }
 }
 
@@ -1442,6 +1487,8 @@ pub fn to_toml(config: Config) -> String {
   <> config.tls_certificate
   <> "\"\nkey = \""
   <> config.tls_key
+  <> "\"\n\n[http3]\nmode = \""
+  <> http3_mode_string(config.http3_mode)
   <> "\"\n\n[proxy]\ntrusted = \""
   <> string.join(config.trusted_proxies, ", ")
   <> "\""
@@ -1479,6 +1526,14 @@ fn log_format_string(value: LogFormat) -> String {
   case value {
     HumanLogs -> "human"
     JsonLogs -> "json"
+  }
+}
+
+pub fn http3_mode_string(value: Http3Mode) -> String {
+  case value {
+    Http3Auto -> "auto"
+    Http3Required -> "required"
+    Http3Off -> "off"
   }
 }
 
@@ -1534,6 +1589,8 @@ pub fn error_message(error: Error) -> String {
       "mobile relay requires an http(s) relay.url and an explicit server.base_url"
     InvalidTlsConfiguration ->
       "TLS requires both tls.certificate and tls.key; configure both paths or neither"
+    Http3RequiresTls ->
+      "http3.mode=required requires both tls.certificate and tls.key"
     InvalidTrustedProxy(address) ->
       "proxy.trusted contains an invalid IP address: " <> address
     InvalidInteger(name, value) -> name <> " must be an integer, got " <> value

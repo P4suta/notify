@@ -55,7 +55,11 @@ defmodule Notify.MixProject do
       notify: [
         steps: [:assemble, &Notify.NativeRelease.prepare_runtime_boot/1, &Burrito.wrap/1],
         strip_beams: false,
-        applications: [hpack: :permanent],
+        applications: [
+          gleam_quic: :permanent,
+          hpack: :permanent,
+          http3: :permanent
+        ],
         burrito: [
           targets: [
             linux_amd64: [os: :linux, cpu: :x86_64],
