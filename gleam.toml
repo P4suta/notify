@@ -1,5 +1,5 @@
 name = "notify"
-version = "0.1.0"
+version = "0.2.0"
 target = "erlang"
 description = "A self-hosted ntfy-compatible notification server written in Gleam"
 licences = ["Apache-2.0"]
