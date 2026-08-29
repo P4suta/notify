@@ -11,6 +11,7 @@ const files = {
     import.meta.url,
   ),
   rootGleam: new URL("../gleam.toml", import.meta.url),
+  rootManifest: new URL("../manifest.toml", import.meta.url),
   rootMix: new URL("../mix.exs", import.meta.url),
   coreGleam: new URL("../packages/notify_core/gleam.toml", import.meta.url),
   coreMix: new URL("../packages/notify_core/mix.exs", import.meta.url),
@@ -21,6 +22,10 @@ const tomlVersion = (contents) =>
   contents.match(/^version = "([^"]+)"$/m)?.[1];
 const mixVersion = (contents) =>
   contents.match(/^\s+version: "([^"]+)",/m)?.[1];
+const lockedCoreVersion = (contents) =>
+  contents.match(
+    /\{ name = "notify_core", version = "([^"]+)"[^\n]+source = "local"/,
+  )?.[1];
 
 test("release-please uses a pinned action with least required write access", async () => {
   const workflow = await readFile(files.workflow, "utf8");
@@ -45,7 +50,8 @@ test("one manifest release updates every bundled project version", async () => {
   assert.equal(config["release-type"], "elixir");
   assert.equal(config["include-component-in-tag"], false);
   assert.equal(config["include-v-in-tag"], true);
-  assert.deepEqual(manifest, { ".": "0.1.0" });
+  assert.match(manifest["."], /^\d+\.\d+\.\d+$/);
+  assert.deepEqual(Object.keys(manifest), ["."]);
 
   const extraFiles = config.packages["."]["extra-files"];
   assert.deepEqual(
@@ -53,13 +59,23 @@ test("one manifest release updates every bundled project version", async () => {
     [
       "gleam.toml",
       "packages/notify_core/gleam.toml",
+      "manifest.toml",
       "packages/notify_core/mix.exs",
       "web/gleam.toml",
     ],
   );
+  assert.deepEqual(
+    extraFiles.find(({ path }) => path === "manifest.toml"),
+    {
+      type: "toml",
+      path: "manifest.toml",
+      jsonpath: "$.packages[?(@.name == 'notify_core')].version",
+    },
+  );
 
   const contents = await Promise.all([
     readFile(files.rootGleam, "utf8"),
+    readFile(files.rootManifest, "utf8"),
     readFile(files.rootMix, "utf8"),
     readFile(files.coreGleam, "utf8"),
     readFile(files.coreMix, "utf8"),
@@ -68,12 +84,18 @@ test("one manifest release updates every bundled project version", async () => {
   assert.deepEqual(
     [
       tomlVersion(contents[0]),
-      mixVersion(contents[1]),
-      tomlVersion(contents[2]),
-      mixVersion(contents[3]),
-      tomlVersion(contents[4]),
+      lockedCoreVersion(contents[1]),
+      mixVersion(contents[2]),
+      tomlVersion(contents[3]),
+      mixVersion(contents[4]),
+      tomlVersion(contents[5]),
     ],
-    Array(5).fill(manifest["."]),
+    Array(6).fill(manifest["."]),
   );
-  assert.match(contents[3], /version: "0\.1\.0", # x-release-please-version/);
+  assert.match(
+    contents[4],
+    new RegExp(
+      `version: "${manifest["."].replaceAll(".", "\\.")}", # x-release-please-version`,
+    ),
+  );
 });

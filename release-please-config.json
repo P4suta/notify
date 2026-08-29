@@ -19,6 +19,11 @@
           "jsonpath": "$.version"
         },
         {
+          "type": "toml",
+          "path": "manifest.toml",
+          "jsonpath": "$.packages[?(@.name == 'notify_core')].version"
+        },
+        {
           "type": "generic",
           "path": "packages/notify_core/mix.exs"
         },

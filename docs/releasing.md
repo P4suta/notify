@@ -9,7 +9,8 @@ version:
 - A `!` or `BREAKING CHANGE` footer produces a major release.
 
 The workflow updates `CHANGELOG.md` and keeps the versions in the root Gleam
-and Mix projects, `notify_core`, and the bundled web application identical.
+and Mix projects, the root Gleam dependency lock, `notify_core`, and the bundled
+web application identical.
 Merging the release pull request creates a `vX.Y.Z` tag and a GitHub Release.
 The protected tag points at the verified, signed squash commit on `main`.
 
