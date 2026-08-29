@@ -82,6 +82,8 @@ mkdir -p "$report_directory"
 : >"$report_directory/resources.ndjson"
 resource_sampler_pid=""
 
+# Invoked indirectly by the EXIT trap below.
+# shellcheck disable=SC2329
 cleanup() {
   local status=$?
   trap - EXIT HUP INT TERM
