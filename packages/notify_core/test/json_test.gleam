@@ -167,6 +167,10 @@ pub fn stored_message_round_trips_actions_and_attachment_test() {
     )
 
   let encoded = original |> message_json.encode |> json.to_string
+  assert string.contains(
+    encoded,
+    "{\"action\":\"http\",\"label\":\"Acknowledge\",\"url\":\"https://example.test/42/ack\",\"method\":\"PUT\",\"headers\":{\"authorization\":\"Bearer test\"},\"clear\":false,\"body\":\"{\\\"ok\\\":true}\",\"id\":\"ActionHttp01\"}",
+  )
   let assert Ok(decoded) = json.parse(encoded, message_json.decoder())
   assert decoded == original
 }
@@ -196,9 +200,8 @@ pub fn storage_codec_preserves_private_delivery_flags_and_icon_test() {
       cached: False,
     )
   let encoded = original |> message_json.encode_storage |> json.to_string
-  assert string.contains(encoded, "\"icon\":\"https://example.test/icon.png\"")
-  assert string.contains(encoded, "\"_notify_scheduled\":true")
-  assert string.contains(encoded, "\"_notify_cached\":false")
+  assert encoded
+    == "{\"id\":\"AbCdEf1234XY\",\"time\":1725000000,\"expires\":1725043200,\"event\":\"message\",\"topic\":\"backups\",\"message\":\"Backup complete\",\"title\":\"Nightly\",\"priority\":4,\"tags\":[\"white_check_mark\",\"backup\"],\"content_type\":\"text/markdown\",\"icon\":\"https://example.test/icon.png\",\"click\":\"https://example.test/backups/42\",\"sequence_id\":\"backup-42\",\"_notify_scheduled\":true,\"_notify_cached\":false}"
   let assert Ok(decoded) = json.parse(encoded, message_json.decoder())
   assert decoded == original
 }
