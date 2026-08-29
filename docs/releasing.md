@@ -11,8 +11,16 @@ version:
 The workflow updates `CHANGELOG.md` and keeps the versions in the root Gleam
 and Mix projects, the root Gleam dependency lock, `notify_core`, and the bundled
 web application identical.
+
+Before the first release, the manifest stays empty and `initial-version` defines
+the intended `0.1.0` release. The manifest records only versions that have
+actually been published.
+
 Merging the release pull request creates a `vX.Y.Z` tag and a GitHub Release.
 The protected tag points at the verified, signed squash commit on `main`.
+Treat that merge as explicit publication approval: do not enable auto-merge or
+merge a release pull request merely to validate the automation. Validation ends
+with the checked release pull request left open for an explicit release decision.
 
 The workflow prefers the optional `RELEASE_PLEASE_TOKEN` Actions secret and
 falls back to the repository `GITHUB_TOKEN`. Use a fine-grained token limited

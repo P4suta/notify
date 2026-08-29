@@ -50,10 +50,23 @@ test("one manifest release updates every bundled project version", async () => {
   assert.equal(config["release-type"], "elixir");
   assert.equal(config["include-component-in-tag"], false);
   assert.equal(config["include-v-in-tag"], true);
-  assert.match(manifest["."], /^\d+\.\d+\.\d+$/);
-  assert.deepEqual(Object.keys(manifest), ["."]);
+  assert.equal(
+    config["bootstrap-sha"],
+    "8e1830adfb31df147c48c3349023bf327ae9b114",
+  );
 
-  const extraFiles = config.packages["."]["extra-files"];
+  const packageConfig = config.packages["."];
+  assert.equal(packageConfig["initial-version"], "0.1.0");
+  const releasedVersion = manifest["."];
+  if (releasedVersion === undefined) {
+    assert.deepEqual(manifest, {});
+  } else {
+    assert.match(releasedVersion, /^\d+\.\d+\.\d+$/);
+    assert.deepEqual(Object.keys(manifest), ["."]);
+  }
+  const projectVersion = releasedVersion ?? packageConfig["initial-version"];
+
+  const extraFiles = packageConfig["extra-files"];
   assert.deepEqual(
     extraFiles.map(({ path }) => path),
     [
@@ -90,12 +103,12 @@ test("one manifest release updates every bundled project version", async () => {
       mixVersion(contents[4]),
       tomlVersion(contents[5]),
     ],
-    Array(6).fill(manifest["."]),
+    Array(6).fill(projectVersion),
   );
   assert.match(
     contents[4],
     new RegExp(
-      `version: "${manifest["."].replaceAll(".", "\\.")}", # x-release-please-version`,
+      `version: "${projectVersion.replaceAll(".", "\\.")}", # x-release-please-version`,
     ),
   );
 });
