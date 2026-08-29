@@ -1,3 +1,4 @@
+import gleam/bit_array
 import gleam/erlang/process.{type Subject}
 import gleam/int
 import gleam/json
@@ -5,6 +6,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
+import gleam/string
 import notify/cluster/health as cluster_health
 import notify/core/message.{type Message}
 import notify/core/message_json
@@ -95,6 +97,8 @@ type Command {
 const default_pool_size = 4
 
 const event_commit_lock_key = 7_413_706_844
+
+const claim_index_lock = 7_413_706_851
 
 pub fn event_commit_lock() -> Int {
   event_commit_lock_key
@@ -230,6 +234,102 @@ BEGIN
 END;
 $notify_commit_batch$;
 
+CREATE OR REPLACE FUNCTION notify_commit_message_batch_v2(
+  requested_messages JSONB,
+  requested_origin_node TEXT,
+  requested_lock_key BIGINT
+)
+RETURNS TABLE(
+  batch_index BIGINT,
+  commit_succeeded BOOLEAN,
+  event_sequence BIGINT
+)
+LANGUAGE plpgsql
+AS $notify_commit_batch_v2$
+DECLARE
+  requested_message JSONB;
+  requested_job JSONB;
+  requested_index BIGINT;
+  committed_sequence BIGINT;
+  last_message_id TEXT := NULL;
+BEGIN
+  PERFORM pg_advisory_xact_lock(requested_lock_key);
+  FOR requested_message, requested_index IN
+    SELECT value, ordinality::BIGINT
+    FROM jsonb_array_elements(requested_messages) WITH ORDINALITY
+    ORDER BY ordinality
+  LOOP
+    BEGIN
+      committed_sequence := NULL;
+      INSERT INTO notify_messages(
+        id, topic, time, expires, scheduled, sequence_id, payload
+      )
+      VALUES (
+        requested_message ->> 'id',
+        requested_message ->> 'topic',
+        (requested_message ->> 'time')::BIGINT,
+        (requested_message ->> 'expires')::BIGINT,
+        (requested_message ->> 'scheduled')::BOOLEAN,
+        requested_message ->> 'sequence_id',
+        requested_message -> 'payload'
+      );
+
+      INSERT INTO notify_event_log(
+        message_id, event, topic, time, origin_node, payload
+      )
+      VALUES (
+        requested_message ->> 'id',
+        requested_message ->> 'event',
+        requested_message ->> 'topic',
+        (requested_message ->> 'time')::BIGINT,
+        requested_origin_node,
+        requested_message -> 'payload'
+      )
+      RETURNING sequence INTO committed_sequence;
+
+      FOR requested_job IN
+        SELECT value
+        FROM jsonb_array_elements(
+          COALESCE(requested_message -> 'jobs', '[]'::jsonb)
+        )
+      LOOP
+        INSERT INTO notify_delivery_outbox(
+          id,
+          kind,
+          endpoint,
+          payload,
+          message_id,
+          topic_hash,
+          state,
+          attempts,
+          available_at
+        )
+        VALUES (
+          requested_job ->> 'id',
+          requested_job ->> 'kind',
+          requested_job ->> 'endpoint',
+          decode(requested_job ->> 'payload_base64', 'base64'),
+          requested_job ->> 'message_id',
+          requested_job ->> 'topic_hash',
+          'pending',
+          0,
+          (requested_job ->> 'available_at')::BIGINT
+        );
+      END LOOP;
+
+      last_message_id := requested_message ->> 'id';
+      RETURN QUERY SELECT requested_index, TRUE, committed_sequence;
+    EXCEPTION WHEN unique_violation THEN
+      RETURN QUERY SELECT requested_index, FALSE, NULL::BIGINT;
+    END;
+  END LOOP;
+
+  IF last_message_id IS NOT NULL THEN
+    PERFORM pg_notify('notify_events', last_message_id);
+  END IF;
+END;
+$notify_commit_batch_v2$;
+
 INSERT INTO notify_schema_migrations(version) VALUES (1)
 ON CONFLICT(version) DO NOTHING;
 "
@@ -237,6 +337,10 @@ ON CONFLICT(version) DO NOTHING;
 const query_page_size = 256
 
 const commit_batch_size = 64
+
+const commit_batch_job_limit = 512
+
+const commit_batch_byte_limit = 4_194_304
 
 const commit_batch_wait_milliseconds = 1
 
@@ -600,23 +704,25 @@ fn run_commit_commands(
 ) -> CommitRun {
   case commands {
     [] -> ContinueCommit(state)
-    [CommitMessage(_, [], _), ..] -> {
-      let #(batch, remaining) = take_fast_commit_prefix(commands, [])
-      let outcome = fast_commit_batch(state.worker, batch)
-      send_fast_commit_results(batch, outcome)
-      run_commit_commands(
-        CommitState(..state, worker: recover_connection(state.worker, outcome)),
-        remaining,
-      )
-    }
     [CommitMessage(message, jobs, reply), ..remaining] -> {
-      let payload = message_json.encode_storage(message) |> json.to_string
-      let outcome = transactional_commit(state.worker, message, payload, jobs)
-      process.send(reply, outcome)
-      run_commit_commands(
-        CommitState(..state, worker: recover_connection(state.worker, outcome)),
-        remaining,
-      )
+      case commit_cost(message, jobs) {
+        Error(error) -> {
+          process.send(reply, Error(error))
+          run_commit_commands(state, remaining)
+        }
+        Ok(_) -> {
+          let #(batch, remaining) = take_commit_prefix(commands, 0, 2, [])
+          let outcome = commit_message_batch(state.worker, batch)
+          send_commit_results(batch, outcome)
+          run_commit_commands(
+            CommitState(
+              ..state,
+              worker: recover_connection(state.worker, outcome),
+            ),
+            remaining,
+          )
+        }
+      }
     }
     [CommitHealth(reply), ..remaining] -> {
       let outcome = health(state.worker.connection)
@@ -634,43 +740,76 @@ fn run_commit_commands(
   }
 }
 
-fn take_fast_commit_prefix(
+fn take_commit_prefix(
   commands: List(CommitCommand),
+  job_count: Int,
+  encoded_bytes: Int,
   accumulated: List(CommitCommand),
 ) -> #(List(CommitCommand), List(CommitCommand)) {
   case commands {
-    [CommitMessage(message, [], reply), ..remaining] ->
-      take_fast_commit_prefix(remaining, [
-        CommitMessage(message, [], reply),
-        ..accumulated
-      ])
+    [CommitMessage(message, jobs, reply), ..remaining] -> {
+      let candidate_jobs = list.length(jobs)
+      let candidate_bytes =
+        commit_json(message, jobs) |> json.to_string |> string.byte_size
+      let separator_bytes = case accumulated {
+        [] -> 0
+        _ -> 1
+      }
+      case
+        candidate_jobs <= commit_batch_job_limit
+        && candidate_bytes + 2 <= commit_batch_byte_limit
+        && job_count + candidate_jobs <= commit_batch_job_limit
+        && encoded_bytes + separator_bytes + candidate_bytes
+        <= commit_batch_byte_limit
+        && list.length(accumulated) < commit_batch_size
+      {
+        True ->
+          take_commit_prefix(
+            remaining,
+            job_count + candidate_jobs,
+            encoded_bytes + separator_bytes + candidate_bytes,
+            [CommitMessage(message, jobs, reply), ..accumulated],
+          )
+        False -> #(list.reverse(accumulated), commands)
+      }
+    }
     _ -> #(list.reverse(accumulated), commands)
   }
 }
 
-fn fast_commit_batch(
+fn commit_cost(
+  message: Message,
+  jobs: List(delivery.NewJob),
+) -> Result(Nil, storage.Error) {
+  let jobs_count = list.length(jobs)
+  let encoded_bytes =
+    commit_json(message, jobs) |> json.to_string |> string.byte_size
+  case
+    jobs_count <= commit_batch_job_limit
+    && encoded_bytes + 2 <= commit_batch_byte_limit
+  {
+    True -> Ok(Nil)
+    False ->
+      Error(storage.Unavailable(
+        "commit item exceeds the 512-job or 4 MiB batch limit",
+      ))
+  }
+}
+
+fn commit_message_batch(
   state: State,
   commands: List(CommitCommand),
 ) -> Result(List(BatchCommitResult), storage.Error) {
   let encoded_messages =
     commands
     |> json.array(fn(command) {
-      let assert CommitMessage(message, [], _) = command
-      json.object([
-        #("id", json.string(message.id)),
-        #("topic", json.string(topic.to_string(message.topic))),
-        #("time", json.int(message.time)),
-        #("expires", json.nullable(message.expires, json.int)),
-        #("scheduled", json.bool(message.scheduled)),
-        #("sequence_id", json.nullable(message.sequence_id, json.string)),
-        #("event", json.string(message.event |> message.event_to_string)),
-        #("payload", message_json.encode_storage(message)),
-      ])
+      let assert CommitMessage(message, jobs, _) = command
+      commit_json(message, jobs)
     })
     |> json.to_string
   postgleam.query_with(
     state.connection,
-    "SELECT batch_index, commit_succeeded, event_sequence FROM notify_commit_message_batch($1, $2, $3) ORDER BY batch_index",
+    "SELECT batch_index, commit_succeeded, event_sequence FROM notify_commit_message_batch_v2($1, $2, $3) ORDER BY batch_index",
     [
       postgleam.jsonb(encoded_messages),
       postgleam.text(state.node_id),
@@ -687,14 +826,40 @@ fn fast_commit_batch(
   |> result.map_error(map_error)
 }
 
-fn send_fast_commit_results(
+fn commit_json(message: Message, jobs: List(delivery.NewJob)) -> json.Json {
+  json.object([
+    #("id", json.string(message.id)),
+    #("topic", json.string(topic.to_string(message.topic))),
+    #("time", json.int(message.time)),
+    #("expires", json.nullable(message.expires, json.int)),
+    #("scheduled", json.bool(message.scheduled)),
+    #("sequence_id", json.nullable(message.sequence_id, json.string)),
+    #("event", json.string(message.event |> message.event_to_string)),
+    #("payload", message_json.encode_storage(message)),
+    #("jobs", json.array(jobs, delivery_job_json)),
+  ])
+}
+
+fn delivery_job_json(job: delivery.NewJob) -> json.Json {
+  json.object([
+    #("id", json.string(job.id)),
+    #("kind", json.string(delivery_kind(job.kind))),
+    #("endpoint", json.string(job.endpoint)),
+    #("payload_base64", json.string(bit_array.base64_encode(job.payload, True))),
+    #("message_id", json.string(job.message_id)),
+    #("topic_hash", json.string(job.topic_hash)),
+    #("available_at", json.int(job.available_at)),
+  ])
+}
+
+fn send_commit_results(
   commands: List(CommitCommand),
   outcome: Result(List(BatchCommitResult), storage.Error),
 ) -> Nil {
   case outcome {
     Error(error) ->
       list.each(commands, fn(command) {
-        let assert CommitMessage(_, [], reply) = command
+        let assert CommitMessage(_, _, reply) = command
         process.send(reply, Error(error))
       })
     Ok(rows) ->
@@ -704,7 +869,7 @@ fn send_fast_commit_results(
       {
         False ->
           list.each(commands, fn(command) {
-            let assert CommitMessage(_, [], reply) = command
+            let assert CommitMessage(_, _, reply) = command
             process.send(
               reply,
               Error(storage.Unavailable(
@@ -712,7 +877,7 @@ fn send_fast_commit_results(
               )),
             )
           })
-        True -> send_fast_commit_rows(commands, rows)
+        True -> send_commit_rows(commands, rows)
       }
   }
 }
@@ -745,20 +910,20 @@ fn valid_batch_commit_rows(
   }
 }
 
-fn send_fast_commit_rows(
+fn send_commit_rows(
   commands: List(CommitCommand),
   rows: List(BatchCommitResult),
 ) -> Nil {
   case commands, rows {
     [], [] -> Nil
-    [CommitMessage(message, [], reply), ..remaining_commands],
+    [CommitMessage(message, _, reply), ..remaining_commands],
       [row, ..remaining_rows]
     -> {
       process.send(reply, case row.succeeded {
         True -> Ok(message)
-        False -> Error(storage.Conflict("duplicate message ID"))
+        False -> Error(storage.Conflict("duplicate message or delivery job ID"))
       })
-      send_fast_commit_rows(remaining_commands, remaining_rows)
+      send_commit_rows(remaining_commands, remaining_rows)
     }
     _, _ -> Nil
   }
@@ -818,47 +983,51 @@ fn recover_connection(state: State, value: Result(a, storage.Error)) -> State {
 }
 
 fn migrate(connection: postgleam.Connection) -> Result(Nil, storage.Error) {
-  postgleam.transaction(connection, fn(tx) {
-    use _ <- result.try(
-      postgleam.query(tx, "SELECT pg_advisory_xact_lock($1::bigint)", [
-        postgleam.int(7_413_706_843),
-      ]),
-    )
-    use _ <- result.try(postgleam.simple_query(tx, migration))
-    Ok(Nil)
-  })
-  |> result.map_error(map_error)
+  use _ <- result.try(
+    postgleam.transaction(connection, fn(tx) {
+      use _ <- result.try(
+        postgleam.query(tx, "SELECT pg_advisory_xact_lock($1::bigint)", [
+          postgleam.int(7_413_706_843),
+        ]),
+      )
+      use _ <- result.try(postgleam.simple_query(tx, migration))
+      Ok(Nil)
+    })
+    |> result.map_error(map_error),
+  )
+  create_claim_indexes(connection)
 }
 
-fn transactional_commit(
-  state: State,
-  message: Message,
-  payload: String,
-  jobs: List(delivery.NewJob),
-) -> Result(Message, storage.Error) {
-  postgleam.transaction(state.connection, fn(tx) {
-    use _ <- result.try(lock_event_commit(tx))
-    use _ <- result.try(
-      postgleam.query(
-        tx,
-        "INSERT INTO notify_messages(id, topic, time, expires, scheduled, sequence_id, payload) VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        [
-          postgleam.text(message.id),
-          postgleam.text(topic.to_string(message.topic)),
-          postgleam.int(message.time),
-          postgleam.nullable(message.expires, postgleam.int),
-          postgleam.bool(message.scheduled),
-          postgleam.nullable(message.sequence_id, postgleam.text),
-          postgleam.jsonb(payload),
-        ],
-      ),
+fn create_claim_indexes(
+  connection: postgleam.Connection,
+) -> Result(Nil, storage.Error) {
+  use _ <- result.try(
+    postgleam.query(connection, "SELECT pg_advisory_lock($1::bigint)", [
+      postgleam.int(claim_index_lock),
+    ])
+    |> result.map_error(map_error),
+  )
+  let created = case
+    postgleam.simple_query(
+      connection,
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS notify_delivery_outbox_claim_pending ON notify_delivery_outbox(kind, endpoint, available_at, created_at, id) WHERE state = 'pending'",
     )
-    use _ <- result.try(insert_event(tx, state.node_id, message, payload))
-    use _ <- result.try(insert_delivery_jobs(tx, jobs))
-    use _ <- result.try(notify(tx, message.id))
-    Ok(message)
-  })
-  |> result.map_error(map_error)
+  {
+    Error(error) -> Error(error)
+    Ok(_) ->
+      postgleam.simple_query(
+        connection,
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS notify_delivery_outbox_claim_leased ON notify_delivery_outbox(kind, endpoint, lease_until, created_at, id) WHERE state = 'leased'",
+      )
+  }
+  let unlocked =
+    postgleam.query(connection, "SELECT pg_advisory_unlock($1::bigint)", [
+      postgleam.int(claim_index_lock),
+    ])
+  case created, unlocked {
+    Error(error), _ | _, Error(error) -> Error(map_error(error))
+    Ok(_), Ok(_) -> Ok(Nil)
+  }
 }
 
 fn lock_event_commit(
@@ -868,28 +1037,6 @@ fn lock_event_commit(
     postgleam.int(event_commit_lock_key),
   ])
   |> result.map(fn(_) { Nil })
-}
-
-fn insert_delivery_jobs(
-  connection: postgleam.Connection,
-  jobs: List(delivery.NewJob),
-) -> Result(Nil, pg_error.Error) {
-  list.try_each(jobs, fn(job) {
-    postgleam.query(
-      connection,
-      "INSERT INTO notify_delivery_outbox(id, kind, endpoint, payload, message_id, topic_hash, state, attempts, available_at) VALUES ($1, $2, $3, $4, $5, $6, 'pending', 0, $7)",
-      [
-        postgleam.text(job.id),
-        postgleam.text(delivery_kind(job.kind)),
-        postgleam.text(job.endpoint),
-        postgleam.bytea(job.payload),
-        postgleam.text(job.message_id),
-        postgleam.text(job.topic_hash),
-        postgleam.int(job.available_at),
-      ],
-    )
-    |> result.map(fn(_) { Nil })
-  })
 }
 
 fn delivery_kind(kind: delivery.Kind) -> String {
@@ -1070,13 +1217,41 @@ fn release_due(
   now: Int,
   limit: Int,
 ) -> Result(List(Message), storage.Error) {
+  case limit > 0 {
+    False -> Ok([])
+    True -> {
+      use due <- result.try(
+        postgleam.query_one(
+          state.connection,
+          "SELECT EXISTS(SELECT 1 FROM notify_messages WHERE scheduled = TRUE AND time <= $1 LIMIT 1)",
+          [postgleam.int(now)],
+          {
+            use found <- decode.element(0, decode.bool)
+            decode.success(found)
+          },
+        )
+        |> result.map_error(map_error),
+      )
+      case due {
+        False -> Ok([])
+        True -> release_due_transaction(state, now, limit)
+      }
+    }
+  }
+}
+
+fn release_due_transaction(
+  state: State,
+  now: Int,
+  limit: Int,
+) -> Result(List(Message), storage.Error) {
   postgleam.transaction(state.connection, fn(tx) {
     use _ <- result.try(lock_event_commit(tx))
     use response <- result.try(
       postgleam.query_with(
         tx,
         "WITH due AS (SELECT position FROM notify_messages WHERE scheduled = TRUE AND time <= $1 ORDER BY position ASC FOR UPDATE SKIP LOCKED LIMIT $2) UPDATE notify_messages AS m SET scheduled = FALSE, payload = jsonb_set(m.payload, '{_notify_scheduled}', 'false'::jsonb, TRUE) FROM due WHERE m.position = due.position RETURNING m.payload",
-        [postgleam.int(now), postgleam.int(max(0, limit))],
+        [postgleam.int(now), postgleam.int(limit)],
         {
           use payload <- decode.element(0, decode.jsonb)
           decode.success(payload)

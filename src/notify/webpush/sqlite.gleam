@@ -1,6 +1,7 @@
 import gleam/dynamic/decode
 import gleam/erlang/process.{type Subject}
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
 import notify/webpush.{type Store, type Subscription}
@@ -18,6 +19,10 @@ type Command {
   RemoveUser(String, Subject(Result(Int, webpush.Error)))
   RemoveExpired(Int, Subject(Result(Int, webpush.Error)))
   Health(Subject(Result(Nil, webpush.Error)))
+}
+
+type SubscriptionTopicRow {
+  SubscriptionTopicRow(subscription: Subscription, topic: Option(String))
 }
 
 const migration = "
@@ -253,57 +258,80 @@ fn for_topic(
   connection: Connection,
   topic: String,
 ) -> Result(List(Subscription), webpush.Error) {
-  use subscriptions <- result.try(
+  use rows <- result.try(
     sqlight.query(
-      "SELECT s.id, s.endpoint, s.key_auth, s.key_p256dh, s.user_id, s.subscriber_ip, s.created_at, s.updated_at FROM webpush_subscriptions s JOIN webpush_topics t ON t.subscription_id = s.id WHERE t.topic = ? ORDER BY s.endpoint",
+      "SELECT s.id, s.endpoint, s.key_auth, s.key_p256dh, s.user_id, s.subscriber_ip, s.created_at, s.updated_at, all_topics.topic FROM webpush_subscriptions s JOIN webpush_topics matched ON matched.subscription_id = s.id AND matched.topic = ? LEFT JOIN webpush_topics all_topics ON all_topics.subscription_id = s.id ORDER BY s.endpoint, all_topics.rowid",
       on: connection,
       with: [sqlight.text(topic)],
-      expecting: subscription_decoder(),
+      expecting: subscription_topic_decoder(),
     )
     |> result.map_error(map_error),
   )
-  list.try_map(subscriptions, fn(subscription) {
-    with_topics(connection, subscription)
-  })
+  Ok(group_subscription_topics(rows, []))
 }
 
 fn by_endpoint(
   connection: Connection,
   endpoint: String,
 ) -> Result(Subscription, webpush.Error) {
-  use subscriptions <- result.try(
+  use rows <- result.try(
     sqlight.query(
-      "SELECT id, endpoint, key_auth, key_p256dh, user_id, subscriber_ip, created_at, updated_at FROM webpush_subscriptions WHERE endpoint = ?",
+      "SELECT s.id, s.endpoint, s.key_auth, s.key_p256dh, s.user_id, s.subscriber_ip, s.created_at, s.updated_at, topics.topic FROM webpush_subscriptions s LEFT JOIN webpush_topics topics ON topics.subscription_id = s.id WHERE s.endpoint = ? ORDER BY topics.rowid",
       on: connection,
       with: [sqlight.text(endpoint)],
-      expecting: subscription_decoder(),
+      expecting: subscription_topic_decoder(),
     )
     |> result.map_error(map_error),
   )
-  case subscriptions {
-    [subscription] -> with_topics(connection, subscription)
+  case group_subscription_topics(rows, []) {
+    [subscription] -> Ok(subscription)
     [] -> Error(webpush.NotFound)
     _ -> Error(webpush.Unavailable("duplicate Web Push endpoint"))
   }
 }
 
-fn with_topics(
-  connection: Connection,
-  subscription: Subscription,
-) -> Result(Subscription, webpush.Error) {
-  use topics <- result.try(
-    sqlight.query(
-      "SELECT topic FROM webpush_topics WHERE subscription_id = ? ORDER BY rowid",
-      on: connection,
-      with: [sqlight.text(subscription.id)],
-      expecting: {
-        use topic <- decode.field(0, decode.string)
-        decode.success(topic)
-      },
-    )
-    |> result.map_error(map_error),
-  )
-  Ok(webpush.Subscription(..subscription, topics:))
+fn group_subscription_topics(
+  rows: List(SubscriptionTopicRow),
+  accumulated: List(Subscription),
+) -> List(Subscription) {
+  case rows {
+    [] -> list.reverse(accumulated)
+    [SubscriptionTopicRow(subscription, topic), ..remaining] -> {
+      let initial_topics = case topic {
+        None -> []
+        Some(topic) -> [topic]
+      }
+      let #(topics, remaining) =
+        take_subscription_topics(
+          remaining,
+          subscription.id,
+          list.reverse(initial_topics),
+        )
+      group_subscription_topics(remaining, [
+        webpush.Subscription(..subscription, topics:),
+        ..accumulated
+      ])
+    }
+  }
+}
+
+fn take_subscription_topics(
+  rows: List(SubscriptionTopicRow),
+  subscription_id: String,
+  reversed_topics: List(String),
+) -> #(List(String), List(SubscriptionTopicRow)) {
+  case rows {
+    [SubscriptionTopicRow(subscription, topic), ..remaining]
+      if subscription.id == subscription_id
+    -> {
+      let reversed_topics = case topic {
+        None -> reversed_topics
+        Some(topic) -> [topic, ..reversed_topics]
+      }
+      take_subscription_topics(remaining, subscription_id, reversed_topics)
+    }
+    _ -> #(list.reverse(reversed_topics), rows)
+  }
 }
 
 fn subscription_count_for_ip(
@@ -397,7 +425,7 @@ fn remove_counted(
   })
 }
 
-fn subscription_decoder() -> decode.Decoder(Subscription) {
+fn subscription_topic_decoder() -> decode.Decoder(SubscriptionTopicRow) {
   use id <- decode.field(0, decode.string)
   use endpoint <- decode.field(1, decode.string)
   use auth <- decode.field(2, decode.string)
@@ -406,16 +434,20 @@ fn subscription_decoder() -> decode.Decoder(Subscription) {
   use subscriber_ip <- decode.field(5, decode.string)
   use created_at <- decode.field(6, decode.int)
   use updated_at <- decode.field(7, decode.int)
-  decode.success(webpush.Subscription(
-    id:,
-    endpoint:,
-    auth:,
-    p256dh:,
-    topics: [],
-    user_id: webpush.optional_user_id(user_id),
-    subscriber_ip:,
-    created_at:,
-    updated_at:,
+  use topic <- decode.field(8, decode.optional(decode.string))
+  decode.success(SubscriptionTopicRow(
+    subscription: webpush.Subscription(
+      id:,
+      endpoint:,
+      auth:,
+      p256dh:,
+      topics: [],
+      user_id: webpush.optional_user_id(user_id),
+      subscriber_ip:,
+      created_at:,
+      updated_at:,
+    ),
+    topic:,
   ))
 }
 

@@ -1,3 +1,4 @@
+import gleam/bit_array
 import gleam/dynamic/decode
 import gleam/erlang/process.{type Subject}
 import gleam/int
@@ -6,6 +7,7 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
+import gleam/string
 import notify/core/message.{type Message}
 import notify/core/message_json
 import notify/core/topic
@@ -27,6 +29,19 @@ type Command {
   Stats(Subject(Result(storage.Stats, storage.Error)))
   Migrate(Subject(Result(Nil, storage.Error)))
   Health(Subject(Result(Nil, storage.Error)))
+}
+
+type CommitCommand {
+  LaneCommit(
+    Message,
+    List(delivery.NewJob),
+    Subject(Result(Message, storage.Error)),
+  )
+  LaneHealth(Subject(Result(Nil, storage.Error)))
+}
+
+type CommitState {
+  CommitState(subject: Subject(CommitCommand), connection: Connection)
 }
 
 const migration = "
@@ -52,6 +67,8 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS messages_topic_position
   ON messages(topic, position);
+CREATE INDEX IF NOT EXISTS messages_due
+  ON messages(time, position) WHERE scheduled = 1;
 CREATE INDEX IF NOT EXISTS messages_expires
   ON messages(expires) WHERE expires IS NOT NULL;
 
@@ -87,11 +104,25 @@ CREATE TABLE IF NOT EXISTS delivery_outbox (
 );
 CREATE INDEX IF NOT EXISTS delivery_outbox_claim
   ON delivery_outbox(kind, state, available_at, lease_until, created_at);
+CREATE INDEX IF NOT EXISTS delivery_outbox_claim_pending
+  ON delivery_outbox(kind, endpoint, available_at, created_at, id)
+  WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS delivery_outbox_claim_leased
+  ON delivery_outbox(kind, endpoint, lease_until, created_at, id)
+  WHERE state = 'leased';
 
 INSERT OR IGNORE INTO schema_migrations(version) VALUES (1);
 "
 
 const query_page_size = 256
+
+const commit_batch_size = 64
+
+const commit_batch_job_limit = 512
+
+const commit_batch_byte_limit = 4_194_304
+
+const commit_batch_wait_milliseconds = 1
 
 const supported_schema_version = 2
 
@@ -176,11 +207,63 @@ pub fn start_adapter(path: String) -> Result(Adapter, storage.Error) {
       let _ = sqlight.close(connection)
       Error(error)
     }
-    Ok(_) -> start_actor(connection)
+    Ok(_) ->
+      case path == ":memory:" {
+        True -> start_actor(connection)
+        False -> start_split_adapter(path, connection)
+      }
   }
 }
 
 fn start_actor(connection: Connection) -> Result(Adapter, storage.Error) {
+  use subject <- result.try(start_subject(connection))
+  Ok(adapter(subject, None))
+}
+
+fn start_split_adapter(
+  path: String,
+  read_connection: Connection,
+) -> Result(Adapter, storage.Error) {
+  case sqlight.open(path) {
+    Error(error) -> {
+      let _ = sqlight.close(read_connection)
+      Error(map_error(error))
+    }
+    Ok(commit_connection) ->
+      case
+        sqlight.exec(
+          "PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+          commit_connection,
+        )
+      {
+        Error(error) -> {
+          let _ = sqlight.close(read_connection)
+          let _ = sqlight.close(commit_connection)
+          Error(map_error(error))
+        }
+        Ok(_) ->
+          case start_subject(read_connection) {
+            Error(error) -> {
+              let _ = sqlight.close(read_connection)
+              let _ = sqlight.close(commit_connection)
+              Error(error)
+            }
+            Ok(subject) ->
+              case start_commit_subject(commit_connection) {
+                Error(error) -> {
+                  let _ = sqlight.close(commit_connection)
+                  Error(error)
+                }
+                Ok(commit_subject) -> Ok(adapter(subject, Some(commit_subject)))
+              }
+          }
+      }
+  }
+}
+
+fn start_subject(
+  connection: Connection,
+) -> Result(Subject(Command), storage.Error) {
   use started <- result.try(
     actor.new(connection)
     |> actor.on_message(handle)
@@ -189,12 +272,42 @@ fn start_actor(connection: Connection) -> Result(Adapter, storage.Error) {
       storage.Unavailable("SQLite actor failed to start")
     }),
   )
-  let subject = started.data
+  Ok(started.data)
+}
+
+fn start_commit_subject(
+  connection: Connection,
+) -> Result(Subject(CommitCommand), storage.Error) {
+  actor.new_with_initialiser(1000, fn(subject) {
+    Ok(
+      actor.initialised(CommitState(subject:, connection:))
+      |> actor.returning(subject),
+    )
+  })
+  |> actor.on_message(handle_commit_lane)
+  |> actor.start
+  |> result.map(fn(started) { started.data })
+  |> result.map_error(fn(_) {
+    storage.Unavailable("SQLite commit actor failed to start")
+  })
+}
+
+fn adapter(
+  subject: Subject(Command),
+  commit_subject: Option(Subject(CommitCommand)),
+) -> Adapter {
   let persistent =
     storage.Storage(
       migrate: fn() { process.call(subject, 10_000, Migrate) },
       save: fn(message) {
-        process.call(subject, 10_000, fn(reply) { Save(message, reply) })
+        case commit_subject {
+          None ->
+            process.call(subject, 10_000, fn(reply) { Save(message, reply) })
+          Some(commit_subject) ->
+            process.call(commit_subject, 10_000, fn(reply) {
+              LaneCommit(message, [], reply)
+            })
+        }
       },
       query: fn(query) {
         process.call(subject, 10_000, fn(reply) { RunQuery(query, reply) })
@@ -213,14 +326,304 @@ fn start_actor(connection: Connection) -> Result(Adapter, storage.Error) {
         process.call(subject, 10_000, fn(reply) { CleanupExpired(now, reply) })
       },
       stats: fn() { process.call(subject, 10_000, Stats) },
-      health: fn() { process.call(subject, 10_000, Health) },
+      health: fn() {
+        use _ <- result.try(process.call(subject, 10_000, Health))
+        case commit_subject {
+          None -> Ok(Nil)
+          Some(commit_subject) ->
+            process.call(commit_subject, 10_000, LaneHealth)
+        }
+      },
     )
-  Ok(Adapter(
+  Adapter(
     storage: persistent,
     commit: storage.AtomicCommit(fn(message, jobs) {
-      process.call(subject, 10_000, fn(reply) { Commit(message, jobs, reply) })
+      case commit_subject {
+        None ->
+          process.call(subject, 10_000, fn(reply) {
+            Commit(message, jobs, reply)
+          })
+        Some(commit_subject) ->
+          process.call(commit_subject, 10_000, fn(reply) {
+            LaneCommit(message, jobs, reply)
+          })
+      }
     }),
-  ))
+  )
+}
+
+fn handle_commit_lane(
+  state: CommitState,
+  command: CommitCommand,
+) -> actor.Next(CommitState, CommitCommand) {
+  let commands =
+    collect_commit_commands(
+      state.subject,
+      commit_batch_size - 1,
+      commit_batch_wait_milliseconds,
+      [command],
+    )
+  actor.continue(run_commit_commands(state, commands))
+}
+
+fn collect_commit_commands(
+  subject: Subject(CommitCommand),
+  remaining: Int,
+  wait_milliseconds: Int,
+  accumulated: List(CommitCommand),
+) -> List(CommitCommand) {
+  case remaining > 0 {
+    False -> list.reverse(accumulated)
+    True ->
+      case process.receive(subject, wait_milliseconds) {
+        Ok(command) ->
+          collect_commit_commands(subject, remaining - 1, 0, [
+            command,
+            ..accumulated
+          ])
+        Error(_) -> list.reverse(accumulated)
+      }
+  }
+}
+
+fn run_commit_commands(
+  state: CommitState,
+  commands: List(CommitCommand),
+) -> CommitState {
+  case commands {
+    [] -> state
+    [LaneHealth(reply), ..remaining] -> {
+      process.send(reply, health(state.connection))
+      run_commit_commands(state, remaining)
+    }
+    [LaneCommit(message, jobs, reply), ..remaining] -> {
+      case commit_cost(message, jobs) {
+        Error(error) -> {
+          process.send(reply, Error(error))
+          run_commit_commands(state, remaining)
+        }
+        Ok(_) -> {
+          let #(batch, remaining) = take_commit_prefix(commands, 0, 2, [])
+          let outcome = commit_batch(state.connection, batch)
+          send_commit_results(batch, outcome)
+          run_commit_commands(state, remaining)
+        }
+      }
+    }
+  }
+}
+
+fn take_commit_prefix(
+  commands: List(CommitCommand),
+  job_count: Int,
+  encoded_bytes: Int,
+  accumulated: List(CommitCommand),
+) -> #(List(CommitCommand), List(CommitCommand)) {
+  case commands {
+    [LaneCommit(message, jobs, reply), ..remaining] -> {
+      let candidate_jobs = list.length(jobs)
+      let candidate_bytes = commit_encoded_bytes(message, jobs)
+      let separator_bytes = case accumulated {
+        [] -> 0
+        _ -> 1
+      }
+      case
+        candidate_jobs <= commit_batch_job_limit
+        && candidate_bytes + 2 <= commit_batch_byte_limit
+        && job_count + candidate_jobs <= commit_batch_job_limit
+        && encoded_bytes + separator_bytes + candidate_bytes
+        <= commit_batch_byte_limit
+        && list.length(accumulated) < commit_batch_size
+      {
+        True ->
+          take_commit_prefix(
+            remaining,
+            job_count + candidate_jobs,
+            encoded_bytes + separator_bytes + candidate_bytes,
+            [LaneCommit(message, jobs, reply), ..accumulated],
+          )
+        False -> #(list.reverse(accumulated), commands)
+      }
+    }
+    _ -> #(list.reverse(accumulated), commands)
+  }
+}
+
+fn commit_cost(
+  message: Message,
+  jobs: List(delivery.NewJob),
+) -> Result(Nil, storage.Error) {
+  case
+    list.length(jobs) <= commit_batch_job_limit
+    && commit_encoded_bytes(message, jobs) + 2 <= commit_batch_byte_limit
+  {
+    True -> Ok(Nil)
+    False ->
+      Error(storage.Unavailable(
+        "commit item exceeds the 512-job or 4 MiB batch limit",
+      ))
+  }
+}
+
+fn commit_encoded_bytes(message: Message, jobs: List(delivery.NewJob)) -> Int {
+  commit_json(message, jobs) |> json.to_string |> string.byte_size
+}
+
+// Use the same encoded envelope as PostgreSQL for the shared 4 MiB bound.
+// In particular, delivery payloads are measured after base64 expansion.
+fn commit_json(message: Message, jobs: List(delivery.NewJob)) -> json.Json {
+  json.object([
+    #("id", json.string(message.id)),
+    #("topic", json.string(topic.to_string(message.topic))),
+    #("time", json.int(message.time)),
+    #("expires", json.nullable(message.expires, json.int)),
+    #("scheduled", json.bool(message.scheduled)),
+    #("sequence_id", json.nullable(message.sequence_id, json.string)),
+    #("event", json.string(message.event |> message.event_to_string)),
+    #("payload", message_json.encode_storage(message)),
+    #("jobs", json.array(jobs, delivery_job_json)),
+  ])
+}
+
+fn delivery_job_json(job: delivery.NewJob) -> json.Json {
+  json.object([
+    #("id", json.string(job.id)),
+    #("kind", json.string(delivery_kind(job.kind))),
+    #("endpoint", json.string(job.endpoint)),
+    #("payload_base64", json.string(bit_array.base64_encode(job.payload, True))),
+    #("message_id", json.string(job.message_id)),
+    #("topic_hash", json.string(job.topic_hash)),
+    #("available_at", json.int(job.available_at)),
+  ])
+}
+
+fn commit_batch(
+  connection: Connection,
+  commands: List(CommitCommand),
+) -> Result(List(Result(Message, storage.Error)), storage.Error) {
+  use _ <- result.try(
+    sqlight.exec("BEGIN IMMEDIATE", connection) |> result.map_error(map_error),
+  )
+  case commit_batch_items(connection, commands, []) {
+    Error(error) -> {
+      let _ = sqlight.exec("ROLLBACK", connection)
+      Error(error)
+    }
+    Ok(outcomes) ->
+      case sqlight.exec("COMMIT", connection) {
+        Ok(_) -> Ok(outcomes)
+        Error(error) -> {
+          let _ = sqlight.exec("ROLLBACK", connection)
+          Error(map_error(error))
+        }
+      }
+  }
+}
+
+fn commit_batch_items(
+  connection: Connection,
+  commands: List(CommitCommand),
+  accumulated: List(Result(Message, storage.Error)),
+) -> Result(List(Result(Message, storage.Error)), storage.Error) {
+  case commands {
+    [] -> Ok(list.reverse(accumulated))
+    [LaneCommit(message, jobs, _), ..remaining] -> {
+      use _ <- result.try(
+        sqlight.exec("SAVEPOINT notify_commit_item", connection)
+        |> result.map_error(map_error),
+      )
+      let outcome = commit_item(connection, message, jobs)
+      case outcome {
+        Ok(message) -> {
+          use _ <- result.try(release_commit_savepoint(connection))
+          commit_batch_items(connection, remaining, [Ok(message), ..accumulated])
+        }
+        Error(error) -> {
+          case error {
+            storage.Conflict(_) -> {
+              use _ <- result.try(rollback_commit_savepoint(connection))
+              commit_batch_items(connection, remaining, [
+                Error(error),
+                ..accumulated
+              ])
+            }
+            _ -> {
+              let _ = rollback_commit_savepoint(connection)
+              Error(error)
+            }
+          }
+        }
+      }
+    }
+    [LaneHealth(_), ..] ->
+      Error(storage.Unavailable("invalid SQLite commit batch"))
+  }
+}
+
+fn commit_item(
+  connection: Connection,
+  message: Message,
+  jobs: List(delivery.NewJob),
+) -> Result(Message, storage.Error) {
+  let payload = message_json.encode_storage(message) |> json.to_string
+  use _ <- result.try(insert_message(connection, message, payload))
+  use _ <- result.try(insert_event(connection, message, payload))
+  use _ <- result.try(insert_delivery_jobs(connection, jobs))
+  Ok(message)
+}
+
+fn release_commit_savepoint(
+  connection: Connection,
+) -> Result(Nil, storage.Error) {
+  sqlight.exec("RELEASE SAVEPOINT notify_commit_item", connection)
+  |> result.map_error(map_error)
+}
+
+fn rollback_commit_savepoint(
+  connection: Connection,
+) -> Result(Nil, storage.Error) {
+  use _ <- result.try(
+    sqlight.exec("ROLLBACK TO SAVEPOINT notify_commit_item", connection)
+    |> result.map_error(map_error),
+  )
+  release_commit_savepoint(connection)
+}
+
+fn send_commit_results(
+  commands: List(CommitCommand),
+  outcome: Result(List(Result(Message, storage.Error)), storage.Error),
+) -> Nil {
+  case outcome {
+    Error(error) ->
+      list.each(commands, fn(command) {
+        let assert LaneCommit(_, _, reply) = command
+        process.send(reply, Error(error))
+      })
+    Ok(outcomes) -> send_commit_rows(commands, outcomes)
+  }
+}
+
+fn send_commit_rows(
+  commands: List(CommitCommand),
+  outcomes: List(Result(Message, storage.Error)),
+) -> Nil {
+  case commands, outcomes {
+    [], [] -> Nil
+    [LaneCommit(_, _, reply), ..commands], [outcome, ..outcomes] -> {
+      process.send(reply, outcome)
+      send_commit_rows(commands, outcomes)
+    }
+    _, _ ->
+      list.each(commands, fn(command) {
+        let assert LaneCommit(_, _, reply) = command
+        process.send(
+          reply,
+          Error(storage.Unavailable(
+            "SQLite commit actor returned an invalid batch",
+          )),
+        )
+      })
+  }
 }
 
 fn handle(
@@ -495,10 +898,39 @@ fn release_due(
   now: Int,
   limit: Int,
 ) -> Result(List(Message), storage.Error) {
+  case limit > 0 {
+    False -> Ok([])
+    True -> {
+      use rows <- result.try(
+        sqlight.query(
+          "SELECT EXISTS(SELECT 1 FROM messages WHERE scheduled = 1 AND time <= ? LIMIT 1)",
+          on: connection,
+          with: [sqlight.int(now)],
+          expecting: {
+            use found <- decode.field(0, decode.int)
+            decode.success(found != 0)
+          },
+        )
+        |> result.map_error(map_error),
+      )
+      case rows {
+        [True] -> release_due_transaction(connection, now, limit)
+        [False] -> Ok([])
+        _ -> Error(storage.Corrupt("scheduled existence query returned no row"))
+      }
+    }
+  }
+}
+
+fn release_due_transaction(
+  connection: Connection,
+  now: Int,
+  limit: Int,
+) -> Result(List(Message), storage.Error) {
   use _ <- result.try(
     sqlight.exec("BEGIN IMMEDIATE", connection) |> result.map_error(map_error),
   )
-  let claimed = do_release_due(connection, now, max(0, limit))
+  let claimed = do_release_due(connection, now, limit)
   case claimed {
     Error(error) -> {
       let _ = sqlight.exec("ROLLBACK", connection)
@@ -552,13 +984,6 @@ fn do_release_due(
     use _ <- result.try(insert_event(connection, released, payload))
     Ok(released)
   })
-}
-
-fn max(a: Int, b: Int) -> Int {
-  case a > b {
-    True -> a
-    False -> b
-  }
 }
 
 fn insert_event(

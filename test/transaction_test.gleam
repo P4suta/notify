@@ -170,6 +170,125 @@ pub fn sqlite_atomic_commit_rolls_back_message_when_outbox_insert_fails_test() {
   assert list.is_empty(messages)
 }
 
+pub fn sqlite_commit_lane_isolates_a_conflict_inside_a_microbatch_test() {
+  let assert Ok(directory) = filesystem.temporary_directory()
+  let path = directory <> "/notify-batch.db"
+  let assert Ok(adapter) = sqlite.start_adapter(path)
+  let assert Ok(outbox) = delivery_sqlite.start(path)
+  let assert Ok(batch_topic) = topic.parse("atomic-batch")
+  let existing = atomic_message("BatchDup01XY", batch_topic, "existing")
+  assert adapter.storage.save(existing) == Ok(existing)
+  let committed = atomic_message("BatchGood1XY", batch_topic, "committed")
+  let committed_job =
+    delivery.NewJob(
+      id: "batch-good-job",
+      kind: delivery.MobileRelay,
+      endpoint: "https://relay.example/good",
+      payload: <<"durable":utf8>>,
+      message_id: committed.id,
+      topic_hash: "good-hash",
+      available_at: 100,
+    )
+  let storage.AtomicCommit(commit) = adapter.commit
+  let replies = process.new_subject()
+  process.spawn(fn() {
+    process.send(replies, #("conflict", commit(existing, [])))
+  })
+  process.spawn(fn() {
+    process.send(replies, #("committed", commit(committed, [committed_job])))
+  })
+
+  let assert Ok(first) = process.receive(replies, 5000)
+  let assert Ok(second) = process.receive(replies, 5000)
+  let outcomes = [first, second]
+  let assert Ok(#(_, Error(storage.Conflict(_)))) =
+    list.find(outcomes, fn(outcome) { outcome.0 == "conflict" })
+  let assert Ok(#(_, Ok(saved))) =
+    list.find(outcomes, fn(outcome) { outcome.0 == "committed" })
+  assert saved == committed
+
+  let assert Ok(messages) =
+    adapter.storage.query(storage.Query(
+      topics: [batch_topic],
+      since: storage.All,
+      include_scheduled: False,
+      criteria: filter.none(),
+    ))
+  assert list.map(messages, fn(message) { message.id })
+    == [existing.id, committed.id]
+  let assert Ok([job]) = outbox.list(delivery.MobileRelay)
+  assert job.id == committed_job.id
+  assert job.payload == committed_job.payload
+}
+
+pub fn sqlite_commit_lane_rejects_an_oversized_item_without_writing_test() {
+  let assert Ok(directory) = filesystem.temporary_directory()
+  let path = directory <> "/notify-bounds.db"
+  let assert Ok(adapter) = sqlite.start_adapter(path)
+  let assert Ok(batch_topic) = topic.parse("atomic-bounds")
+  let candidate = atomic_message("BatchHuge1XY", batch_topic, "too many jobs")
+  let job =
+    delivery.NewJob(
+      id: "repeated-job",
+      kind: delivery.WebPush,
+      endpoint: "https://fcm.googleapis.com/fcm/send/repeated",
+      payload: <<>>,
+      message_id: candidate.id,
+      topic_hash: "hash",
+      available_at: 100,
+    )
+  let storage.AtomicCommit(commit) = adapter.commit
+  let assert Error(storage.Unavailable(_)) =
+    commit(candidate, list.repeat(job, times: 513))
+  let encoded_candidate =
+    atomic_message("BatchHuge2XY", batch_topic, "base64-expanded job")
+  let encoded_job =
+    delivery.NewJob(
+      ..job,
+      id: "encoded-oversized-job",
+      message_id: encoded_candidate.id,
+      payload: string.repeat("x", times: 3_200_000)
+        |> bit_array.from_string,
+    )
+  let assert Error(storage.Unavailable(_)) =
+    commit(encoded_candidate, [encoded_job])
+  let assert Ok(messages) =
+    adapter.storage.query(storage.Query(
+      topics: [batch_topic],
+      since: storage.All,
+      include_scheduled: False,
+      criteria: filter.none(),
+    ))
+  assert list.is_empty(messages)
+}
+
+fn atomic_message(
+  id: String,
+  parsed_topic: topic.Topic,
+  body: String,
+) -> message.Message {
+  message.Message(
+    id:,
+    time: 100,
+    expires: None,
+    event: message.MessageEvent,
+    topic: parsed_topic,
+    message: body,
+    title: None,
+    priority: message.Default,
+    tags: [],
+    markdown: False,
+    icon: None,
+    click: None,
+    actions: [],
+    attachment: None,
+    scheduled: False,
+    cached: True,
+    sequence_id: None,
+    poll_id: None,
+  )
+}
+
 fn result_is_error(value: Result(a, e)) -> Bool {
   case value {
     Error(_) -> True

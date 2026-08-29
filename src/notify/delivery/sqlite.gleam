@@ -61,6 +61,12 @@ CREATE TABLE IF NOT EXISTS delivery_outbox (
 );
 CREATE INDEX IF NOT EXISTS delivery_outbox_claim
   ON delivery_outbox(kind, state, available_at, lease_until, created_at);
+CREATE INDEX IF NOT EXISTS delivery_outbox_claim_pending
+  ON delivery_outbox(kind, endpoint, available_at, created_at, id)
+  WHERE state = 'pending';
+CREATE INDEX IF NOT EXISTS delivery_outbox_claim_leased
+  ON delivery_outbox(kind, endpoint, lease_until, created_at, id)
+  WHERE state = 'leased';
 CREATE INDEX IF NOT EXISTS delivery_outbox_kind_id
   ON delivery_outbox(kind, id);
 "
@@ -189,13 +195,13 @@ fn claim(
   transaction(connection, fn() {
     use jobs <- result.try(
       sqlight.query(
-        "SELECT id, kind, endpoint, payload, message_id, topic_hash, state, attempts, available_at, lease_owner, lease_until, last_error FROM delivery_outbox WHERE kind = ? AND ((state = 'pending' AND available_at <= ?) OR (state = 'leased' AND lease_until <= ?)) ORDER BY created_at, id LIMIT ?",
+        "SELECT jobs.id, jobs.kind, jobs.endpoint, jobs.payload, jobs.message_id, jobs.topic_hash, jobs.state, jobs.attempts, jobs.available_at, jobs.lease_owner, jobs.lease_until, jobs.last_error FROM delivery_outbox AS jobs WHERE jobs.kind = ? AND jobs.state != 'dead_letter' AND NOT EXISTS (SELECT 1 FROM delivery_outbox AS earlier WHERE earlier.kind = jobs.kind AND earlier.endpoint = jobs.endpoint AND earlier.state != 'dead_letter' AND (earlier.created_at < jobs.created_at OR (earlier.created_at = jobs.created_at AND earlier.id < jobs.id))) AND ((jobs.state = 'pending' AND jobs.available_at <= ?) OR (jobs.state = 'leased' AND jobs.lease_until <= ?)) ORDER BY jobs.created_at, jobs.id LIMIT ?",
         on: connection,
         with: [
           sqlight.text(kind_string(kind)),
           sqlight.int(now),
           sqlight.int(now),
-          sqlight.int(max(0, limit)),
+          sqlight.int(min(16, max(0, limit))),
         ],
         expecting: job_decoder(),
       )
@@ -641,6 +647,13 @@ fn parse_state(value: String) -> Result(delivery.State, Nil) {
 
 fn max(first: Int, second: Int) -> Int {
   case first > second {
+    True -> first
+    False -> second
+  }
+}
+
+fn min(first: Int, second: Int) -> Int {
+  case first < second {
     True -> first
     False -> second
   }

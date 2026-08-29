@@ -68,6 +68,10 @@ CREATE INDEX IF NOT EXISTS notify_delivery_outbox_kind_id
   ON notify_delivery_outbox(kind, id);
 "
 
+const endpoint_lock_salt = 7_413_706_850
+
+const claim_index_lock = 7_413_706_851
+
 pub fn start(config: Config) -> Result(Store, delivery.Error) {
   use connection <- result.try(
     postgleam.connect(config) |> result.map_error(map_error),
@@ -82,16 +86,51 @@ pub fn start(config: Config) -> Result(Store, delivery.Error) {
 }
 
 fn migrate(connection: postgleam.Connection) -> Result(Nil, delivery.Error) {
-  postgleam.transaction(connection, fn(tx) {
-    use _ <- result.try(
-      postgleam.query(tx, "SELECT pg_advisory_xact_lock($1::bigint)", [
-        postgleam.int(7_413_706_845),
-      ]),
+  use _ <- result.try(
+    postgleam.transaction(connection, fn(tx) {
+      use _ <- result.try(
+        postgleam.query(tx, "SELECT pg_advisory_xact_lock($1::bigint)", [
+          postgleam.int(7_413_706_845),
+        ]),
+      )
+      use _ <- result.try(postgleam.simple_query(tx, migration))
+      Ok(Nil)
+    })
+    |> result.map_error(map_error),
+  )
+  create_claim_indexes(connection)
+}
+
+fn create_claim_indexes(
+  connection: postgleam.Connection,
+) -> Result(Nil, delivery.Error) {
+  use _ <- result.try(
+    postgleam.query(connection, "SELECT pg_advisory_lock($1::bigint)", [
+      postgleam.int(claim_index_lock),
+    ])
+    |> result.map_error(map_error),
+  )
+  let created = case
+    postgleam.simple_query(
+      connection,
+      "CREATE INDEX CONCURRENTLY IF NOT EXISTS notify_delivery_outbox_claim_pending ON notify_delivery_outbox(kind, endpoint, available_at, created_at, id) WHERE state = 'pending'",
     )
-    use _ <- result.try(postgleam.simple_query(tx, migration))
-    Ok(Nil)
-  })
-  |> result.map_error(map_error)
+  {
+    Error(error) -> Error(error)
+    Ok(_) ->
+      postgleam.simple_query(
+        connection,
+        "CREATE INDEX CONCURRENTLY IF NOT EXISTS notify_delivery_outbox_claim_leased ON notify_delivery_outbox(kind, endpoint, lease_until, created_at, id) WHERE state = 'leased'",
+      )
+  }
+  let unlocked =
+    postgleam.query(connection, "SELECT pg_advisory_unlock($1::bigint)", [
+      postgleam.int(claim_index_lock),
+    ])
+  case created, unlocked {
+    Error(error), _ | _, Error(error) -> Error(map_error(error))
+    Ok(_), Ok(_) -> Ok(Nil)
+  }
 }
 
 fn start_actor(
@@ -247,18 +286,21 @@ fn claim(
   lease_seconds: Int,
   limit: Int,
 ) -> Result(List(Job), delivery.Error) {
-  postgleam.query_with(
-    connection,
-    "WITH candidates AS (SELECT id FROM notify_delivery_outbox WHERE kind = $1 AND ((state = 'pending' AND available_at <= $2) OR (state = 'leased' AND lease_until <= $2)) ORDER BY created_at, id FOR UPDATE SKIP LOCKED LIMIT $3) UPDATE notify_delivery_outbox AS jobs SET state = 'leased', lease_owner = $4, lease_until = $5 FROM candidates WHERE jobs.id = candidates.id RETURNING jobs.id, jobs.kind, jobs.endpoint, jobs.payload, jobs.message_id, jobs.topic_hash, jobs.state, jobs.attempts, jobs.available_at, jobs.lease_owner, jobs.lease_until, jobs.last_error",
-    [
-      postgleam.text(kind_string(kind)),
-      postgleam.int(now),
-      postgleam.int(max(0, limit)),
-      postgleam.text(owner),
-      postgleam.int(now + lease_seconds),
-    ],
-    job_decoder(),
-  )
+  postgleam.transaction(connection, fn(tx) {
+    postgleam.query_with(
+      tx,
+      "WITH heads AS MATERIALIZED (SELECT jobs.id, jobs.endpoint, jobs.created_at FROM notify_delivery_outbox AS jobs WHERE jobs.kind = $1 AND jobs.state != 'dead_letter' AND NOT EXISTS (SELECT 1 FROM notify_delivery_outbox AS earlier WHERE earlier.kind = jobs.kind AND earlier.endpoint = jobs.endpoint AND earlier.state != 'dead_letter' AND (earlier.created_at < jobs.created_at OR (earlier.created_at = jobs.created_at AND earlier.id < jobs.id))) AND ((jobs.state = 'pending' AND jobs.available_at <= $2) OR (jobs.state = 'leased' AND jobs.lease_until <= $2)) ORDER BY jobs.created_at, jobs.id FOR UPDATE OF jobs SKIP LOCKED LIMIT $3), locked AS MATERIALIZED (SELECT heads.id FROM heads WHERE pg_try_advisory_xact_lock(hashtextextended(heads.endpoint, $6))) UPDATE notify_delivery_outbox AS jobs SET state = 'leased', lease_owner = $4, lease_until = $5 FROM locked WHERE jobs.id = locked.id RETURNING jobs.id, jobs.kind, jobs.endpoint, jobs.payload, jobs.message_id, jobs.topic_hash, jobs.state, jobs.attempts, jobs.available_at, jobs.lease_owner, jobs.lease_until, jobs.last_error",
+      [
+        postgleam.text(kind_string(kind)),
+        postgleam.int(now),
+        postgleam.int(min(16, max(0, limit))),
+        postgleam.text(owner),
+        postgleam.int(now + lease_seconds),
+        postgleam.int(endpoint_lock_salt),
+      ],
+      job_decoder(),
+    )
+  })
   |> result.map(fn(response) { response.rows })
   |> result.map_error(map_error)
 }
@@ -644,6 +686,13 @@ fn parse_state(value: String) -> Result(delivery.State, Nil) {
 
 fn max(first: Int, second: Int) -> Int {
   case first > second {
+    True -> first
+    False -> second
+  }
+}
+
+fn min(first: Int, second: Int) -> Int {
+  case first < second {
     True -> first
     False -> second
   }

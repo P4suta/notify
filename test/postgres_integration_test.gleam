@@ -485,8 +485,47 @@ pub fn postgres_storage_pool_recovers_and_serializes_commits_test() {
       let TestDatabase(configuration:, admin:, ..) = database
       let assert Ok(adapter_a) = postgres.start(configuration, "node-a")
       let postgres.Adapter(storage: messages, ..) = adapter_a
+      let storage.AtomicCommit(commit) = adapter_a.commit
       assert adapter_a.pool_size == 4
       assert messages.health() == Ok(Nil)
+
+      let with_job =
+        fixture_on_topic("PgJobCommitXY", False, 89, "postgres-concurrency")
+      let durable_job =
+        delivery.NewJob(
+          ..delivery_fixture("pg-atomic-job", delivery.MobileRelay),
+          endpoint: "https://relay.example/atomic",
+          message_id: with_job.id,
+        )
+      assert commit(with_job, [durable_job]) == Ok(with_job)
+      let assert Ok(1) =
+        postgleam.query_one(
+          admin,
+          "SELECT COUNT(*)::bigint FROM notify_delivery_outbox WHERE id = $1 AND message_id = $2 AND payload = $3",
+          [
+            postgleam.text(durable_job.id),
+            postgleam.text(with_job.id),
+            postgleam.bytea(durable_job.payload),
+          ],
+          {
+            use count <- decode.element(0, decode.int)
+            decode.success(count)
+          },
+        )
+      let job_conflict =
+        fixture_on_topic("PgJobDup01XY", False, 89, "postgres-concurrency")
+      let assert Error(storage.Conflict(_)) =
+        commit(job_conflict, [durable_job])
+      let assert Ok(0) =
+        postgleam.query_one(
+          admin,
+          "SELECT COUNT(*)::bigint FROM notify_messages WHERE id = $1",
+          [postgleam.text(job_conflict.id)],
+          {
+            use count <- decode.element(0, decode.int)
+            decode.success(count)
+          },
+        )
 
       let assert Ok(_) = postgleam.simple_query(admin, "BEGIN")
       let assert Ok(_) =
@@ -1321,10 +1360,15 @@ pub fn postgres_delivery_lease_expiry_and_competing_claims_contract_test() {
 
       int.range(from: 1, to: 33, with: Nil, run: fn(_, index) {
         let assert Ok(_) =
-          outbox_a.enqueue(delivery_fixture(
-            "lease-race-" <> int.to_string(index),
-            delivery.MobileRelay,
-          ))
+          outbox_a.enqueue(
+            delivery.NewJob(
+              ..delivery_fixture(
+                "lease-race-" <> int.to_string(index),
+                delivery.MobileRelay,
+              ),
+              endpoint: "https://relay.example/" <> int.to_string(index),
+            ),
+          )
         Nil
       })
       let claims = process.new_subject()
