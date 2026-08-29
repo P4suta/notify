@@ -6,6 +6,7 @@ import gleam/otp/actor
 import gleam/result
 import gleam/string
 import notify/attachment_store.{type Store}
+import notify/dispatch_pool
 
 pub type Config {
   Config(
@@ -61,6 +62,11 @@ type Command {
     attachment_store.Upload,
     Subject(Result(attachment_store.Stored, attachment_store.Error)),
   )
+  Delete(String, Subject(Result(Nil, attachment_store.Error)))
+  Cleanup(Int, Subject(Result(Int, attachment_store.Error)))
+}
+
+type ReadCommand {
   Head(String, Subject(Result(attachment_store.Stored, attachment_store.Error)))
   Get(
     String,
@@ -79,8 +85,6 @@ type Command {
       ),
     ),
   )
-  Delete(String, Subject(Result(Nil, attachment_store.Error)))
-  Cleanup(Int, Subject(Result(Int, attachment_store.Error)))
   Health(Subject(Result(Nil, attachment_store.Error)))
 }
 
@@ -89,6 +93,7 @@ pub fn start(
   max_file_bytes max_file: Int,
   max_total_bytes max_total: Int,
 ) -> Result(Store, attachment_store.Error) {
+  use read_pool <- result.try(start_read_pool(config))
   use started <- result.try(
     actor.new(State(config:, uploads: [], max_file:, max_total:))
     |> actor.on_message(handle)
@@ -116,14 +121,14 @@ pub fn start(
         process.call(subject, 60_000, fn(reply) { Put(upload, reply) })
       },
       head: fn(key) {
-        process.call(subject, 30_000, fn(reply) { Head(key, reply) })
+        call_read(read_pool, 30_000, fn(reply) { Head(key, reply) })
       },
       get: fn(key, range) {
-        process.call(subject, 60_000, fn(reply) { Get(key, range, reply) })
+        call_read(read_pool, 60_000, fn(reply) { Get(key, range, reply) })
       },
       open: fn(key, range) {
         use metadata <- result.try(
-          process.call(subject, 30_000, fn(reply) { Head(key, reply) }),
+          call_read(read_pool, 30_000, fn(reply) { Head(key, reply) }),
         )
         use bounds <- result.try(attachment_store.download_bounds(
           metadata.size,
@@ -135,7 +140,7 @@ pub fn start(
             bounds.0,
             bounds.1,
             fn(offset, length) {
-              process.call(subject, 60_000, fn(reply) {
+              call_read(read_pool, 60_000, fn(reply) {
                 ReadRange(key, offset, length, reply)
               })
             },
@@ -143,9 +148,9 @@ pub fn start(
           ),
         )
       },
-      list: fn() { process.call(subject, 60_000, List) },
+      list: fn() { call_read(read_pool, 60_000, List) },
       page: fn(after, limit) {
-        process.call(subject, 60_000, fn(reply) { Page(after, limit, reply) })
+        call_read(read_pool, 60_000, fn(reply) { Page(after, limit, reply) })
       },
       delete: fn(key) {
         process.call(subject, 30_000, fn(reply) { Delete(key, reply) })
@@ -153,10 +158,46 @@ pub fn start(
       cleanup: fn(now) {
         process.call(subject, 60_000, fn(reply) { Cleanup(now, reply) })
       },
-      health: fn() { process.call(subject, 30_000, Health) },
+      health: fn() { call_read(read_pool, 30_000, Health) },
     )
   use _ <- result.try(store.health())
   Ok(store)
+}
+
+fn start_read_pool(
+  config: Config,
+) -> Result(dispatch_pool.Pool(ReadCommand), attachment_store.Error) {
+  dispatch_pool.start(
+    16,
+    fn() {
+      actor.new(config)
+      |> actor.on_message(handle_read)
+      |> actor.start
+      |> result.map(fn(started) { started.data })
+      |> result.map_error(fn(_) {
+        attachment_store.Unavailable(
+          "S3 attachment read worker failed to start",
+        )
+      })
+    },
+    fn() {
+      attachment_store.Unavailable("S3 attachment read pool failed to start")
+    },
+  )
+}
+
+fn call_read(
+  pool: dispatch_pool.Pool(ReadCommand),
+  timeout: Int,
+  command: fn(Subject(Result(value, attachment_store.Error))) -> ReadCommand,
+) -> Result(value, attachment_store.Error) {
+  let reply = process.new_subject()
+  dispatch_pool.send(pool, command(reply))
+  case process.receive(reply, timeout) {
+    Ok(outcome) -> outcome
+    Error(_) ->
+      Error(attachment_store.Unavailable("attachment read worker timed out"))
+  }
 }
 
 fn handle(state: State, command: Command) -> actor.Next(State, Command) {
@@ -201,33 +242,6 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
       process.send(reply, put(state, upload))
       actor.continue(state)
     }
-    Head(key, reply) -> {
-      process.send(reply, head(state.config, key))
-      actor.continue(state)
-    }
-    Get(key, range, reply) -> {
-      process.send(reply, get(state.config, key, range))
-      actor.continue(state)
-    }
-    ReadRange(key, offset, length, reply) -> {
-      let response =
-        get(
-          state.config,
-          key,
-          Some(attachment_store.ByteRange(offset, offset + length - 1)),
-        )
-        |> result.map(fn(download) { download.data })
-      process.send(reply, response)
-      actor.continue(state)
-    }
-    List(reply) -> {
-      process.send(reply, list_objects(state.config))
-      actor.continue(state)
-    }
-    Page(after, limit, reply) -> {
-      process.send(reply, page_objects(state.config, after, limit))
-      actor.continue(state)
-    }
     Delete(key, reply) -> {
       process.send(reply, delete(state.config, key))
       actor.continue(state)
@@ -251,11 +265,48 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
         }
       }
     }
+  }
+}
+
+fn handle_read(
+  config: Config,
+  command: ReadCommand,
+) -> actor.Next(Config, ReadCommand) {
+  case command {
+    Head(key, reply) -> {
+      process.send(reply, head(config, key))
+      Nil
+    }
+    Get(key, range, reply) -> {
+      process.send(reply, get(config, key, range))
+      Nil
+    }
+    ReadRange(key, offset, length, reply) -> {
+      process.send(
+        reply,
+        get(
+          config,
+          key,
+          Some(attachment_store.ByteRange(offset, offset + length - 1)),
+        )
+          |> result.map(fn(download) { download.data }),
+      )
+      Nil
+    }
+    List(reply) -> {
+      process.send(reply, list_objects(config))
+      Nil
+    }
+    Page(after, limit, reply) -> {
+      process.send(reply, page_objects(config, after, limit))
+      Nil
+    }
     Health(reply) -> {
-      process.send(reply, health(state.config))
-      actor.continue(state)
+      process.send(reply, health(config))
+      Nil
     }
   }
+  actor.continue(config)
 }
 
 fn begin(

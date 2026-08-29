@@ -7,6 +7,7 @@ import gleam/result
 import gleam/string
 import notify/attachment_store.{type Store}
 import notify/attachment_store/memory
+import notify/dispatch_pool
 import postgleam
 import postgleam/config.{type Config}
 import postgleam/decode
@@ -32,6 +33,10 @@ type Pending {
   )
 }
 
+type ReadState {
+  ReadState(config: Config, connection: postgleam.Connection, reconnect: Bool)
+}
+
 type Command {
   Begin(
     attachment_store.BeginUpload,
@@ -54,6 +59,11 @@ type Command {
     attachment_store.Upload,
     Subject(Result(attachment_store.Stored, attachment_store.Error)),
   )
+  Delete(String, Subject(Result(Nil, attachment_store.Error)))
+  Cleanup(Int, Subject(Result(Int, attachment_store.Error)))
+}
+
+type ReadCommand {
   Head(String, Subject(Result(attachment_store.Stored, attachment_store.Error)))
   Get(
     String,
@@ -72,8 +82,6 @@ type Command {
       ),
     ),
   )
-  Delete(String, Subject(Result(Nil, attachment_store.Error)))
-  Cleanup(Int, Subject(Result(Int, attachment_store.Error)))
   Health(Subject(Result(Nil, attachment_store.Error)))
 }
 
@@ -138,6 +146,7 @@ pub fn start(
 }
 
 fn start_actor(state: State) -> Result(Store, attachment_store.Error) {
+  use read_pool <- result.try(start_read_pool(state.config))
   use started <- result.try(
     actor.new(state)
     |> actor.on_message(handle)
@@ -167,14 +176,14 @@ fn start_actor(state: State) -> Result(Store, attachment_store.Error) {
         process.call(subject, 30_000, fn(reply) { Put(upload, reply) })
       },
       head: fn(key) {
-        process.call(subject, 30_000, fn(reply) { Head(key, reply) })
+        call_read(read_pool, 30_000, fn(reply) { Head(key, reply) })
       },
       get: fn(key, range) {
-        process.call(subject, 30_000, fn(reply) { Get(key, range, reply) })
+        call_read(read_pool, 30_000, fn(reply) { Get(key, range, reply) })
       },
       open: fn(key, range) {
         use metadata <- result.try(
-          process.call(subject, 30_000, fn(reply) { Head(key, reply) }),
+          call_read(read_pool, 30_000, fn(reply) { Head(key, reply) }),
         )
         use bounds <- result.try(attachment_store.download_bounds(
           metadata.size,
@@ -186,7 +195,7 @@ fn start_actor(state: State) -> Result(Store, attachment_store.Error) {
             bounds.0,
             bounds.1,
             fn(offset, length) {
-              process.call(subject, 30_000, fn(reply) {
+              call_read(read_pool, 30_000, fn(reply) {
                 ReadRange(key, offset, length, reply)
               })
             },
@@ -194,9 +203,9 @@ fn start_actor(state: State) -> Result(Store, attachment_store.Error) {
           ),
         )
       },
-      list: fn() { process.call(subject, 30_000, List) },
+      list: fn() { call_read(read_pool, 30_000, List) },
       page: fn(after, limit) {
-        process.call(subject, 30_000, fn(reply) { Page(after, limit, reply) })
+        call_read(read_pool, 30_000, fn(reply) { Page(after, limit, reply) })
       },
       delete: fn(key) {
         process.call(subject, 30_000, fn(reply) { Delete(key, reply) })
@@ -204,9 +213,51 @@ fn start_actor(state: State) -> Result(Store, attachment_store.Error) {
       cleanup: fn(now) {
         process.call(subject, 30_000, fn(reply) { Cleanup(now, reply) })
       },
-      health: fn() { process.call(subject, 30_000, Health) },
+      health: fn() { call_read(read_pool, 30_000, Health) },
     ),
   )
+}
+
+fn start_read_pool(
+  config: Config,
+) -> Result(dispatch_pool.Pool(ReadCommand), attachment_store.Error) {
+  dispatch_pool.start(
+    4,
+    fn() {
+      use connection <- result.try(
+        postgleam.connect(config) |> result.map_error(map_error),
+      )
+      actor.new(ReadState(config:, connection:, reconnect: False))
+      |> actor.on_message(handle_read)
+      |> actor.start
+      |> result.map(fn(started) { started.data })
+      |> result.map_error(fn(_) {
+        postgleam.disconnect(connection)
+        attachment_store.Unavailable(
+          "PostgreSQL attachment read worker failed to start",
+        )
+      })
+    },
+    fn() {
+      attachment_store.Unavailable(
+        "PostgreSQL attachment read pool failed to start",
+      )
+    },
+  )
+}
+
+fn call_read(
+  pool: dispatch_pool.Pool(ReadCommand),
+  timeout: Int,
+  command: fn(Subject(Result(value, attachment_store.Error))) -> ReadCommand,
+) -> Result(value, attachment_store.Error) {
+  let reply = process.new_subject()
+  dispatch_pool.send(pool, command(reply))
+  case process.receive(reply, timeout) {
+    Ok(outcome) -> outcome
+    Error(_) ->
+      Error(attachment_store.Unavailable("attachment read worker timed out"))
+  }
 }
 
 fn handle(state: State, command: Command) -> actor.Next(State, Command) {
@@ -235,14 +286,6 @@ fn handle_ready(state: State, command: Command) -> actor.Next(State, Command) {
       respond(next, reply, response)
     }
     Put(upload, reply) -> respond(state, reply, put(state, upload))
-    Head(key, reply) -> respond(state, reply, head(state.connection, key))
-    Get(key, range, reply) ->
-      respond(state, reply, get(state.connection, key, range))
-    ReadRange(key, offset, length, reply) ->
-      respond(state, reply, read_range(state.connection, key, offset, length))
-    List(reply) -> respond(state, reply, list_objects(state.connection))
-    Page(after, limit, reply) ->
-      respond(state, reply, page_objects(state.connection, after, limit))
     Delete(key, reply) -> respond(state, reply, delete(state.connection, key))
     Cleanup(now, reply) -> {
       let next =
@@ -254,7 +297,6 @@ fn handle_ready(state: State, command: Command) -> actor.Next(State, Command) {
         )
       respond(next, reply, cleanup(state.connection, now))
     }
-    Health(reply) -> respond(state, reply, health(state.connection))
   }
 }
 
@@ -281,16 +323,99 @@ fn reject_command(
     Finish(_, reply) -> process.send(reply, Error(error))
     Abort(_, reply) -> process.send(reply, Error(error))
     Put(_, reply) -> process.send(reply, Error(error))
-    Head(_, reply) -> process.send(reply, Error(error))
-    Get(_, _, reply) -> process.send(reply, Error(error))
-    ReadRange(_, _, _, reply) -> process.send(reply, Error(error))
-    List(reply) -> process.send(reply, Error(error))
-    Page(_, _, reply) -> process.send(reply, Error(error))
     Delete(_, reply) -> process.send(reply, Error(error))
     Cleanup(_, reply) -> process.send(reply, Error(error))
-    Health(reply) -> process.send(reply, Error(error))
   }
   actor.continue(state)
+}
+
+fn handle_read(
+  state: ReadState,
+  command: ReadCommand,
+) -> actor.Next(ReadState, ReadCommand) {
+  case ready_read_connection(state) {
+    Error(error) -> {
+      reject_read(command, error)
+      actor.continue(ReadState(..state, reconnect: True))
+    }
+    Ok(ready) -> actor.continue(handle_ready_read(ready, command))
+  }
+}
+
+fn handle_ready_read(state: ReadState, command: ReadCommand) -> ReadState {
+  case command {
+    Head(key, reply) -> read_response(state, reply, head(state.connection, key))
+    Get(key, range, reply) ->
+      read_response(state, reply, get(state.connection, key, range))
+    ReadRange(key, offset, length, reply) ->
+      read_response(
+        state,
+        reply,
+        read_range(state.connection, key, offset, length),
+      )
+    List(reply) -> read_response(state, reply, list_objects(state.connection))
+    Page(after, limit, reply) ->
+      read_response(state, reply, page_objects(state.connection, after, limit))
+    Health(reply) -> read_response(state, reply, health(state.connection))
+  }
+}
+
+fn read_response(
+  state: ReadState,
+  reply: Subject(Result(value, attachment_store.Error)),
+  outcome: Result(value, attachment_store.Error),
+) -> ReadState {
+  process.send(reply, outcome)
+  case outcome {
+    Error(attachment_store.Unavailable(_)) ->
+      ReadState(..state, reconnect: True)
+    _ -> state
+  }
+}
+
+fn reject_read(command: ReadCommand, error: attachment_store.Error) -> Nil {
+  case command {
+    Head(_, reply) -> {
+      process.send(reply, Error(error))
+      Nil
+    }
+    Get(_, _, reply) -> {
+      process.send(reply, Error(error))
+      Nil
+    }
+    ReadRange(_, _, _, reply) -> {
+      process.send(reply, Error(error))
+      Nil
+    }
+    List(reply) -> {
+      process.send(reply, Error(error))
+      Nil
+    }
+    Page(_, _, reply) -> {
+      process.send(reply, Error(error))
+      Nil
+    }
+    Health(reply) -> {
+      process.send(reply, Error(error))
+      Nil
+    }
+  }
+}
+
+fn ready_read_connection(
+  state: ReadState,
+) -> Result(ReadState, attachment_store.Error) {
+  case state.reconnect {
+    False -> Ok(state)
+    True ->
+      case postgleam.connect(state.config) {
+        Error(error) -> Error(map_error(error))
+        Ok(connection) -> {
+          postgleam.disconnect(state.connection)
+          Ok(ReadState(..state, connection:, reconnect: False))
+        }
+      }
+  }
 }
 
 fn ready_connection(state: State) -> Result(State, attachment_store.Error) {

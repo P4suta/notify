@@ -68,6 +68,7 @@ pub type Error {
   WebPushStartError(webpush.Error)
   RateLimitStartError(rate_limit.Error)
   AuditStartError(audit.Error)
+  HealthStartError
   SQLiteLockError(sqlite_lock.Error)
 }
 
@@ -196,6 +197,10 @@ fn start_after_lock(config: Config) -> Result(StartedServers, Error) {
   )
   let runtime =
     runtime.with_http3(runtime, http3_listener.runtime(http3_started))
+  use runtime <- result.try(
+    runtime.with_health_monitor(runtime)
+    |> result.map_error(fn(_) { HealthStartError }),
+  )
   let body_too_large =
     response.new(413)
     |> response.set_header("content-type", "application/json; charset=utf-8")
@@ -998,6 +1003,7 @@ pub fn error_message(error: Error) -> String {
       "audit storage unavailable: " <> detail
     AuditStartError(audit.Corrupt(detail)) ->
       "audit storage corrupt: " <> detail
+    HealthStartError -> "health snapshot monitor could not start"
     SQLiteLockError(sqlite_lock.AlreadyRunning(path)) ->
       "SQLite database "
       <> path

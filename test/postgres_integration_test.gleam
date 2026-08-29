@@ -179,6 +179,23 @@ fn terminate_application_connection(
   Nil
 }
 
+fn terminate_application_connections(
+  admin: postgleam.Connection,
+  application_name: String,
+) -> Int {
+  let assert Ok(terminated) =
+    postgleam.query_one(
+      admin,
+      "SELECT COUNT(*)::bigint FROM (SELECT pg_terminate_backend(pid) AS terminated FROM pg_stat_activity WHERE application_name = $1 AND pid <> pg_backend_pid()) AS killed WHERE terminated",
+      [postgleam.text(application_name)],
+      {
+        use count <- decode.element(0, decode.int)
+        decode.success(count)
+      },
+    )
+  terminated
+}
+
 fn assert_failed_call_then_reconnects(
   operation: fn() -> Result(value, error),
 ) -> Nil {
@@ -241,8 +258,23 @@ pub fn postgres_auxiliary_lanes_replace_terminated_connections_test() {
           max_total_bytes: 4096,
         )
       assert attachment_store.health() == Ok(Nil)
-      terminate_application_connection(admin, attachment_name)
-      assert_failed_call_then_reconnects(attachment_store.health)
+      // The attachment adapter owns one serialized write connection and four
+      // independent read connections. Exercise every read lane before testing
+      // that the write lane also reconnects on its next command.
+      assert terminate_application_connections(admin, attachment_name) == 5
+      list.repeat(Nil, times: 4)
+      |> list.each(fn(_) {
+        let assert Error(_) = attachment_store.health()
+      })
+      list.repeat(Nil, times: 4)
+      |> list.each(fn(_) {
+        assert attachment_store.health() == Ok(Nil)
+      })
+      let assert Error(_) =
+        attachment_store.begin(attachment_store.BeginUpload(expires: 100))
+      let assert Ok(reconnected_upload) =
+        attachment_store.begin(attachment_store.BeginUpload(expires: 100))
+      assert attachment_store.abort(reconnected_upload) == Ok(Nil)
 
       let webpush_name = "notify-test-webpush-reconnect"
       let assert Ok(webpush_store) =

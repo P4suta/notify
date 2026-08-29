@@ -8,7 +8,9 @@ import gleam/string
 import notify/core/message_json
 import notify/http/router
 import notify/runtime
+import notify/scheduler
 import notify/service
+import notify/storage
 import notify/storage/memory
 
 fn response_body(response: Response(BitArray)) -> String {
@@ -88,4 +90,48 @@ pub fn invalid_delay_is_rejected_without_storage_test() {
     |> request.set_body(<<"Backup complete":utf8>>)
     |> router.handle(runtime)
   assert publish.status == 400
+}
+
+pub fn blocked_cleanup_lane_does_not_stop_due_release_or_health_test() {
+  let due_calls = process.new_subject()
+  let cleanup_started = process.new_subject()
+  let health_calls = process.new_subject()
+  let persistent =
+    storage.Storage(
+      migrate: fn() { Ok(Nil) },
+      save: fn(message) { Ok(message) },
+      query: fn(_) { Ok([]) },
+      has_attachment: fn(_, _) { Ok(False) },
+      release_due: fn(_, _) {
+        process.send(due_calls, Nil)
+        Ok([])
+      },
+      cleanup_expired: fn(_) {
+        let blocked = process.new_subject()
+        process.send(cleanup_started, Nil)
+        let _ = process.receive(blocked, 5000)
+        Ok(0)
+      },
+      stats: fn() { Ok(storage.Stats(0, 0, 0)) },
+      health: fn() {
+        process.send(health_calls, Nil)
+        Ok(Nil)
+      },
+    )
+  let configured =
+    runtime.new(
+      storage: persistent,
+      clock: runtime.Clock(fn() { 1000 }),
+      ids: runtime.IdGenerator(fn() { "Schedule01XY" }),
+      retention_seconds: 43_200,
+    )
+  let supervisor = scheduler.start(configured, 10)
+  let assert Ok(Nil) = process.receive(cleanup_started, 1000)
+  let assert Ok(Nil) = process.receive(due_calls, 1000)
+  let assert Ok(Nil) = process.receive(due_calls, 1000)
+  let snapshot = runtime.health(configured)
+  assert snapshot.storage
+  let assert Ok(Nil) = process.receive(health_calls, 1000)
+  process.unlink(supervisor)
+  process.kill(supervisor)
 }
