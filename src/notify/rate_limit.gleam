@@ -65,7 +65,12 @@ type MemoryState {
 }
 
 type MemoryCommand {
-  MemoryCheck(Bucket, String, Int, Int, Subject(Result(Decision, Error)))
+  MemoryCheckMany(
+    List(#(Bucket, Int)),
+    String,
+    Int,
+    Subject(Result(List(#(Bucket, Decision)), Error)),
+  )
 }
 
 type PostgresCommand {
@@ -86,6 +91,7 @@ type PostgresState {
     policies: Policies,
     window_seconds: Int,
     last_cleanup_at: Int,
+    last_batch_at: Int,
   )
 }
 
@@ -435,16 +441,19 @@ pub fn memory_with_policies(
       limit: fn(bucket) { policy_limit(policies, bucket) },
       window_seconds:,
       check: fn(bucket, client_key, now, cost) {
-        process.call(subject, 5000, fn(reply) {
-          MemoryCheck(bucket, client_key, now, cost, reply)
-        })
+        use decisions <- result.try(memory_check_many(
+          subject,
+          [#(bucket, cost)],
+          client_key,
+          now,
+        ))
+        case decisions {
+          [#(_, decision)] -> Ok(decision)
+          _ -> Error(Unavailable("in-memory rate limiter returned no decision"))
+        }
       },
       check_many: fn(charges, client_key, now) {
-        sequential_checks(charges, fn(bucket, cost) {
-          process.call(subject, 5000, fn(reply) {
-            MemoryCheck(bucket, client_key, now, cost, reply)
-          })
-        })
+        memory_check_many(subject, charges, client_key, now)
       },
     ),
   )
@@ -511,25 +520,67 @@ fn handle_memory(
   state: MemoryState,
   command: MemoryCommand,
 ) -> actor.Next(MemoryState, MemoryCommand) {
-  let MemoryCheck(bucket, client_key, now, cost, reply) = command
-  case validate_cost(cost) {
-    Error(error) -> {
-      process.send(reply, Error(error))
-      actor.continue(state)
-    }
-    Ok(_) -> {
-      let state = cleanup_memory(state, now)
-      let key = scoped_key(bucket, client_key)
-      let capacity = policy_limit(state.policies, bucket)
-      let initial = TokenState(capacity * state.window_seconds, now)
-      let current = dict.get(state.buckets, key) |> result.unwrap(initial)
-      let #(updated, decision) =
-        evaluate(current, capacity, state.window_seconds, now, cost)
-      process.send(reply, Ok(decision))
-      actor.continue(
-        MemoryState(..state, buckets: dict.insert(state.buckets, key, updated)),
-      )
-    }
+  let MemoryCheckMany(charges, client_key, now, reply) = command
+  let #(updated, decisions) =
+    evaluate_memory_checks(state, charges, client_key, now, [])
+  process.send(reply, decisions)
+  actor.continue(updated)
+}
+
+fn memory_check_many(
+  subject: Subject(MemoryCommand),
+  charges: List(#(Bucket, Int)),
+  client_key: String,
+  now: Int,
+) -> Result(List(#(Bucket, Decision)), Error) {
+  case charges {
+    [] -> Ok([])
+    _ ->
+      process.call(subject, 5000, fn(reply) {
+        MemoryCheckMany(charges, client_key, now, reply)
+      })
+  }
+}
+
+fn evaluate_memory_checks(
+  state: MemoryState,
+  charges: List(#(Bucket, Int)),
+  client_key: String,
+  now: Int,
+  accumulated: List(#(Bucket, Decision)),
+) -> #(MemoryState, Result(List(#(Bucket, Decision)), Error)) {
+  case charges {
+    [] -> #(state, Ok(list.reverse(accumulated)))
+    [#(bucket, cost), ..remaining] ->
+      case validate_cost(cost) {
+        Error(error) -> #(state, Error(error))
+        Ok(_) -> {
+          let state = cleanup_memory(state, now)
+          let key = scoped_key(bucket, client_key)
+          let capacity = policy_limit(state.policies, bucket)
+          let initial = TokenState(capacity * state.window_seconds, now)
+          let current = dict.get(state.buckets, key) |> result.unwrap(initial)
+          let #(updated_bucket, decision) =
+            evaluate(current, capacity, state.window_seconds, now, cost)
+          let state =
+            MemoryState(
+              ..state,
+              buckets: dict.insert(state.buckets, key, updated_bucket),
+            )
+          let accumulated = [#(bucket, decision), ..accumulated]
+          case decision {
+            Limited(..) -> #(state, Ok(list.reverse(accumulated)))
+            Allowed(..) ->
+              evaluate_memory_checks(
+                state,
+                remaining,
+                client_key,
+                now,
+                accumulated,
+              )
+          }
+        }
+      }
   }
 }
 
@@ -550,6 +601,8 @@ fn start_postgres_actor(
           policies:,
           window_seconds:,
           last_cleanup_at: 0,
+          last_batch_at: monotonic_milliseconds()
+            - postgres_batch_wait_milliseconds,
         ))
         |> actor.returning(subject),
       )
@@ -604,11 +657,18 @@ fn handle_postgres(
   state: PostgresState,
   command: PostgresCommand,
 ) -> actor.Next(PostgresState, PostgresCommand) {
+  let batch_started_at = monotonic_milliseconds()
   let commands =
     collect_postgres_commands(
       state.subject,
       postgres_batch_size - 1,
-      postgres_batch_wait_milliseconds,
+      case
+        batch_started_at - state.last_batch_at
+        >= postgres_batch_wait_milliseconds
+      {
+        True -> 1
+        False -> postgres_batch_wait_milliseconds
+      },
       [command],
     )
   let pending = prepare_postgres_checks(commands, [])
@@ -643,11 +703,12 @@ fn handle_postgres(
         1,
       )
   }
-  actor.continue(case cleanup, outcome {
+  let next = case cleanup, outcome {
     True, Ok(_) ->
       PostgresState(..next, last_cleanup_at: int.max(checked_at, 0))
     _, _ -> next
-  })
+  }
+  actor.continue(PostgresState(..next, last_batch_at: monotonic_milliseconds()))
 }
 
 fn ready_postgres_connection(
@@ -672,20 +733,30 @@ fn collect_postgres_commands(
   wait_milliseconds: Int,
   accumulated: List(PostgresCommand),
 ) -> List(PostgresCommand) {
-  // Wait for the complete, bounded coalescing window before draining. Waking
-  // on the first companion request made a nominal 16 ms window collect only
-  // two requests at the steady three-node publish rate.
-  process.sleep(wait_milliseconds)
-  drain_postgres_commands(subject, remaining, accumulated)
+  let #(remaining, accumulated) =
+    drain_postgres_commands(subject, remaining, accumulated)
+  case remaining > 0 {
+    False -> list.reverse(accumulated)
+    True -> {
+      // Preserve the complete coalescing window, but only after commands that
+      // were already waiting have been drained. Idle traffic pays a 1 ms
+      // window while a continuously busy actor retains the established 16 ms
+      // batch window.
+      process.sleep(wait_milliseconds)
+      let #(_, accumulated) =
+        drain_postgres_commands(subject, remaining, accumulated)
+      list.reverse(accumulated)
+    }
+  }
 }
 
 fn drain_postgres_commands(
   subject: Subject(PostgresCommand),
   remaining: Int,
   accumulated: List(PostgresCommand),
-) -> List(PostgresCommand) {
+) -> #(Int, List(PostgresCommand)) {
   case remaining > 0 {
-    False -> list.reverse(accumulated)
+    False -> #(0, accumulated)
     True ->
       case process.receive(subject, 0) {
         Ok(command) ->
@@ -693,7 +764,7 @@ fn drain_postgres_commands(
             command,
             ..accumulated
           ])
-        Error(_) -> list.reverse(accumulated)
+        Error(_) -> #(remaining, accumulated)
       }
   }
 }
@@ -889,31 +960,6 @@ fn postgres_decisions(
   }
 }
 
-fn sequential_checks(
-  charges: List(#(Bucket, Int)),
-  check: fn(Bucket, Int) -> Result(Decision, Error),
-) -> Result(List(#(Bucket, Decision)), Error) {
-  sequential_checks_loop(charges, check, [])
-}
-
-fn sequential_checks_loop(
-  charges: List(#(Bucket, Int)),
-  check: fn(Bucket, Int) -> Result(Decision, Error),
-  accumulated: List(#(Bucket, Decision)),
-) -> Result(List(#(Bucket, Decision)), Error) {
-  case charges {
-    [] -> Ok(list.reverse(accumulated))
-    [#(bucket, cost), ..remaining] -> {
-      use decision <- result.try(check(bucket, cost))
-      let accumulated = [#(bucket, decision), ..accumulated]
-      case decision {
-        Limited(..) -> Ok(list.reverse(accumulated))
-        Allowed(..) -> sequential_checks_loop(remaining, check, accumulated)
-      }
-    }
-  }
-}
-
 fn postgres_decision(
   state: TokenState,
   allowed: Bool,
@@ -1066,3 +1112,6 @@ fn map_postgres_error(error: pg_error.Error) -> Error {
     pg_error.TimeoutError -> Unavailable("PostgreSQL request timed out")
   }
 }
+
+@external(erlang, "notify_ffi", "monotonic_milliseconds")
+fn monotonic_milliseconds() -> Int

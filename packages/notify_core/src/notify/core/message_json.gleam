@@ -49,64 +49,76 @@ pub fn encode(message: Message) -> Json {
 /// Storage payloads preserve delivery state that must not appear on the ntfy
 /// wire. `decoder` accepts both storage and wire payloads.
 pub fn encode_storage(message: Message) -> Json {
-  message
-  |> encode_fields
-  |> list.append([
-    #("_notify_scheduled", json.bool(message.scheduled)),
+  [
     #("_notify_cached", json.bool(message.cached)),
-  ])
+    #("_notify_scheduled", json.bool(message.scheduled)),
+    ..encode_fields_reversed(message)
+  ]
+  |> list.reverse
   |> json.object
 }
 
 fn encode_fields(message: Message) -> List(#(String, Json)) {
+  message |> encode_fields_reversed |> list.reverse
+}
+
+// Fields are accumulated in reverse wire order so every optional addition is
+// constant time. The single final reverse above deliberately preserves the
+// established ntfy byte representation and its stable key order.
+fn encode_fields_reversed(message: Message) -> List(#(String, Json)) {
   let fields = [
-    #("id", json.string(message.id)),
     #("time", json.int(message.time)),
+    #("id", json.string(message.id)),
   ]
   let fields = case message.event {
     message.MessageEvent ->
-      append_optional(fields, "expires", message.expires, json.int)
+      prepend_optional(fields, "expires", message.expires, json.int)
     _ -> fields
   }
-  let fields =
-    list.append(fields, [
-      #("event", json.string(message.event |> message.event_to_string)),
-      #("topic", json.string(topic.to_string(message.topic))),
-    ])
+  let fields = [
+    #("topic", json.string(topic.to_string(message.topic))),
+    #("event", json.string(message.event |> message.event_to_string)),
+    ..fields
+  ]
   let fields = case message.event {
-    message.MessageEvent | message.PollRequestEvent ->
-      list.append(fields, [#("message", json.string(message.message))])
+    message.MessageEvent | message.PollRequestEvent -> [
+      #("message", json.string(message.message)),
+      ..fields
+    ]
     _ -> fields
   }
-  let fields = append_optional(fields, "title", message.title, json.string)
+  let fields = prepend_optional(fields, "title", message.title, json.string)
   let fields = case message.priority {
     message.Default -> fields
-    priority ->
-      list.append(fields, [
-        #("priority", json.int(message.priority_to_int(priority))),
-      ])
+    priority -> [
+      #("priority", json.int(message.priority_to_int(priority))),
+      ..fields
+    ]
   }
   let fields = case message.tags {
     [] -> fields
-    tags -> list.append(fields, [#("tags", json.array(tags, json.string))])
+    tags -> [#("tags", json.array(tags, json.string)), ..fields]
   }
   let fields = case message.markdown {
     False -> fields
-    True ->
-      list.append(fields, [#("content_type", json.string("text/markdown"))])
+    True -> [#("content_type", json.string("text/markdown")), ..fields]
   }
-  let fields = append_optional(fields, "icon", message.icon, json.string)
-  let fields = append_optional(fields, "click", message.click, json.string)
+  let fields = prepend_optional(fields, "icon", message.icon, json.string)
+  let fields = prepend_optional(fields, "click", message.click, json.string)
   let fields = case message.actions {
     [] -> fields
-    actions ->
-      list.append(fields, [#("actions", json.array(actions, encode_action))])
+    actions -> [#("actions", json.array(actions, encode_action)), ..fields]
   }
   let fields =
-    append_optional(fields, "attachment", message.attachment, encode_attachment)
+    prepend_optional(
+      fields,
+      "attachment",
+      message.attachment,
+      encode_attachment,
+    )
   fields
-  |> append_optional("sequence_id", message.sequence_id, json.string)
-  |> append_optional("poll_id", message.poll_id, json.string)
+  |> prepend_optional("sequence_id", message.sequence_id, json.string)
+  |> prepend_optional("poll_id", message.poll_id, json.string)
 }
 
 pub fn encode_control(
@@ -123,7 +135,7 @@ pub fn encode_control(
   ])
 }
 
-fn append_optional(
+fn prepend_optional(
   fields: List(#(String, Json)),
   name: String,
   value: Option(a),
@@ -131,7 +143,7 @@ fn append_optional(
 ) -> List(#(String, Json)) {
   case value {
     None -> fields
-    Some(value) -> list.append(fields, [#(name, encoder(value))])
+    Some(value) -> [#(name, encoder(value)), ..fields]
   }
 }
 
@@ -139,58 +151,62 @@ fn encode_action(action: Action) -> Json {
   case action {
     message.ViewAction(label:, url:, clear:, id:) ->
       [
-        #("action", json.string("view")),
-        #("label", json.string(label)),
-        #("url", json.string(url)),
         #("clear", json.bool(clear)),
+        #("url", json.string(url)),
+        #("label", json.string(label)),
+        #("action", json.string("view")),
       ]
-      |> append_optional("id", id, json.string)
+      |> prepend_optional("id", id, json.string)
+      |> list.reverse
       |> json.object
     message.HttpAction(label:, url:, method:, headers:, body:, clear:, id:) -> {
       let fields = [
-        #("action", json.string("http")),
-        #("label", json.string(label)),
-        #("url", json.string(url)),
-        #("method", json.string(method)),
+        #("clear", json.bool(clear)),
         #(
           "headers",
           json.object(
             list.map(headers, fn(pair) { #(pair.0, json.string(pair.1)) }),
           ),
         ),
-        #("clear", json.bool(clear)),
+        #("method", json.string(method)),
+        #("url", json.string(url)),
+        #("label", json.string(label)),
+        #("action", json.string("http")),
       ]
       fields
-      |> append_optional("body", body, json.string)
-      |> append_optional("id", id, json.string)
+      |> prepend_optional("body", body, json.string)
+      |> prepend_optional("id", id, json.string)
+      |> list.reverse
       |> json.object
     }
     message.CopyAction(label:, value:, clear:, id:) ->
       [
-        #("action", json.string("copy")),
-        #("label", json.string(label)),
-        #("value", json.string(value)),
         #("clear", json.bool(clear)),
+        #("value", json.string(value)),
+        #("label", json.string(label)),
+        #("action", json.string("copy")),
       ]
-      |> append_optional("id", id, json.string)
+      |> prepend_optional("id", id, json.string)
+      |> list.reverse
       |> json.object
   }
 }
 
 fn encode_attachment(attachment: Attachment) -> Json {
   let message.Attachment(name:, url:, mime_type:, size:, expires:) = attachment
-  [#("name", json.string(name)), #("url", json.string(url))]
-  |> append_optional("type", mime_type, json.string)
-  |> append_optional("size", size, json.int)
-  |> append_optional("expires", expires, json.int)
+  [#("url", json.string(url)), #("name", json.string(name))]
+  |> prepend_optional("type", mime_type, json.string)
+  |> prepend_optional("size", size, json.int)
+  |> prepend_optional("expires", expires, json.int)
+  |> list.reverse
   |> json.object
 }
 
 pub fn decode_publish(body: String) -> Result(Draft, DecodeError) {
   case json.parse(body, decode.dynamic) {
     Error(_) -> Error(MalformedJson)
-    Ok(_) ->
-      case json.parse(body, raw_publish_decoder()) {
+    Ok(dynamic) ->
+      case decode.run(dynamic, raw_publish_decoder()) {
         Error(_) -> Error(InvalidJson)
         Ok(raw) -> raw_to_draft(raw)
       }
