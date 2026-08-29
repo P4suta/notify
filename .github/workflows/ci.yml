@@ -52,7 +52,7 @@ jobs:
           test/native_zig_install_test.sh
           test/windows_nif_headers_test.sh
           python3 test/native_http3_dependency_contract_test.py
-          node --test test/pwa_contract_test.mjs test/cluster_soak_contract_test.mjs
+          node --test test/pwa_contract_test.mjs test/cluster_soak_contract_test.mjs test/backend_benchmark_matrix_test.mjs
           jq -e . priv/public/openapi.json >/dev/null
 
   integration:

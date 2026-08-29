@@ -27,11 +27,32 @@ test("target defaults are the production-readiness acceptance values", () => {
   assert.equal(configuration.topics, 1_000);
   assert.equal(configuration.commitP95BudgetMs, 200);
   assert.equal(configuration.format, "json");
+  assert.equal(configuration.backend, "postgres");
+  assert.equal(configuration.scenario, "publish");
   assert.deepEqual(configuration.endpoints, [
     "http://127.0.0.1:8080",
     "http://127.0.0.1:8081",
     "http://127.0.0.1:8082",
   ]);
+});
+
+test("background and attachment benchmark scenarios are explicit", () => {
+  for (const scenario of [
+    "publish",
+    "webpush-relay",
+    "scheduled",
+    "slow-provider",
+    "attachments",
+  ]) {
+    assert.equal(
+      loadConfiguration({ NOTIFY_BENCHMARK_SCENARIO: scenario }).scenario,
+      scenario,
+    );
+  }
+  assert.throws(
+    () => loadConfiguration({ NOTIFY_BENCHMARK_SCENARIO: "unknown" }),
+    /NOTIFY_BENCHMARK_SCENARIO/,
+  );
 });
 
 test("all streaming transports are explicit validated configuration", () => {
@@ -49,6 +70,24 @@ test("all streaming transports are explicit validated configuration", () => {
   assert.equal(
     subscriptionPath("alerts", "websocket"),
     "/alerts/ws?since=none",
+  );
+});
+
+test("SQLite uses the same driver matrix with one endpoint", () => {
+  const configuration = loadConfiguration({
+    NOTIFY_SOAK_BACKEND: "sqlite",
+    NOTIFY_SOAK_ENDPOINTS: "http://127.0.0.1:8080",
+  });
+  assert.equal(configuration.backend, "sqlite");
+  assert.deepEqual(configuration.endpoints, ["http://127.0.0.1:8080"]);
+  assert.throws(
+    () =>
+      loadConfiguration({
+        NOTIFY_SOAK_BACKEND: "sqlite",
+        NOTIFY_SOAK_ENDPOINTS:
+          "http://127.0.0.1:8080,http://127.0.0.1:8081,http://127.0.0.1:8082",
+      }),
+    /exactly 1 URL/,
   );
 });
 

@@ -2,9 +2,10 @@
 services:
   notify:
     build: .
+    image: ${NOTIFY_SQLITE_IMAGE:-notify:sqlite-local}
     ports:
-      - "8080:8080/tcp"
-      - "8080:8080/udp"
+      - "${NOTIFY_SQLITE_PORT:-8080}:8080/tcp"
+      - "${NOTIFY_SQLITE_PORT:-8080}:8080/udp"
     environment:
       NOTIFY_BIND: 0.0.0.0
       NOTIFY_BASE_URL: http://localhost:8080
@@ -12,9 +13,24 @@ services:
       NOTIFY_DATABASE_PATH: /data/notify.db
       NOTIFY_ATTACHMENT_BACKEND: filesystem
       NOTIFY_ATTACHMENT_DIRECTORY: /data/attachments
+      NOTIFY_RATE_LIMIT_REQUESTS: "${NOTIFY_SQLITE_RATE_LIMIT_REQUESTS:-120}"
+      NOTIFY_RATE_LIMIT_SUBSCRIPTIONS: "${NOTIFY_SQLITE_RATE_LIMIT_SUBSCRIPTIONS:-30}"
+      NOTIFY_RATE_LIMIT_TOPIC_CREATIONS: "${NOTIFY_SQLITE_RATE_LIMIT_TOPIC_CREATIONS:-60}"
+      NOTIFY_RATE_LIMIT_WINDOW_SECONDS: "${NOTIFY_SQLITE_RATE_LIMIT_WINDOW_SECONDS:-60}"
+      NOTIFY_RELAY_URL: "${NOTIFY_SQLITE_RELAY_URL:-}"
+      NOTIFY_RELAY_TOKEN: "${NOTIFY_SQLITE_RELAY_TOKEN:-}"
     volumes:
       - notify-data:/data
     restart: unless-stopped
+
+  relay-benchmark:
+    image: ${NOTIFY_SQLITE_IMAGE:-notify:sqlite-local}
+    entrypoint: ["escript", "/test/relay_benchmark_server.escript"]
+    command: []
+    environment:
+      NOTIFY_RELAY_DELAY_MS: "${NOTIFY_RELAY_DELAY_MS:-0}"
+    volumes:
+      - ./test/relay_benchmark_server.escript:/test/relay_benchmark_server.escript:ro
 
 volumes:
   notify-data:

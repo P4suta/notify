@@ -7,7 +7,7 @@ import https from "node:https";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import { performance } from "node:perf_hooks";
+import { monitorEventLoopDelay, performance } from "node:perf_hooks";
 import {
   isMainThread,
   parentPort,
@@ -59,8 +59,15 @@ export function loadConfiguration(environment = process.env) {
     .split(",")
     .map((endpoint) => endpoint.trim())
     .filter(Boolean);
-  if (endpoints.length !== 3) {
-    throw new Error("NOTIFY_SOAK_ENDPOINTS must contain exactly three URLs");
+  const backend = environment.NOTIFY_SOAK_BACKEND ?? "postgres";
+  if (!["postgres", "sqlite"].includes(backend)) {
+    throw new Error("NOTIFY_SOAK_BACKEND must be postgres or sqlite");
+  }
+  const expectedEndpoints = backend === "postgres" ? 3 : 1;
+  if (endpoints.length !== expectedEndpoints) {
+    throw new Error(
+      `NOTIFY_SOAK_ENDPOINTS must contain exactly ${expectedEndpoints} URL${expectedEndpoints === 1 ? "" : "s"} for ${backend}`,
+    );
   }
   const topicPrefix =
     environment.NOTIFY_SOAK_TOPIC_PREFIX ?? `soak-${process.pid}`;
@@ -75,6 +82,20 @@ export function loadConfiguration(environment = process.env) {
   if (!["json", "raw", "sse", "websocket"].includes(format)) {
     throw new Error(
       "NOTIFY_SOAK_FORMAT must be json, raw, sse, or websocket",
+    );
+  }
+  const scenario = environment.NOTIFY_BENCHMARK_SCENARIO ?? "publish";
+  if (
+    ![
+      "publish",
+      "webpush-relay",
+      "scheduled",
+      "slow-provider",
+      "attachments",
+    ].includes(scenario)
+  ) {
+    throw new Error(
+      "NOTIFY_BENCHMARK_SCENARIO must be publish, webpush-relay, scheduled, slow-provider, or attachments",
     );
   }
 
@@ -138,6 +159,8 @@ export function loadConfiguration(environment = process.env) {
       1_800,
     ),
     endpoints,
+    backend,
+    scenario,
     format,
     topicPrefix,
     reportPath: environment.NOTIFY_SOAK_REPORT_PATH ?? "",
@@ -524,7 +547,10 @@ function parseRaw(state, chunk, onDelivery, onError) {
       state.keepalives = (state.keepalives ?? 0) + 1;
       continue;
     }
-    if (!/^soak-[0-9]+$/.test(line)) {
+    if (
+      !/^soak-[0-9]+$/.test(line) &&
+      !/^You received a file: soak-[0-9]+\.bin$/.test(line)
+    ) {
       onError(`subscriber ${state.index} received malformed raw payload`);
       continue;
     }
@@ -853,6 +879,7 @@ async function openSubscribers(configuration, topics, agents, errors) {
       websocketBuffer: Buffer.alloc(0),
       messageIds: [],
       rawPayloads: [],
+      deliveries: [],
       keepalives: 0,
       opened: false,
       disconnected: false,
@@ -885,6 +912,10 @@ async function openSubscribers(configuration, topics, agents, errors) {
           timeoutMilliseconds,
           configuration.format,
           (delivery) => {
+            subscriber.deliveries.push({
+              ...delivery,
+              receivedAt: performance.timeOrigin + performance.now(),
+            });
             if (delivery.id === null) {
               subscriber.rawPayloads.push(delivery.payload);
             } else {
@@ -908,18 +939,29 @@ async function openSubscribers(configuration, topics, agents, errors) {
   return { subscribers, received: () => received };
 }
 
-function publishOne(index, topic, endpoint, agent) {
+function publishOne(index, topic, endpoint, agent, scenario) {
   const url = new URL(messagePath(topic), endpoint);
   const payload = `soak-${index}`;
+  const expectedMessage =
+    scenario === "attachments"
+      ? `You received a file: soak-${index}.bin`
+      : payload;
+  const headers = {
+    "content-type":
+      scenario === "attachments"
+        ? "application/octet-stream"
+        : "text/plain; charset=utf-8",
+    "content-length": Buffer.byteLength(payload),
+  };
+  if (scenario === "scheduled") headers["x-delay"] = "10s";
+  if (scenario === "attachments") headers["x-filename"] = `soak-${index}.bin`;
   const startedAt = performance.now();
+  const startedWallAt = performance.timeOrigin + startedAt;
   return new Promise((resolve, reject) => {
     const request = transport(url).request(url, {
       agent,
       method: "POST",
-      headers: {
-        "content-type": "text/plain; charset=utf-8",
-        "content-length": Buffer.byteLength(payload),
-      },
+      headers,
     });
     request.on("response", (response) => {
       response.setEncoding("utf8");
@@ -945,18 +987,22 @@ function publishOne(index, topic, endpoint, agent) {
         if (
           event.event !== "message" ||
           event.topic !== topic ||
-          event.message !== payload ||
+          event.message !== expectedMessage ||
           !messageIdPattern.test(event.id)
         ) {
           reject(new Error(`publish ${index} returned malformed message metadata`));
           return;
         }
+        const completedAt = performance.now();
         resolve({
           id: event.id,
           topic,
-          payload,
+          payload: expectedMessage,
           latencyMs,
-          completedAt: performance.now(),
+          startedAt,
+          completedAt,
+          startedWallAt,
+          completedWallAt: performance.timeOrigin + completedAt,
         });
       });
     });
@@ -996,6 +1042,7 @@ async function publishAtRate(configuration, topics, agents, errors) {
       topic,
       configuration.endpoints[endpointIndex],
       agents[endpointIndex],
+      configuration.scenario,
     )
       .then((published) => {
         if (allIds.has(published.id)) {
@@ -1185,8 +1232,34 @@ function roundedLatency(summary) {
   );
 }
 
+function deliveryLatencySamples(subscribers, publishedByPayload) {
+  const endToEnd = [];
+  const afterCommit = [];
+  for (const subscriber of subscribers) {
+    for (const delivery of subscriber.deliveries) {
+      const published = publishedByPayload.get(delivery.payload);
+      if (!published || published.topic !== subscriber.topic) continue;
+      endToEnd.push(
+        Math.max(0, delivery.receivedAt - published.startedWallAt),
+      );
+      afterCommit.push(
+        Math.max(0, delivery.receivedAt - published.completedWallAt),
+      );
+    }
+  }
+  return { endToEnd, afterCommit };
+}
+
 export async function runSoak(configuration) {
   const startedAt = new Date();
+  const cpuStarted = process.cpuUsage();
+  let peakRssBytes = process.memoryUsage().rss;
+  const memorySampler = setInterval(() => {
+    peakRssBytes = Math.max(peakRssBytes, process.memoryUsage().rss);
+  }, 100);
+  memorySampler.unref();
+  const eventLoopDelay = monitorEventLoopDelay({ resolution: 10 });
+  eventLoopDelay.enable();
   const errors = [];
   const maximumSockets =
     Math.ceil(configuration.subscriptions / configuration.endpoints.length) +
@@ -1215,6 +1288,12 @@ export async function runSoak(configuration) {
       published.publishedByTopic,
       subscribers,
     );
+    const deliveryLatencies = deliveryLatencySamples(
+      subscribers,
+      published.publishedByPayload,
+    );
+    const cpu = process.cpuUsage(cpuStarted);
+    const cpuMicroseconds = cpu.user + cpu.system;
     const report = {
       schemaVersion: 1,
       startedAt: startedAt.toISOString(),
@@ -1237,6 +1316,8 @@ export async function runSoak(configuration) {
         schedulingLagBudgetMs: configuration.schedulingLagBudgetMs,
         settleSeconds: configuration.settleSeconds,
         format: configuration.format,
+        backend: configuration.backend,
+        scenario: configuration.scenario,
         endpoints: configuration.endpoints,
       },
       subscriptions: {
@@ -1276,6 +1357,27 @@ export async function runSoak(configuration) {
         duplicates: validation.duplicateDeliveries,
         unexpected: validation.unexpectedDeliveries,
         orderMismatches: validation.orderMismatches,
+        endToEndLatencyMs: roundedLatency(
+          latencySummary(deliveryLatencies.endToEnd),
+        ),
+        afterCommitLatencyMs: roundedLatency(
+          latencySummary(deliveryLatencies.afterCommit),
+        ),
+      },
+      driverResources: {
+        cpuMicroseconds,
+        cpuMicrosecondsPerPublish:
+          published.committed === 0
+            ? null
+            : rounded(cpuMicroseconds / published.committed),
+        peakRssBytes,
+        finalRssBytes: process.memoryUsage().rss,
+        eventLoopDelayMs: {
+          p50: rounded(eventLoopDelay.percentile(50) / 1_000_000),
+          p95: rounded(eventLoopDelay.percentile(95) / 1_000_000),
+          p99: rounded(eventLoopDelay.percentile(99) / 1_000_000),
+          maximum: rounded(eventLoopDelay.max / 1_000_000),
+        },
       },
       examples: [...errors, ...validation.examples].slice(0, maximumExamples),
     };
@@ -1287,6 +1389,8 @@ export async function runSoak(configuration) {
     );
     return report;
   } finally {
+    clearInterval(memorySampler);
+    eventLoopDelay.disable();
     closeSubscribers(subscribers, agents);
   }
 }

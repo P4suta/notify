@@ -316,10 +316,12 @@ dedicated commit microbatch and event-cursor lane in `b0873a2` address that
 observed failure mode. The incomplete attempt is not counted as a benchmark
 pass.
 
-The local acceptance command is `test/cluster_soak.sh`. It is loopback-only by
-default and starts an isolated three-node Compose project with PostgreSQL and
-MinIO. `NOTIFY_SOAK_FORMAT` selects JSON, raw, SSE, or WebSocket; the
-weekly/manual workflow runs the target once per format. The driver paces
+The PostgreSQL acceptance command is `test/cluster_soak.sh`; the equivalent
+single-node SQLite command is `test/sqlite_soak.sh`. Both are loopback-only by
+default and use isolated Compose projects. `NOTIFY_SOAK_FORMAT` selects JSON,
+raw, SSE, or WebSocket, and `NOTIFY_BENCHMARK_SCENARIO` selects ordinary
+publish, relay, scheduled delivery, a slow provider, or concurrent attachment
+traffic. The weekly/manual workflow runs both backends once per format. The driver paces
 publish starts independently of completion on a dedicated Node worker thread,
 so decoding 10,000 subscriber streams cannot delay the response-latency clock.
 The resource observer defaults to a one-minute interval, records that value in
@@ -340,10 +342,24 @@ Runs of at least 90 seconds also require every subscriber to observe the
 45-second keepalive cadence. The verifier additionally requires exactly the
 expected three node cursors and zero final lag from the event-log head. Missing
 oracle evidence makes the verdict fail.
-Environment, database size and row counts, cursor positions, container/OOM
-state, and periodic resource samples are separate report files. The
+Environment, database size and row counts, PostgreSQL statement/transaction
+counts, container CPU/RSS, BEAM run queue/mailboxes/timer delay, driver
+CPU/message, delivery p50/p95/p99, cursor positions, and container/OOM state
+are separate report evidence. The
 weekly/manual workflow uses the exact defaults above for all four formats and
 retains these private artifacts for seven days.
+
+For optimization decisions, `test/backend_benchmark_matrix.mjs` accepts a JSON
+configuration containing separate baseline and candidate command arrays. Its
+normal mode refuses fewer than seven repetitions and alternates A/B then B/A
+within every backend/format/scenario cell. It reports deterministic 95%
+bootstrap confidence intervals; use `--final` for candidate-only 600-second,
+three-run acceptance. `--ramp` walks an increasing `rampRates` list, stops a
+backend/format cell at its first failed rate, and requires its maximum
+sustained rate to exceed `minimumSustainedPublishRate` (500 by default).
+`--plan` prints the complete execution order without starting containers. Each
+command receives the backend, format, scenario, duration, rate, and unique
+report directory through the `NOTIFY_*` environment.
 
 ## SQLite schema refusal and recovery
 

@@ -38,6 +38,14 @@ x-notify: &notify
 services:
   postgres:
     image: postgres:17.11-alpine3.24
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - compute_query_id=on
+      - -c
+      - pg_stat_statements.track=all
     environment:
       POSTGRES_DB: notify
       POSTGRES_USER: notify
@@ -80,6 +88,15 @@ services:
     command: []
     volumes:
       - ./test/relay_fault_server.escript:/test/relay_fault_server.escript:ro
+
+  relay-benchmark:
+    image: ${NOTIFY_CLUSTER_IMAGE:-notify:cluster-local}
+    entrypoint: ["escript", "/test/relay_benchmark_server.escript"]
+    command: []
+    environment:
+      NOTIFY_RELAY_DELAY_MS: "${NOTIFY_RELAY_DELAY_MS:-0}"
+    volumes:
+      - ./test/relay_benchmark_server.escript:/test/relay_benchmark_server.escript:ro
 
   notify-a:
     <<: *notify
