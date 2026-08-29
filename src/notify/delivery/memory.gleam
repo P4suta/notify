@@ -102,9 +102,7 @@ fn handle(jobs: List(Job), command: Command) -> actor.Next(List(Job), Command) {
     }
     Claim(kind, owner, now, lease_seconds, limit, reply) -> {
       let selected =
-        jobs
-        |> list.filter(fn(job) { claimable(job, kind, now) })
-        |> list.take(limit)
+        select_endpoint_heads(jobs, kind, now, min(16, max(0, limit)), [], [])
         |> list.map(fn(job) {
           delivery.Job(
             ..job,
@@ -305,5 +303,72 @@ fn claimable(job: Job, kind: delivery.Kind, now: Int) -> Bool {
     delivery.Pending, _ -> job.available_at <= now
     delivery.Leased, Some(until) -> until <= now
     _, _ -> False
+  }
+}
+
+fn select_endpoint_heads(
+  jobs: List(Job),
+  kind: delivery.Kind,
+  now: Int,
+  remaining: Int,
+  seen_endpoints: List(String),
+  selected: List(Job),
+) -> List(Job) {
+  case jobs, remaining {
+    _, 0 -> list.reverse(selected)
+    [], _ -> list.reverse(selected)
+    [job, ..rest], _ ->
+      case
+        job.kind == kind,
+        job.state == delivery.DeadLetter,
+        list.contains(seen_endpoints, job.endpoint)
+      {
+        False, _, _ | _, True, _ | _, _, True ->
+          select_endpoint_heads(
+            rest,
+            kind,
+            now,
+            remaining,
+            seen_endpoints,
+            selected,
+          )
+        True, False, False -> {
+          let seen_endpoints = [job.endpoint, ..seen_endpoints]
+          case claimable(job, kind, now) {
+            True ->
+              select_endpoint_heads(
+                rest,
+                kind,
+                now,
+                remaining - 1,
+                seen_endpoints,
+                [job, ..selected],
+              )
+            False ->
+              select_endpoint_heads(
+                rest,
+                kind,
+                now,
+                remaining,
+                seen_endpoints,
+                selected,
+              )
+          }
+        }
+      }
+  }
+}
+
+fn min(first: Int, second: Int) -> Int {
+  case first < second {
+    True -> first
+    False -> second
+  }
+}
+
+fn max(first: Int, second: Int) -> Int {
+  case first > second {
+    True -> first
+    False -> second
   }
 }

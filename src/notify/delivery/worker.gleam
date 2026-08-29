@@ -1,4 +1,5 @@
 import gleam/erlang/process.{type Pid}
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/otp/supervision.{type ChildSpecification}
 import gleam/result
@@ -10,6 +11,11 @@ pub type Provider {
 
 pub type Report {
   Report(claimed: Int, delivered: Int, retried: Int, dead_lettered: Int)
+}
+
+type ProviderResult {
+  ProviderDelivered(Job)
+  ProviderFailed(Job, String)
 }
 
 /// Runs a durable provider continuously. Leases make an interrupted worker
@@ -46,18 +52,21 @@ fn loop(
   now: fn() -> Int,
   interval_milliseconds: Int,
 ) -> Nil {
-  let _ =
+  let outcome =
     run_once(
       outbox,
       provider,
       worker_id:,
       now: now(),
       lease_seconds: 60,
-      limit: 100,
+      limit: 16,
       max_attempts: 10,
       base_delay_seconds: 5,
     )
-  process.sleep(interval_milliseconds)
+  case outcome {
+    Ok(report) if report.claimed > 0 -> Nil
+    _ -> process.sleep(interval_milliseconds)
+  }
   loop(outbox, provider, worker_id, now, interval_milliseconds)
 }
 
@@ -76,9 +85,9 @@ pub fn run_once(
     worker_id,
     now,
     lease_seconds,
-    limit,
+    min(16, max(0, limit)),
   ))
-  deliver_jobs(
+  deliver_jobs_concurrently(
     jobs,
     outbox,
     provider,
@@ -95,7 +104,7 @@ pub fn run_once(
   )
 }
 
-fn deliver_jobs(
+fn deliver_jobs_concurrently(
   jobs: List(Job),
   outbox: Store,
   provider: Provider,
@@ -105,49 +114,105 @@ fn deliver_jobs(
   base_delay: Int,
   report: Report,
 ) -> Result(Report, delivery.Error) {
+  let results = process.new_subject()
+  spawn_deliveries(jobs, provider, results)
+  settle_deliveries(
+    list_length(jobs),
+    results,
+    outbox,
+    worker_id,
+    now,
+    max_attempts,
+    base_delay,
+    report,
+    None,
+  )
+}
+
+fn spawn_deliveries(
+  jobs: List(Job),
+  provider: Provider,
+  results: process.Subject(ProviderResult),
+) -> Nil {
   case jobs {
-    [] -> Ok(report)
-    [job, ..rest] ->
-      case provider.deliver(job) {
-        Ok(_) -> {
-          use _ <- result.try(outbox.complete(job.id, worker_id))
-          deliver_jobs(
-            rest,
-            outbox,
-            provider,
-            worker_id,
-            now,
-            max_attempts,
-            base_delay,
-            Report(..report, delivered: report.delivered + 1),
-          )
-        }
-        Error(detail) -> {
-          use failed <- result.try(outbox.fail(
-            job.id,
-            worker_id,
-            now,
-            detail,
-            max_attempts,
-            base_delay,
-          ))
-          let updated = case failed.state {
-            delivery.DeadLetter ->
-              Report(..report, dead_lettered: report.dead_lettered + 1)
-            _ -> Report(..report, retried: report.retried + 1)
-          }
-          deliver_jobs(
-            rest,
-            outbox,
-            provider,
-            worker_id,
-            now,
-            max_attempts,
-            base_delay,
-            updated,
-          )
-        }
+    [] -> Nil
+    [job, ..remaining] -> {
+      process.spawn(fn() {
+        process.send(results, case provider.deliver(job) {
+          Ok(_) -> ProviderDelivered(job)
+          Error(detail) -> ProviderFailed(job, detail)
+        })
+      })
+      spawn_deliveries(remaining, provider, results)
+    }
+  }
+}
+
+fn settle_deliveries(
+  remaining: Int,
+  results: process.Subject(ProviderResult),
+  outbox: Store,
+  worker_id: String,
+  now: Int,
+  max_attempts: Int,
+  base_delay: Int,
+  report: Report,
+  first_error: Option(delivery.Error),
+) -> Result(Report, delivery.Error) {
+  case remaining {
+    0 ->
+      case first_error {
+        None -> Ok(report)
+        Some(error) -> Error(error)
       }
+    _ -> {
+      let outcome = process.receive_forever(results)
+      let #(report, first_error) = case outcome {
+        ProviderDelivered(job) ->
+          case outbox.complete(job.id, worker_id) {
+            Ok(_) -> #(
+              Report(..report, delivered: report.delivered + 1),
+              first_error,
+            )
+            Error(error) -> #(report, option.or(first_error, Some(error)))
+          }
+        ProviderFailed(job, detail) ->
+          case
+            outbox.fail(
+              job.id,
+              worker_id,
+              now,
+              detail,
+              max_attempts,
+              base_delay,
+            )
+          {
+            Error(error) -> #(report, option.or(first_error, Some(error)))
+            Ok(failed) ->
+              case failed.state {
+                delivery.DeadLetter -> #(
+                  Report(..report, dead_lettered: report.dead_lettered + 1),
+                  first_error,
+                )
+                _ -> #(
+                  Report(..report, retried: report.retried + 1),
+                  first_error,
+                )
+              }
+          }
+      }
+      settle_deliveries(
+        remaining - 1,
+        results,
+        outbox,
+        worker_id,
+        now,
+        max_attempts,
+        base_delay,
+        report,
+        first_error,
+      )
+    }
   }
 }
 
@@ -160,6 +225,13 @@ fn list_length(values: List(a)) -> Int {
 
 fn max(first: Int, second: Int) -> Int {
   case first > second {
+    True -> first
+    False -> second
+  }
+}
+
+fn min(first: Int, second: Int) -> Int {
+  case first < second {
     True -> first
     False -> second
   }

@@ -62,6 +62,28 @@ pub fn sqlite_webpush_store_contract_test() {
   contract(store)
 }
 
+pub fn sqlite_joined_subscription_query_preserves_endpoint_and_topic_order_test() {
+  let assert Ok(store) = sqlite.start(":memory:", max_endpoints_per_ip: 10)
+  let endpoint_b = "https://fcm.googleapis.com/fcm/send/token-b"
+  let endpoint_a = "https://fcm.googleapis.com/fcm/send/token-a"
+  let assert Ok(_) =
+    store.upsert(subscription(
+      "wps_b",
+      endpoint_b,
+      ["third", "shared", "first"],
+      100,
+    ))
+  let assert Ok(_) =
+    store.upsert(subscription("wps_a", endpoint_a, ["shared", "alpha"], 101))
+
+  let assert Ok([first, second]) = store.for_topic("shared")
+  assert [first.endpoint, second.endpoint] == [endpoint_a, endpoint_b]
+  assert first.topics == ["shared", "alpha"]
+  assert second.topics == ["third", "shared", "first"]
+  let assert Ok(by_endpoint) = store.by_endpoint(endpoint_b)
+  assert by_endpoint.topics == second.topics
+}
+
 pub fn endpoint_allowlist_matches_ntfy_v2_27_security_boundary_test() {
   let allowed = [
     "https://fcm.googleapis.com/fcm/send/token",

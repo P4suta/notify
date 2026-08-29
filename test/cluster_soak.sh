@@ -20,10 +20,18 @@ settle_seconds=${NOTIFY_SOAK_SETTLE_SECONDS:-60}
 connect_timeout_seconds=${NOTIFY_SOAK_CONNECT_TIMEOUT_SECONDS:-180}
 resource_sample_seconds=${NOTIFY_SOAK_RESOURCE_SAMPLE_SECONDS:-60}
 format=${NOTIFY_SOAK_FORMAT:-json}
+scenario=${NOTIFY_BENCHMARK_SCENARIO:-publish}
 case $format in
   json | raw | sse | websocket) ;;
   *)
     echo "NOTIFY_SOAK_FORMAT must be json, raw, sse, or websocket" >&2
+    exit 2
+    ;;
+esac
+case $scenario in
+  publish | webpush-relay | scheduled | slow-provider | attachments) ;;
+  *)
+    echo "invalid NOTIFY_BENCHMARK_SCENARIO: $scenario" >&2
     exit 2
     ;;
 esac
@@ -160,9 +168,26 @@ export NOTIFY_CLUSTER_RATE_LIMIT_TOPIC_CREATIONS=$((
 export NOTIFY_CLUSTER_RATE_LIMIT_WINDOW_SECONDS=$((
   connect_timeout_seconds + duration_seconds + settle_seconds + 300
 ))
+case $scenario in
+  webpush-relay)
+    export NOTIFY_CLUSTER_RELAY_URL=http://relay-benchmark:9090
+    export NOTIFY_CLUSTER_RELAY_TOKEN=benchmark-relay-token
+    export NOTIFY_RELAY_DELAY_MS=0
+    ;;
+  slow-provider)
+    export NOTIFY_CLUSTER_RELAY_URL=http://relay-benchmark:9090
+    export NOTIFY_CLUSTER_RELAY_TOKEN=benchmark-relay-token
+    export NOTIFY_RELAY_DELAY_MS=250
+    ;;
+esac
 
 "${compose[@]}" build notify-a
 "${compose[@]}" up --detach --wait --wait-timeout 180 postgres minio
+case $scenario in
+  webpush-relay | slow-provider)
+    "${compose[@]}" up --detach --no-build relay-benchmark
+    ;;
+esac
 "${compose[@]}" run --rm --no-deps \
   --env "NOTIFY_PASSWORD=cluster soak test password" \
   notify-a run setup \
@@ -175,14 +200,54 @@ grep -Fx "setup complete; administrator soak_admin created" \
 wait_for_health "$node_a"
 wait_for_health "$node_b"
 wait_for_health "$node_c"
+"${compose[@]}" exec -T postgres \
+  psql --username notify --dbname notify --set ON_ERROR_STOP=1 \
+  --command 'CREATE EXTENSION IF NOT EXISTS pg_stat_statements' \
+  --command 'SELECT pg_stat_reset()' \
+  --command 'SELECT pg_stat_statements_reset()' >/dev/null
 
-container_names=(
+server_containers=(
   "$project_name-notify-a-1"
   "$project_name-notify-b-1"
   "$project_name-notify-c-1"
+)
+container_names=(
+  "${server_containers[@]}"
   "$project_name-postgres-1"
   "$project_name-minio-1"
 )
+case $scenario in
+  webpush-relay | slow-provider)
+    container_names+=("$project_name-relay-benchmark-1")
+    ;;
+esac
+
+cgroup_total() {
+  local file=$1
+  local field=$2
+  local total=0
+  local container
+  local value
+  for container in "${server_containers[@]}"; do
+    if [[ -n $field ]]; then
+      value=$(docker exec "$container" awk -v field="$field" \
+        '$1 == field { print $2 }' "$file")
+    else
+      value=$(docker exec "$container" cat "$file")
+    fi
+    total=$((total + value))
+  done
+  echo "$total"
+}
+
+prometheus_metric() {
+  local file=$1
+  local metric=$2
+  awk -v metric="$metric" '
+    $1 == metric { value = $2; found = 1 }
+    END { if (found) print value; else print 0 }
+  ' "$file"
+}
 
 sample_resources() {
   local sampled_at
@@ -192,6 +257,12 @@ sample_resources() {
       | jq -c --arg sampled_at "$sampled_at" \
         '{sampled_at: $sampled_at, stats: .}' \
         >>"$report_directory/resources.ndjson"
+    curl --fail --silent --show-error "$node_a/metrics" \
+      >"$report_directory/metrics-node-a-latest.prom" || true
+    curl --fail --silent --show-error "$node_b/metrics" \
+      >"$report_directory/metrics-node-b-latest.prom" || true
+    curl --fail --silent --show-error "$node_c/metrics" \
+      >"$report_directory/metrics-node-c-latest.prom" || true
     # `docker stats --no-stream` itself samples the daemon for roughly two
     # seconds. A one-minute default keeps that observer below the p95 tail
     # population while still retaining a time series and a final state check.
@@ -227,6 +298,7 @@ export NOTIFY_SOAK_DURATION_SECONDS=$duration_seconds
 export NOTIFY_SOAK_SETTLE_SECONDS=$settle_seconds
 export NOTIFY_SOAK_CONNECT_TIMEOUT_SECONDS=$connect_timeout_seconds
 export NOTIFY_SOAK_FORMAT=$format
+export NOTIFY_SOAK_BACKEND=postgres
 export NOTIFY_SOAK_ENDPOINTS="$node_a,$node_b,$node_c"
 topic_prefix="soak-$$"
 readonly topic_prefix
@@ -234,9 +306,67 @@ export NOTIFY_SOAK_TOPIC_PREFIX="$topic_prefix"
 export NOTIFY_SOAK_REPORT_PATH="$report_directory/report.json"
 export NOTIFY_SOAK_SEQUENCE_PATH="$report_directory/observed-sequences.ndjson"
 
+server_cpu_before_usec=$(cgroup_total /sys/fs/cgroup/cpu.stat usage_usec)
 driver_status=0
 node --max-old-space-size=4096 test/cluster_soak.mjs \
   >"$temporary_directory/driver.json" || driver_status=$?
+server_cpu_after_usec=$(cgroup_total /sys/fs/cgroup/cpu.stat usage_usec)
+server_memory_peak_bytes=$(cgroup_total /sys/fs/cgroup/memory.peak "")
+curl --fail --silent --show-error "$node_a/metrics" \
+  >"$report_directory/metrics-node-a-final.prom" || driver_status=1
+curl --fail --silent --show-error "$node_b/metrics" \
+  >"$report_directory/metrics-node-b-final.prom" || driver_status=1
+curl --fail --silent --show-error "$node_c/metrics" \
+  >"$report_directory/metrics-node-c-final.prom" || driver_status=1
+beam_run_queue=0
+beam_mailbox_messages=0
+beam_max_mailbox_messages=0
+beam_processes=0
+scheduler_delay_milliseconds=0
+for metrics_file in \
+  "$report_directory/metrics-node-a-final.prom" \
+  "$report_directory/metrics-node-b-final.prom" \
+  "$report_directory/metrics-node-c-final.prom"; do
+  value=$(prometheus_metric "$metrics_file" notify_beam_run_queue)
+  beam_run_queue=$((beam_run_queue + value))
+  value=$(prometheus_metric "$metrics_file" notify_beam_mailbox_messages)
+  beam_mailbox_messages=$((beam_mailbox_messages + value))
+  value=$(prometheus_metric "$metrics_file" notify_beam_max_mailbox_messages)
+  if ((value > beam_max_mailbox_messages)); then
+    beam_max_mailbox_messages=$value
+  fi
+  value=$(prometheus_metric "$metrics_file" notify_beam_processes)
+  beam_processes=$((beam_processes + value))
+  value=$(prometheus_metric \
+    "$metrics_file" notify_scheduler_delay_milliseconds)
+  if ((value > scheduler_delay_milliseconds)); then
+    scheduler_delay_milliseconds=$value
+  fi
+done
+committed_publishes=$(jq -r '.publishes.committed // 0' \
+  "$report_directory/report.json")
+jq -n \
+  --argjson cpu_before_usec "$server_cpu_before_usec" \
+  --argjson cpu_after_usec "$server_cpu_after_usec" \
+  --argjson memory_peak_bytes "$server_memory_peak_bytes" \
+  --argjson committed "$committed_publishes" \
+  --argjson beam_run_queue "$beam_run_queue" \
+  --argjson beam_mailbox_messages "$beam_mailbox_messages" \
+  --argjson beam_max_mailbox_messages "$beam_max_mailbox_messages" \
+  --argjson beam_processes "$beam_processes" \
+  --argjson scheduler_delay_milliseconds \
+    "$scheduler_delay_milliseconds" \
+  '{cpu_before_usec: $cpu_before_usec, cpu_after_usec: $cpu_after_usec,
+    cpu_used_usec: ($cpu_after_usec - $cpu_before_usec),
+    cpu_usec_per_publish: (if $committed > 0 then
+      (($cpu_after_usec - $cpu_before_usec) / $committed) else null end),
+    aggregate_memory_peak_bytes: $memory_peak_bytes,
+    beam_run_queue: $beam_run_queue,
+    beam_mailbox_messages: $beam_mailbox_messages,
+    beam_max_mailbox_messages: $beam_max_mailbox_messages,
+    beam_processes: $beam_processes,
+    scheduler_delay_milliseconds: $scheduler_delay_milliseconds}' \
+  >"$report_directory/server-resources.json"
 
 event_log_path="$report_directory/event-log.tsv"
 readonly event_log_path
@@ -265,7 +395,12 @@ readonly database_path
       ) ORDER BY node_id),
       '[]'::json
     ) FROM notify_node_cursors),
-    'database_bytes', pg_database_size(current_database()))" \
+    'database_bytes', pg_database_size(current_database()),
+    'transactions_committed', (SELECT xact_commit FROM pg_stat_database WHERE datname = current_database()),
+    'transactions_rolled_back', (SELECT xact_rollback FROM pg_stat_database WHERE datname = current_database()),
+    'statements', (SELECT COALESCE(SUM(calls), 0)::bigint FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())),
+    'statement_rows', (SELECT COALESCE(SUM(rows), 0)::bigint FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())),
+    'statement_execution_ms', (SELECT COALESCE(SUM(total_exec_time), 0)::double precision FROM pg_stat_statements WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())))" \
   | jq . >"$database_path"
 oracle_status=0
 node test/cluster_soak_oracle.mjs \

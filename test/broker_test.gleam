@@ -37,12 +37,14 @@ pub fn ordered_delivery_is_replenished_by_credit_test() {
   let subscription = bus.subscribe([alerts], subject, 1)
 
   bus.broadcast(fixture("B000000001"))
-  let assert Ok(broker.Message(first)) = process.receive(subject, 1000)
+  let assert Ok(broker.Message(broker.PreparedMessage(first, _))) =
+    process.receive(subject, 1000)
   assert first.id == "B000000001"
   bus.ack(subscription)
 
   bus.broadcast(fixture("B000000002"))
-  let assert Ok(broker.Message(second)) = process.receive(subject, 1000)
+  let assert Ok(broker.Message(broker.PreparedMessage(second, _))) =
+    process.receive(subject, 1000)
   assert second.id == "B000000002"
 }
 
@@ -56,8 +58,10 @@ pub fn slow_subscriber_overflows_without_blocking_publisher_test() {
   bus.broadcast(fixture("B000000004"))
   bus.broadcast(fixture("B000000005"))
 
-  let assert Ok(broker.Message(first)) = process.receive(subject, 1000)
-  let assert Ok(broker.Message(second)) = process.receive(subject, 1000)
+  let assert Ok(broker.Message(broker.PreparedMessage(first, _))) =
+    process.receive(subject, 1000)
+  let assert Ok(broker.Message(broker.PreparedMessage(second, _))) =
+    process.receive(subject, 1000)
   let assert Ok(broker.Overflow) = process.receive(subject, 1000)
   assert first.id == "B000000003"
   assert second.id == "B000000004"
@@ -93,7 +97,8 @@ pub fn live_filters_do_not_consume_subscriber_credit_test() {
       "production",
     ]),
   )
-  let assert Ok(broker.Message(received)) = process.receive(subject, 1000)
+  let assert Ok(broker.Message(broker.PreparedMessage(received, _))) =
+    process.receive(subject, 1000)
   assert received.id == "matching"
   assert process.receive(subject, 10) == Error(Nil)
 }
@@ -106,14 +111,19 @@ pub fn paused_subscription_replays_before_buffered_live_without_duplicates_test(
   let overlapping = fixture("B000000007")
   bus.broadcast(overlapping)
 
-  process.send(subject, broker.Replay(overlapping))
+  process.send(
+    subject,
+    broker.Replay(broker.prepare_message(overlapping, broker.Structured)),
+  )
   bus.activate(subscription, [overlapping.id], 1)
-  let assert Ok(broker.Replay(replayed)) = process.receive(subject, 1000)
+  let assert Ok(broker.Replay(broker.PreparedMessage(replayed, _))) =
+    process.receive(subject, 1000)
   assert replayed.id == overlapping.id
   assert process.receive(subject, 10) == Error(Nil)
 
   bus.broadcast(fixture("B000000008"))
-  let assert Ok(broker.Message(live)) = process.receive(subject, 1000)
+  let assert Ok(broker.Message(broker.PreparedMessage(live, _))) =
+    process.receive(subject, 1000)
   assert live.id == "B000000008"
 }
 
@@ -134,13 +144,15 @@ pub fn prepared_activation_rebinds_and_orders_replay_before_live_test() {
   )
 
   let assert Ok(broker.Open(_, _, _)) = process.receive(stream, 1000)
-  let assert Ok(broker.Replay(replayed)) = process.receive(stream, 1000)
+  let assert Ok(broker.Replay(broker.PreparedMessage(replayed, _))) =
+    process.receive(stream, 1000)
   assert replayed.id == overlapping.id
   assert process.receive(stream, 10) == Error(Nil)
   assert process.receive(placeholder, 10) == Error(Nil)
 
   bus.broadcast(fixture("B000000010XY"))
-  let assert Ok(broker.Message(live)) = process.receive(stream, 1000)
+  let assert Ok(broker.Message(broker.PreparedMessage(live, _))) =
+    process.receive(stream, 1000)
   assert live.id == "B000000010XY"
 }
 
@@ -158,7 +170,8 @@ pub fn topic_registry_limits_broadcast_to_matching_subscribers_test() {
   let _ = bus.subscribe([alerts], target, 1)
   bus.broadcast(fixture("B000000011XY"))
 
-  let assert Ok(broker.Message(received)) = process.receive(target, 1000)
+  let assert Ok(broker.Message(broker.PreparedMessage(received, _))) =
+    process.receive(target, 1000)
   assert received.id == "B000000011XY"
   assert process.receive(unrelated, 10) == Error(Nil)
   let stats = bus.stats()
@@ -175,12 +188,14 @@ pub fn duplicate_multi_topic_registration_delivers_once_and_prunes_index_test() 
   let subscription = bus.subscribe([alerts, alerts, other], subject, 2)
 
   bus.broadcast(fixture("B000000012XY"))
-  let assert Ok(broker.Message(received)) = process.receive(subject, 1000)
+  let assert Ok(broker.Message(broker.PreparedMessage(received, _))) =
+    process.receive(subject, 1000)
   assert received.id == "B000000012XY"
   assert process.receive(subject, 10) == Error(Nil)
 
   bus.broadcast(message.Message(..fixture("B000000013XY"), topic: other))
-  let assert Ok(broker.Message(second)) = process.receive(subject, 1000)
+  let assert Ok(broker.Message(broker.PreparedMessage(second, _))) =
+    process.receive(subject, 1000)
   assert second.id == "B000000013XY"
   assert process.receive(subject, 10) == Error(Nil)
   let active_stats = bus.stats()
@@ -200,7 +215,8 @@ pub fn confirmed_dispatch_applies_delivery_before_returning_test() {
   let _ = bus.subscribe([alerts], subject, 1)
 
   assert bus.dispatch(fixture("B000000014XY")) == Nil
-  let assert Ok(broker.Message(delivered)) = process.receive(subject, 1000)
+  let assert Ok(broker.Message(broker.PreparedMessage(delivered, _))) =
+    process.receive(subject, 1000)
   assert delivered.id == "B000000014XY"
 
   assert bus.dispatch(fixture("B000000015XY")) == Nil

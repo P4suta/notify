@@ -1,5 +1,6 @@
 import gleam/erlang/process.{type Subject}
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
 import notify/webpush.{type Store, type Subscription}
@@ -25,6 +26,10 @@ type Command {
   RemoveUser(String, Subject(Result(Int, webpush.Error)))
   RemoveExpired(Int, Subject(Result(Int, webpush.Error)))
   Health(Subject(Result(Nil, webpush.Error)))
+}
+
+type SubscriptionTopicRow {
+  SubscriptionTopicRow(subscription: Subscription, topic: Option(String))
 }
 
 const migration = "
@@ -336,15 +341,13 @@ fn for_topic(
   use response <- result.try(
     postgleam.query_with(
       connection,
-      "SELECT s.id, s.endpoint, s.key_auth, s.key_p256dh, s.user_id, s.subscriber_ip, s.created_at, s.updated_at FROM notify_webpush_subscriptions s JOIN notify_webpush_topics t ON t.subscription_id = s.id WHERE t.topic = $1 ORDER BY s.endpoint",
+      "SELECT s.id, s.endpoint, s.key_auth, s.key_p256dh, s.user_id, s.subscriber_ip, s.created_at, s.updated_at, all_topics.topic FROM notify_webpush_subscriptions s JOIN notify_webpush_topics matched ON matched.subscription_id = s.id AND matched.topic = $1 LEFT JOIN notify_webpush_topics all_topics ON all_topics.subscription_id = s.id ORDER BY s.endpoint, all_topics.position",
       [postgleam.text(topic)],
-      subscription_decoder(),
+      subscription_topic_decoder(),
     )
     |> result.map_error(map_error),
   )
-  list.try_map(response.rows, fn(subscription) {
-    with_topics(connection, subscription)
-  })
+  Ok(group_subscription_topics(response.rows, []))
 }
 
 fn by_endpoint(
@@ -354,36 +357,61 @@ fn by_endpoint(
   use response <- result.try(
     postgleam.query_with(
       connection,
-      "SELECT id, endpoint, key_auth, key_p256dh, user_id, subscriber_ip, created_at, updated_at FROM notify_webpush_subscriptions WHERE endpoint = $1",
+      "SELECT s.id, s.endpoint, s.key_auth, s.key_p256dh, s.user_id, s.subscriber_ip, s.created_at, s.updated_at, topics.topic FROM notify_webpush_subscriptions s LEFT JOIN notify_webpush_topics topics ON topics.subscription_id = s.id WHERE s.endpoint = $1 ORDER BY topics.position",
       [postgleam.text(endpoint)],
-      subscription_decoder(),
+      subscription_topic_decoder(),
     )
     |> result.map_error(map_error),
   )
-  case response.rows {
-    [subscription] -> with_topics(connection, subscription)
+  case group_subscription_topics(response.rows, []) {
+    [subscription] -> Ok(subscription)
     [] -> Error(webpush.NotFound)
     _ -> Error(webpush.Unavailable("duplicate Web Push endpoint"))
   }
 }
 
-fn with_topics(
-  connection: postgleam.Connection,
-  subscription: Subscription,
-) -> Result(Subscription, webpush.Error) {
-  use response <- result.try(
-    postgleam.query_with(
-      connection,
-      "SELECT topic FROM notify_webpush_topics WHERE subscription_id = $1 ORDER BY position",
-      [postgleam.text(subscription.id)],
-      {
-        use topic <- decode.element(0, decode.text)
-        decode.success(topic)
-      },
-    )
-    |> result.map_error(map_error),
-  )
-  Ok(webpush.Subscription(..subscription, topics: response.rows))
+fn group_subscription_topics(
+  rows: List(SubscriptionTopicRow),
+  accumulated: List(Subscription),
+) -> List(Subscription) {
+  case rows {
+    [] -> list.reverse(accumulated)
+    [SubscriptionTopicRow(subscription, topic), ..remaining] -> {
+      let initial_topics = case topic {
+        None -> []
+        Some(topic) -> [topic]
+      }
+      let #(topics, remaining) =
+        take_subscription_topics(
+          remaining,
+          subscription.id,
+          list.reverse(initial_topics),
+        )
+      group_subscription_topics(remaining, [
+        webpush.Subscription(..subscription, topics:),
+        ..accumulated
+      ])
+    }
+  }
+}
+
+fn take_subscription_topics(
+  rows: List(SubscriptionTopicRow),
+  subscription_id: String,
+  reversed_topics: List(String),
+) -> #(List(String), List(SubscriptionTopicRow)) {
+  case rows {
+    [SubscriptionTopicRow(subscription, topic), ..remaining]
+      if subscription.id == subscription_id
+    -> {
+      let reversed_topics = case topic {
+        None -> reversed_topics
+        Some(topic) -> [topic, ..reversed_topics]
+      }
+      take_subscription_topics(remaining, subscription_id, reversed_topics)
+    }
+    _ -> #(list.reverse(reversed_topics), rows)
+  }
 }
 
 fn remove_endpoint(
@@ -450,6 +478,32 @@ fn subscription_decoder() -> decode.RowDecoder(Subscription) {
     subscriber_ip:,
     created_at:,
     updated_at:,
+  ))
+}
+
+fn subscription_topic_decoder() -> decode.RowDecoder(SubscriptionTopicRow) {
+  use id <- decode.element(0, decode.text)
+  use endpoint <- decode.element(1, decode.text)
+  use auth <- decode.element(2, decode.text)
+  use p256dh <- decode.element(3, decode.text)
+  use user_id <- decode.element(4, decode.text)
+  use subscriber_ip <- decode.element(5, decode.text)
+  use created_at <- decode.element(6, decode.int)
+  use updated_at <- decode.element(7, decode.int)
+  use topic <- decode.element(8, decode.optional(decode.text))
+  decode.success(SubscriptionTopicRow(
+    subscription: webpush.Subscription(
+      id:,
+      endpoint:,
+      auth:,
+      p256dh:,
+      topics: [],
+      user_id: webpush.optional_user_id(user_id),
+      subscriber_ip:,
+      created_at:,
+      updated_at:,
+    ),
+    topic:,
   ))
 }
 

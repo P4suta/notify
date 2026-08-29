@@ -4,7 +4,7 @@ defmodule NotifyCore.MixProject do
   def project do
     [
       app: :notify_core,
-      version: "0.1.0",
+      version: "0.1.0", # x-release-please-version
       elixir: "~> 1.17",
       archives: [mix_gleam: "== 0.6.2"],
       compilers: [:gleam | Mix.compilers()],

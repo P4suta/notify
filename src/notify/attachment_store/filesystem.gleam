@@ -6,6 +6,7 @@ import gleam/otp/actor
 import gleam/result
 import gleam/string
 import notify/attachment_store.{type Store}
+import notify/dispatch_pool
 
 type Pending {
   Pending(
@@ -48,12 +49,18 @@ type Command {
     attachment_store.Upload,
     Subject(Result(attachment_store.Stored, attachment_store.Error)),
   )
+  Delete(String, Subject(Result(Nil, attachment_store.Error)))
+  Cleanup(Int, Subject(Result(Int, attachment_store.Error)))
+}
+
+type ReadCommand {
   Head(String, Subject(Result(attachment_store.Stored, attachment_store.Error)))
   Get(
     String,
     Option(attachment_store.ByteRange),
     Subject(Result(attachment_store.Download, attachment_store.Error)),
   )
+  ReadRange(String, Int, Int, Subject(Result(BitArray, attachment_store.Error)))
   List(Subject(Result(List(attachment_store.Stored), attachment_store.Error)))
   Page(
     Option(String),
@@ -65,8 +72,6 @@ type Command {
       ),
     ),
   )
-  Delete(String, Subject(Result(Nil, attachment_store.Error)))
-  Cleanup(Int, Subject(Result(Int, attachment_store.Error)))
   Health(Subject(Result(Nil, attachment_store.Error)))
 }
 
@@ -78,6 +83,7 @@ pub fn start(
   use _ <- result.try(
     ensure_directory(directory) |> result.map_error(map_external_error),
   )
+  use read_pool <- result.try(start_read_pool(directory))
   use started <- result.try(
     actor.new(State(directory:, uploads: [], max_file:, max_total:))
     |> actor.on_message(handle)
@@ -107,14 +113,14 @@ pub fn start(
         process.call(subject, 30_000, fn(reply) { Put(upload, reply) })
       },
       head: fn(key) {
-        process.call(subject, 10_000, fn(reply) { Head(key, reply) })
+        call_read(read_pool, 10_000, fn(reply) { Head(key, reply) })
       },
       get: fn(key, range) {
-        process.call(subject, 30_000, fn(reply) { Get(key, range, reply) })
+        call_read(read_pool, 30_000, fn(reply) { Get(key, range, reply) })
       },
       open: fn(key, range) {
         use metadata <- result.try(
-          process.call(subject, 10_000, fn(reply) { Head(key, reply) }),
+          call_read(read_pool, 10_000, fn(reply) { Head(key, reply) }),
         )
         use bounds <- result.try(attachment_store.download_bounds(
           metadata.size,
@@ -126,16 +132,17 @@ pub fn start(
             bounds.0,
             bounds.1,
             fn(offset, length) {
-              attachment_read_range(directory, key, offset, offset + length - 1)
-              |> result.map_error(map_external_error)
+              call_read(read_pool, 30_000, fn(reply) {
+                ReadRange(key, offset, length, reply)
+              })
             },
             fn() { Nil },
           ),
         )
       },
-      list: fn() { process.call(subject, 30_000, List) },
+      list: fn() { call_read(read_pool, 30_000, List) },
       page: fn(after, limit) {
-        process.call(subject, 30_000, fn(reply) { Page(after, limit, reply) })
+        call_read(read_pool, 30_000, fn(reply) { Page(after, limit, reply) })
       },
       delete: fn(key) {
         process.call(subject, 10_000, fn(reply) { Delete(key, reply) })
@@ -143,9 +150,47 @@ pub fn start(
       cleanup: fn(now) {
         process.call(subject, 30_000, fn(reply) { Cleanup(now, reply) })
       },
-      health: fn() { process.call(subject, 10_000, Health) },
+      health: fn() { call_read(read_pool, 10_000, Health) },
     ),
   )
+}
+
+fn start_read_pool(
+  directory: String,
+) -> Result(dispatch_pool.Pool(ReadCommand), attachment_store.Error) {
+  dispatch_pool.start(
+    16,
+    fn() {
+      actor.new(directory)
+      |> actor.on_message(handle_read)
+      |> actor.start
+      |> result.map(fn(started) { started.data })
+      |> result.map_error(fn(_) {
+        attachment_store.Unavailable(
+          "filesystem attachment read worker failed to start",
+        )
+      })
+    },
+    fn() {
+      attachment_store.Unavailable(
+        "filesystem attachment read pool failed to start",
+      )
+    },
+  )
+}
+
+fn call_read(
+  pool: dispatch_pool.Pool(ReadCommand),
+  timeout: Int,
+  command: fn(Subject(Result(value, attachment_store.Error))) -> ReadCommand,
+) -> Result(value, attachment_store.Error) {
+  let reply = process.new_subject()
+  dispatch_pool.send(pool, command(reply))
+  case process.receive(reply, timeout) {
+    Ok(outcome) -> outcome
+    Error(_) ->
+      Error(attachment_store.Unavailable("attachment read worker timed out"))
+  }
 }
 
 fn handle(state: State, command: Command) -> actor.Next(State, Command) {
@@ -177,30 +222,6 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
       )
       actor.continue(state)
     }
-    Head(key, reply) -> {
-      process.send(reply, head(state.directory, key))
-      actor.continue(state)
-    }
-    Get(key, range, reply) -> {
-      process.send(reply, get(state.directory, key, range))
-      actor.continue(state)
-    }
-    List(reply) -> {
-      let response =
-        attachment_list(state.directory)
-        |> result.map(fn(items) {
-          list.map(items, fn(item) {
-            attachment_store.Stored(key: item.0, size: item.1, expires: item.2)
-          })
-        })
-        |> result.map_error(map_external_error)
-      process.send(reply, response)
-      actor.continue(state)
-    }
-    Page(after, limit, reply) -> {
-      process.send(reply, page(state.directory, after, limit))
-      actor.continue(state)
-    }
     Delete(key, reply) -> {
       process.send(reply, delete(state.directory, key))
       actor.continue(state)
@@ -220,15 +241,60 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
       )
       actor.continue(next)
     }
+  }
+}
+
+fn handle_read(
+  directory: String,
+  command: ReadCommand,
+) -> actor.Next(String, ReadCommand) {
+  case command {
+    Head(key, reply) -> {
+      process.send(reply, head(directory, key))
+      Nil
+    }
+    Get(key, range, reply) -> {
+      process.send(reply, get(directory, key, range))
+      Nil
+    }
+    ReadRange(key, offset, length, reply) -> {
+      process.send(
+        reply,
+        attachment_read_range(directory, key, offset, offset + length - 1)
+          |> result.map_error(map_external_error),
+      )
+      Nil
+    }
+    List(reply) -> {
+      process.send(
+        reply,
+        attachment_list(directory)
+          |> result.map(fn(items) {
+            list.map(items, fn(item) {
+              attachment_store.Stored(
+                key: item.0,
+                size: item.1,
+                expires: item.2,
+              )
+            })
+          })
+          |> result.map_error(map_external_error),
+      )
+      Nil
+    }
+    Page(after, limit, reply) -> {
+      process.send(reply, page(directory, after, limit))
+      Nil
+    }
     Health(reply) -> {
       process.send(
         reply,
-        attachment_health(state.directory)
-          |> result.map_error(map_external_error),
+        attachment_health(directory) |> result.map_error(map_external_error),
       )
-      actor.continue(state)
+      Nil
     }
   }
+  actor.continue(directory)
 }
 
 fn begin(

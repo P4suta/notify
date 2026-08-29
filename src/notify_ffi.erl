@@ -6,7 +6,7 @@
 
 -export([argv/0, getenv/1, read_file/1, ensure_parent/1, unix_seconds/0,
          configure_tcp_clients/0, tcp_nodelay_enabled/0,
-         monotonic_milliseconds/0, random_id/0,
+         monotonic_milliseconds/0, beam_runtime_stats/0, random_id/0,
          random_token_entropy/0, sha256_hex/1, sha256_hex_bytes/1,
          sha256_init/0, sha256_update/2, sha256_final_hex/1,
          file_sha256/1, path_exists/1, read_binary_file/1,
@@ -201,6 +201,25 @@ await_processes(Monitors, Deadline) ->
     end.
 
 monotonic_milliseconds() -> erlang:monotonic_time(millisecond).
+
+beam_runtime_stats() ->
+    {MailboxMessages, MaximumMailbox} = mailbox_lengths(
+        erlang:processes(), 0, 0),
+    StartedAt = erlang:monotonic_time(millisecond),
+    receive after 1 -> ok end,
+    SchedulerDelay = erlang:max(
+        0, erlang:monotonic_time(millisecond) - StartedAt - 1),
+    {erlang:statistics(run_queue), MailboxMessages, MaximumMailbox,
+     erlang:system_info(process_count), SchedulerDelay}.
+
+mailbox_lengths([], Total, Maximum) -> {Total, Maximum};
+mailbox_lengths([Pid | Remaining], Total, Maximum) ->
+    case erlang:process_info(Pid, message_queue_len) of
+        {message_queue_len, Length} ->
+            mailbox_lengths(
+                Remaining, Total + Length, erlang:max(Maximum, Length));
+        undefined -> mailbox_lengths(Remaining, Total, Maximum)
+    end.
 
 getenv(Name) ->
     case os:getenv(binary_to_list(Name)) of

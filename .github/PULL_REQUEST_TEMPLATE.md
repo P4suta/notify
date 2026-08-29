@@ -17,7 +17,8 @@ Describe the user-visible behavior and the reason for the change.
 - [ ] `(cd web && gleam test)`
 - [ ] Relevant integration, compatibility, or browser tests were run.
 - [ ] Documentation and OpenAPI were updated when behavior changed.
-- [ ] No credentials, personal data, generated reports, or release automation were added.
+- [ ] No credentials, personal data, or generated reports were added.
+- [ ] Release automation changes use pinned actions and minimum permissions.
 
 ## Compatibility and operations
 

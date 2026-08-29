@@ -51,6 +51,10 @@ pub fn liveness_readiness_and_prometheus_endpoints_are_distinct_test() {
   assert string.contains(body, "notify_scheduled_messages 0")
   assert string.contains(body, "notify_event_log_entries 0")
   assert string.contains(body, "notify_audit_up 1")
+  assert string.contains(body, "notify_beam_run_queue ")
+  assert string.contains(body, "notify_beam_mailbox_messages ")
+  assert string.contains(body, "notify_beam_max_mailbox_messages ")
+  assert string.contains(body, "notify_scheduler_delay_milliseconds ")
   assert string.contains(body, "notify_http3_loopback_probe_up 0")
   assert string.contains(
     body,

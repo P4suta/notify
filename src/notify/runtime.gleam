@@ -7,6 +7,7 @@ import notify/audit.{type Store as AuditStore}
 import notify/cluster/health.{type Store as ClusterHealthStore}
 import notify/core/message.{type Message}
 import notify/delivery.{type Store as DeliveryStore}
+import notify/health_snapshot
 import notify/http3_listener
 import notify/rate_limit.{type Limiter}
 import notify/storage.{type Storage}
@@ -64,6 +65,7 @@ pub type Runtime {
     audit: Option(AuditStore),
     cluster_health: Option(ClusterHealthStore),
     http3: Option(http3_listener.Runtime),
+    health_monitor: Option(health_snapshot.Monitor),
     template_directory: String,
     committer: Committer,
   )
@@ -94,6 +96,7 @@ pub fn new(
     audit: None,
     cluster_health: None,
     http3: None,
+    health_monitor: None,
     template_directory: "",
     committer: Committer(fn(message, _) {
       storage.save(message) |> result.map_error(CommitPersistence)
@@ -199,6 +202,59 @@ pub fn with_http3(
   listener: http3_listener.Runtime,
 ) -> Runtime {
   Runtime(..runtime, http3: Some(listener))
+}
+
+pub fn with_health_monitor(
+  runtime: Runtime,
+) -> Result(Runtime, health_snapshot.Error) {
+  use monitor <- result.try(health_snapshot.start(
+    health_dependencies(runtime),
+    500,
+  ))
+  Ok(Runtime(..runtime, health_monitor: Some(monitor)))
+}
+
+pub fn health(runtime: Runtime) -> health_snapshot.Snapshot {
+  case runtime.health_monitor {
+    Some(monitor) -> health_snapshot.get(monitor)
+    None -> health_snapshot.probe(health_dependencies(runtime))
+  }
+}
+
+fn health_dependencies(runtime: Runtime) -> health_snapshot.Dependencies {
+  health_snapshot.Dependencies(
+    storage: fn() { runtime.storage.health() |> result.is_ok },
+    attachments: fn() {
+      case runtime.attachments {
+        None -> True
+        Some(store) -> store.health() |> result.is_ok
+      }
+    },
+    deliveries: fn() {
+      case runtime.deliveries {
+        None -> True
+        Some(store) -> store.health() |> result.is_ok
+      }
+    },
+    webpush: fn() {
+      case runtime.webpush {
+        None -> True
+        Some(configured) -> configured.store.health() |> result.is_ok
+      }
+    },
+    audit: fn() {
+      case runtime.audit {
+        None -> False
+        Some(store) -> store.health() |> result.is_ok
+      }
+    },
+    http3: fn() {
+      case runtime.http3 {
+        None -> True
+        Some(listener) -> http3_listener.readiness(listener)
+      }
+    },
+  )
 }
 
 pub fn with_template_directory(runtime: Runtime, directory: String) -> Runtime {

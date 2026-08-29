@@ -1,16 +1,33 @@
+import gleam/bit_array
 import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
+import gleam/json
 import gleam/list
+import gleam/option.{type Option, None, Some}
 import gleam/otp/actor
 import gleam/result
+import gleam/string
 import notify/core/filter
 import notify/core/message.{type Message as Notification}
+import notify/core/message_json
 import notify/core/topic.{type Topic}
+
+pub type Representation {
+  Structured
+  Raw
+}
+
+/// A notification and the immutable representation selected for one
+/// subscriber. The broker computes each representation at most once per live
+/// fan-out and shares the resulting binary with every matching subscriber.
+pub type PreparedMessage {
+  PreparedMessage(message: Notification, payload: BitArray)
+}
 
 pub type Delivery {
   Open(id: String, time: Int, topics: List(Topic))
-  Replay(Notification)
-  Message(Notification)
+  Replay(PreparedMessage)
+  Message(PreparedMessage)
   Keepalive(id: String, time: Int, topics: List(Topic))
   Overflow
 }
@@ -24,6 +41,13 @@ pub type Broker {
     subscribe_paused_filtered: fn(
       List(Topic),
       filter.Criteria,
+      Subject(Delivery),
+      Int,
+    ) -> Int,
+    subscribe_paused_filtered_as: fn(
+      List(Topic),
+      filter.Criteria,
+      Representation,
       Subject(Delivery),
       Int,
     ) -> Int,
@@ -51,9 +75,15 @@ type Subscriber {
     max_credit: Int,
     active: Bool,
     criteria: filter.Criteria,
-    pending: List(Notification),
+    representation: Representation,
+    pending: List(PreparedMessage),
+    pending_count: Int,
     overflowed: Bool,
   )
+}
+
+type PreparedRepresentations {
+  PreparedRepresentations(structured: Option(BitArray), raw: Option(BitArray))
 }
 
 type State {
@@ -66,10 +96,18 @@ type State {
 }
 
 type Command {
-  Subscribe(List(Topic), filter.Criteria, Subject(Delivery), Int, Subject(Int))
+  Subscribe(
+    List(Topic),
+    filter.Criteria,
+    Representation,
+    Subject(Delivery),
+    Int,
+    Subject(Int),
+  )
   SubscribePaused(
     List(Topic),
     filter.Criteria,
+    Representation,
     Subject(Delivery),
     Int,
     Subject(Int),
@@ -105,12 +143,26 @@ pub fn start() -> Result(Broker, actor.StartError) {
     Broker(
       subscribe: fn(topics, subscriber, capacity) {
         process.call(subject, 5000, fn(reply) {
-          Subscribe(topics, filter.none(), subscriber, max(1, capacity), reply)
+          Subscribe(
+            topics,
+            filter.none(),
+            Structured,
+            subscriber,
+            max(1, capacity),
+            reply,
+          )
         })
       },
       subscribe_filtered: fn(topics, criteria, subscriber, capacity) {
         process.call(subject, 5000, fn(reply) {
-          Subscribe(topics, criteria, subscriber, max(1, capacity), reply)
+          Subscribe(
+            topics,
+            criteria,
+            Structured,
+            subscriber,
+            max(1, capacity),
+            reply,
+          )
         })
       },
       subscribe_paused: fn(topics, subscriber, capacity) {
@@ -118,6 +170,7 @@ pub fn start() -> Result(Broker, actor.StartError) {
           SubscribePaused(
             topics,
             filter.none(),
+            Structured,
             subscriber,
             max(1, capacity),
             reply,
@@ -126,7 +179,32 @@ pub fn start() -> Result(Broker, actor.StartError) {
       },
       subscribe_paused_filtered: fn(topics, criteria, subscriber, capacity) {
         process.call(subject, 5000, fn(reply) {
-          SubscribePaused(topics, criteria, subscriber, max(1, capacity), reply)
+          SubscribePaused(
+            topics,
+            criteria,
+            Structured,
+            subscriber,
+            max(1, capacity),
+            reply,
+          )
+        })
+      },
+      subscribe_paused_filtered_as: fn(
+        topics,
+        criteria,
+        representation,
+        subscriber,
+        capacity,
+      ) {
+        process.call(subject, 5000, fn(reply) {
+          SubscribePaused(
+            topics,
+            criteria,
+            representation,
+            subscriber,
+            max(1, capacity),
+            reply,
+          )
         })
       },
       activate: fn(id, replay_ids, replay_count) {
@@ -152,7 +230,7 @@ pub fn start() -> Result(Broker, actor.StartError) {
 
 fn handle(state: State, command: Command) -> actor.Next(State, Command) {
   case command {
-    Subscribe(topics, criteria, subject, capacity, reply) -> {
+    Subscribe(topics, criteria, representation, subject, capacity, reply) -> {
       let subscriber =
         Subscriber(
           id: state.next_id,
@@ -162,7 +240,9 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
           max_credit: capacity,
           active: True,
           criteria:,
+          representation:,
           pending: [],
+          pending_count: 0,
           overflowed: False,
         )
       process.send(reply, state.next_id)
@@ -171,7 +251,7 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
         subscriber,
       ))
     }
-    SubscribePaused(topics, criteria, subject, capacity, reply) -> {
+    SubscribePaused(topics, criteria, representation, subject, capacity, reply) -> {
       let subscriber =
         Subscriber(
           id: state.next_id,
@@ -181,7 +261,9 @@ fn handle(state: State, command: Command) -> actor.Next(State, Command) {
           max_credit: capacity,
           active: False,
           criteria:,
+          representation:,
           pending: [],
+          pending_count: 0,
           overflowed: False,
         )
       process.send(reply, state.next_id)
@@ -332,46 +414,79 @@ fn deliver_candidates(
   message: Notification,
   state: State,
 ) -> State {
+  let #(state, _) =
+    deliver_candidates_loop(
+      candidates,
+      message,
+      state,
+      PreparedRepresentations(None, None),
+    )
+  state
+}
+
+fn deliver_candidates_loop(
+  candidates: List(Int),
+  message: Notification,
+  state: State,
+  prepared: PreparedRepresentations,
+) -> #(State, PreparedRepresentations) {
   case candidates {
-    [] -> state
+    [] -> #(state, prepared)
     [id, ..rest] ->
       case dict.get(state.subscribers, id) {
-        Error(_) -> deliver_candidates(rest, message, state)
+        Error(_) -> deliver_candidates_loop(rest, message, state, prepared)
         Ok(subscriber) ->
           case filter.matches(message, subscriber.criteria), subscriber.active {
-            False, _ -> deliver_candidates(rest, message, state)
+            False, _ -> deliver_candidates_loop(rest, message, state, prepared)
+            True, False if subscriber.pending_count >= subscriber.max_credit ->
+              deliver_candidates_loop(
+                rest,
+                message,
+                put_subscriber(
+                  state,
+                  Subscriber(..subscriber, overflowed: True),
+                ),
+                prepared,
+              )
             True, False -> {
-              let buffered = list.append(subscriber.pending, [message])
-              let overflowed =
-                subscriber.overflowed
-                || list.length(buffered) > subscriber.max_credit
-              deliver_candidates(
+              let #(payload, prepared) =
+                prepare_cached(message, subscriber.representation, prepared)
+              deliver_candidates_loop(
                 rest,
                 message,
                 put_subscriber(
                   state,
                   Subscriber(
                     ..subscriber,
-                    pending: list.take(buffered, subscriber.max_credit),
-                    overflowed:,
+                    pending: [payload, ..subscriber.pending],
+                    pending_count: subscriber.pending_count + 1,
                   ),
                 ),
+                prepared,
               )
             }
             True, True if subscriber.credit > 0 -> {
-              process.send(subscriber.subject, Message(message))
-              deliver_candidates(
+              let #(payload, prepared) =
+                prepare_cached(message, subscriber.representation, prepared)
+              process.send(subscriber.subject, Message(payload))
+              deliver_candidates_loop(
                 rest,
                 message,
                 put_subscriber(
                   state,
                   Subscriber(..subscriber, credit: subscriber.credit - 1),
                 ),
+                prepared,
               )
             }
             True, True -> {
               process.send(subscriber.subject, Overflow)
-              deliver_candidates(rest, message, remove_subscriber(state, id))
+              deliver_candidates_loop(
+                rest,
+                message,
+                remove_subscriber(state, id),
+                prepared,
+              )
             }
           }
       }
@@ -388,8 +503,10 @@ fn activate_subscriber(
     Error(_) -> state
     Ok(subscriber) -> {
       let pending =
-        list.filter(subscriber.pending, fn(message) {
-          !list.contains(replay_ids, message.id)
+        subscriber.pending
+        |> list.reverse
+        |> list.filter(fn(prepared) {
+          !list.contains(replay_ids, prepared.message.id)
         })
       let credit = max(0, subscriber.max_credit - replay_count)
       case subscriber.overflowed || list.length(pending) > credit {
@@ -407,6 +524,7 @@ fn activate_subscriber(
               ..subscriber,
               active: True,
               pending: [],
+              pending_count: 0,
               credit: credit - list.length(pending),
             ),
           )
@@ -427,17 +545,23 @@ fn activate_prepared_subscriber(
     Error(_) -> state
     Ok(subscriber) -> {
       process.send(stream, opening)
-      replay
-      |> list.take(subscriber.max_credit)
-      |> list.each(fn(message) { process.send(stream, Replay(message)) })
+      let replay_count = list.length(replay)
+      let replay_to_send = list.take(replay, subscriber.max_credit)
+      let prepared_replay =
+        prepare_many(replay_to_send, subscriber.representation, [])
+      list.each(prepared_replay, fn(prepared) {
+        process.send(stream, Replay(prepared))
+      })
       let replay_ids = list.map(replay, fn(message) { message.id })
       let pending =
-        list.filter(subscriber.pending, fn(message) {
-          !list.contains(replay_ids, message.id)
+        subscriber.pending
+        |> list.reverse
+        |> list.filter(fn(prepared) {
+          !list.contains(replay_ids, prepared.message.id)
         })
-      let credit = max(0, subscriber.max_credit - list.length(replay))
+      let credit = max(0, subscriber.max_credit - replay_count)
       case
-        list.length(replay) > subscriber.max_credit
+        replay_count > subscriber.max_credit
         || subscriber.overflowed
         || list.length(pending) > credit
       {
@@ -456,6 +580,7 @@ fn activate_prepared_subscriber(
               subject: stream,
               active: True,
               pending: [],
+              pending_count: 0,
               credit: credit - list.length(pending),
             ),
           )
@@ -463,6 +588,75 @@ fn activate_prepared_subscriber(
       }
     }
   }
+}
+
+fn prepare_many(
+  messages: List(Notification),
+  representation: Representation,
+  accumulated: List(PreparedMessage),
+) -> List(PreparedMessage) {
+  case messages {
+    [] -> list.reverse(accumulated)
+    [message, ..remaining] ->
+      prepare_many(remaining, representation, [
+        prepare_message(message, representation),
+        ..accumulated
+      ])
+  }
+}
+
+fn prepare_cached(
+  message: Notification,
+  representation: Representation,
+  cached: PreparedRepresentations,
+) -> #(PreparedMessage, PreparedRepresentations) {
+  case representation, cached {
+    Structured, PreparedRepresentations(structured: Some(payload), ..) -> #(
+      PreparedMessage(message, payload),
+      cached,
+    )
+    Raw, PreparedRepresentations(raw: Some(payload), ..) -> #(
+      PreparedMessage(message, payload),
+      cached,
+    )
+    Structured, _ -> {
+      let payload = structured_payload(message)
+      #(
+        PreparedMessage(message, payload),
+        PreparedRepresentations(..cached, structured: Some(payload)),
+      )
+    }
+    Raw, _ -> {
+      let payload = raw_payload(message)
+      #(
+        PreparedMessage(message, payload),
+        PreparedRepresentations(..cached, raw: Some(payload)),
+      )
+    }
+  }
+}
+
+/// Prepare a message outside a fan-out, primarily for replay producers and
+/// deterministic transport tests.
+pub fn prepare_message(
+  message: Notification,
+  representation: Representation,
+) -> PreparedMessage {
+  let #(prepared, _) =
+    prepare_cached(message, representation, PreparedRepresentations(None, None))
+  prepared
+}
+
+fn structured_payload(message: Notification) -> BitArray {
+  message |> message_json.encode |> json.to_string |> bit_array.from_string
+}
+
+fn raw_payload(message: Notification) -> BitArray {
+  message.message
+  |> string.replace("\n", " ")
+  |> string.replace("\r", " ")
+  |> fn(value) { value <> "\n" }
+  |> bit_array.from_string
 }
 
 fn min(a: Int, b: Int) -> Int {

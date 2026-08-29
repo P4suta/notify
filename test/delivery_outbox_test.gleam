@@ -1,4 +1,6 @@
 import gleam/bit_array
+import gleam/erlang/process
+import gleam/int
 import gleam/list
 import gleam/option.{None, Some}
 import gleam/string
@@ -18,6 +20,10 @@ fn pending(id: String) -> delivery.NewJob {
     topic_hash: "hash",
     available_at: 100,
   )
+}
+
+fn pending_at(id: String, endpoint: String) -> delivery.NewJob {
+  delivery.NewJob(..pending(id), endpoint:)
 }
 
 pub fn lease_expiry_retry_and_dead_letter_contract_test() {
@@ -72,6 +78,46 @@ pub fn sqlite_outbox_implements_lease_and_completion_contract_test() {
   assert outbox.complete(claimed.id, "sqlite-worker") == Ok(Nil)
   assert outbox.list(delivery.MobileRelay) == Ok([])
   assert outbox.health() == Ok(Nil)
+}
+
+fn endpoint_head_claim_contract(outbox: delivery.Store) {
+  let assert Ok(_) =
+    outbox.enqueue(pending_at("fifo-01", "https://relay.example/fifo"))
+  let assert Ok(_) =
+    outbox.enqueue(pending_at("fifo-02", "https://relay.example/fifo"))
+  int.range(from: 1, to: 17, with: Nil, run: fn(_, index) {
+    let suffix = int.to_string(index)
+    let assert Ok(_) =
+      outbox.enqueue(pending_at(
+        "parallel-" <> suffix,
+        "https://relay.example/" <> suffix,
+      ))
+    Nil
+  })
+
+  let assert Ok(first_claim) =
+    outbox.claim(delivery.MobileRelay, "endpoint-worker", 100, 30, 100)
+  assert list.length(first_claim) == 16
+  assert list.any(first_claim, fn(job) { job.id == "fifo-01" })
+  assert !list.any(first_claim, fn(job) { job.id == "fifo-02" })
+  list.each(first_claim, fn(job) {
+    assert outbox.complete(job.id, "endpoint-worker") == Ok(Nil)
+  })
+
+  let assert Ok(second_claim) =
+    outbox.claim(delivery.MobileRelay, "endpoint-worker", 100, 30, 100)
+  assert list.any(second_claim, fn(job) { job.id == "fifo-02" })
+  assert list.length(second_claim) == 2
+}
+
+pub fn memory_claims_one_head_per_endpoint_with_a_hard_limit_of_16_test() {
+  let assert Ok(outbox) = memory.start()
+  endpoint_head_claim_contract(outbox)
+}
+
+pub fn sqlite_claims_one_head_per_endpoint_with_a_hard_limit_of_16_test() {
+  let assert Ok(outbox) = sqlite.start(":memory:")
+  endpoint_head_claim_contract(outbox)
 }
 
 fn management_contract(outbox: delivery.Store) {
@@ -199,6 +245,66 @@ pub fn worker_records_retry_without_losing_the_durable_job_test() {
   assert report.dead_lettered == 0
   let assert Ok([job]) = outbox.list(delivery.MobileRelay)
   assert job.last_error == Some("HTTP 503")
+}
+
+pub fn worker_delivers_16_distinct_endpoints_concurrently_test() {
+  let assert Ok(outbox) = memory.start()
+  int.range(from: 1, to: 17, with: Nil, run: fn(_, index) {
+    let suffix = int.to_string(index)
+    let assert Ok(_) =
+      outbox.enqueue(pending_at(
+        "concurrent-" <> suffix,
+        "https://relay.example/concurrent/" <> suffix,
+      ))
+    Nil
+  })
+  let started = process.new_subject()
+  let finished = process.new_subject()
+  let provider =
+    worker.Provider(kind: delivery.MobileRelay, deliver: fn(job) {
+      let release = process.new_subject()
+      process.send(started, #(job.id, release))
+      let assert Ok(Nil) = process.receive(release, 5000)
+      Ok(Nil)
+    })
+  process.spawn(fn() {
+    process.send(
+      finished,
+      worker.run_once(
+        outbox,
+        provider,
+        worker_id: "parallel-worker",
+        now: 100,
+        lease_seconds: 30,
+        limit: 100,
+        max_attempts: 3,
+        base_delay_seconds: 10,
+      ),
+    )
+  })
+
+  let releases = receive_releases(started, 16, [])
+  assert list.length(releases) == 16
+  list.each(releases, fn(release) { process.send(release, Nil) })
+  let assert Ok(Ok(report)) = process.receive(finished, 1000)
+  assert report.claimed == 16
+  assert report.delivered == 16
+  assert report.retried == 0
+  assert outbox.list(delivery.MobileRelay) == Ok([])
+}
+
+fn receive_releases(
+  subject: process.Subject(#(String, process.Subject(Nil))),
+  remaining: Int,
+  accumulated: List(process.Subject(Nil)),
+) -> List(process.Subject(Nil)) {
+  case remaining {
+    0 -> accumulated
+    _ -> {
+      let assert Ok(#(_, release)) = process.receive(subject, 1000)
+      receive_releases(subject, remaining - 1, [release, ..accumulated])
+    }
+  }
 }
 
 pub fn mobile_relay_provider_sends_only_poll_id_and_prehashed_endpoint_test() {

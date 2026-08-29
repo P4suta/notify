@@ -20,6 +20,7 @@ import notify/core/message.{type Draft, type Message}
 import notify/core/message_json
 import notify/core/topic
 import notify/delivery
+import notify/health_snapshot
 import notify/http/admin
 import notify/http/audit_log
 import notify/http/auth as http_auth
@@ -2114,37 +2115,12 @@ fn readiness(runtime: Runtime) -> Response(BitArray) {
 }
 
 fn runtime_ready(runtime: Runtime) -> Bool {
-  let storage_ok = runtime.storage.health() |> result.is_ok
-  let attachments_ok = case runtime.attachments {
-    None -> True
-    Some(store) -> store.health() |> result.is_ok
-  }
-  let deliveries_ok = case runtime.deliveries {
-    None -> True
-    Some(store) -> store.health() |> result.is_ok
-  }
-  let webpush_ok = case runtime.webpush {
-    None -> True
-    Some(configured) -> configured.store.health() |> result.is_ok
-  }
-  let audit_ok = case runtime.audit {
-    None -> False
-    Some(store) -> store.health() |> result.is_ok
-  }
-  let http3_ok = case runtime.http3 {
-    None -> True
-    Some(listener) -> http3_listener.readiness(listener)
-  }
-  storage_ok
-  && attachments_ok
-  && deliveries_ok
-  && webpush_ok
-  && audit_ok
-  && http3_ok
+  runtime.health(runtime) |> health_snapshot.ready
 }
 
 fn metrics(runtime: Runtime) -> Response(BitArray) {
-  let up = case runtime_ready(runtime) {
+  let health = runtime.health(runtime)
+  let up = case health_snapshot.ready(health) {
     True -> 1
     False -> 0
   }
@@ -2155,13 +2131,16 @@ fn metrics(runtime: Runtime) -> Response(BitArray) {
     None -> delivery.empty_stats()
     Some(store) -> store.stats() |> result.unwrap(delivery.empty_stats())
   }
-  let audit_up = case runtime.audit {
-    None -> 0
-    Some(store) ->
-      case store.health() |> result.is_ok {
-        True -> 1
-        False -> 0
-      }
+  let #(
+    beam_run_queue,
+    beam_mailbox_messages,
+    beam_max_mailbox_messages,
+    beam_processes,
+    scheduler_delay_milliseconds,
+  ) = beam_runtime_stats()
+  let audit_up = case health.audit {
+    True -> 1
+    False -> 0
   }
   let http3_metrics = case runtime.http3 {
     None ->
@@ -2249,6 +2228,21 @@ fn metrics(runtime: Runtime) -> Response(BitArray) {
     <> int.to_string(delivery_statistics.mobile_relay_leased)
     <> "\nnotify_delivery_jobs{kind=\"mobile_relay\",state=\"dead_letter\"} "
     <> int.to_string(delivery_statistics.mobile_relay_dead_letter)
+    <> "\n# HELP notify_beam_run_queue Runnable BEAM schedulers and processes.\n"
+    <> "# TYPE notify_beam_run_queue gauge\nnotify_beam_run_queue "
+    <> int.to_string(beam_run_queue)
+    <> "\n# HELP notify_beam_mailbox_messages Messages queued across BEAM processes.\n"
+    <> "# TYPE notify_beam_mailbox_messages gauge\nnotify_beam_mailbox_messages "
+    <> int.to_string(beam_mailbox_messages)
+    <> "\n# HELP notify_beam_max_mailbox_messages Largest BEAM process mailbox.\n"
+    <> "# TYPE notify_beam_max_mailbox_messages gauge\nnotify_beam_max_mailbox_messages "
+    <> int.to_string(beam_max_mailbox_messages)
+    <> "\n# HELP notify_beam_processes Current BEAM process count.\n"
+    <> "# TYPE notify_beam_processes gauge\nnotify_beam_processes "
+    <> int.to_string(beam_processes)
+    <> "\n# HELP notify_scheduler_delay_milliseconds One millisecond BEAM timer overshoot.\n"
+    <> "# TYPE notify_scheduler_delay_milliseconds gauge\nnotify_scheduler_delay_milliseconds "
+    <> int.to_string(scheduler_delay_milliseconds)
     <> "\n"
     <> http3_metrics
   text_response(body, 200, "text/plain; version=0.0.4; charset=utf-8")
@@ -2407,3 +2401,6 @@ fn read_public_asset(name: String) -> Result(BitArray, Nil)
 
 @external(erlang, "notify_ffi", "random_id")
 fn random_id() -> String
+
+@external(erlang, "notify_ffi", "beam_runtime_stats")
+fn beam_runtime_stats() -> #(Int, Int, Int, Int, Int)
