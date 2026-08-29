@@ -6,7 +6,6 @@ import gleam/http.{type Header, type Method, Get}
 import gleam/http/request.{type Request, Request}
 import gleam/http/response.{type Response, Response}
 import gleam/int
-import gleam/json
 import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/result
@@ -17,52 +16,20 @@ import http3/websocket
 import notify/attachment_store
 import notify/broker.{type Broker, type Delivery}
 import notify/config.{type Config}
-import notify/core/acl
-import notify/core/message
-import notify/core/message_json
-import notify/core/topic.{type Topic}
 import notify/http/attachment_upload
 import notify/http/auth as http_auth
-import notify/http/filter_params
-import notify/http/live
 import notify/http/parameter
 import notify/http/rate_enforcer
 import notify/http/router
+import notify/http/subscription
 import notify/http/transport
 import notify/log as notify_log
 import notify/runtime.{type Runtime}
-import notify/since
 
 const subscription_capacity = 128
 
-const keepalive_milliseconds = 45_000
-
 type Outcome {
   Outcome(status: Int, succeeded: Bool)
-}
-
-type SubscriptionFormat {
-  JsonFormat
-  RawFormat
-  SseFormat
-}
-
-type Prepared {
-  Prepared(
-    subscription: Int,
-    topics: List(Topic),
-    replay: List(message.Message),
-  )
-}
-
-type Active {
-  Active(
-    subscription: Int,
-    subject: Subject(Delivery),
-    topics: List(Topic),
-    bus: Broker,
-    application: Runtime,
-  )
 }
 
 type WebSocketSignal {
@@ -434,21 +401,22 @@ fn serve_subscription(
   application: Runtime,
   bus: Broker,
   topic_names: String,
-  format: SubscriptionFormat,
+  format: subscription.Format,
   rate_headers: List(Header),
 ) -> Outcome {
   case
-    prepare_subscription(
+    subscription.prepare(
       request,
       application,
       bus,
       topic_names,
+      format,
       subscription_capacity,
     )
   {
-    Error(reply) -> {
+    Error(error) -> {
       let reply =
-        reply
+        prepare_error(error)
         |> apply_headers(rate_headers)
         |> with_request_id(context)
         |> fn(reply) {
@@ -469,7 +437,7 @@ fn serve_subscription(
         ..rate_headers
       ]
       let headers = case format {
-        SseFormat -> [
+        subscription.Sse -> [
           #("x-content-type-options", "nosniff"),
           #("x-accel-buffering", "no"),
           ..headers
@@ -478,11 +446,11 @@ fn serve_subscription(
       }
       case h3_server.send_response(incoming, 200, safe_headers(headers)) {
         Error(_) -> {
-          unsubscribe_prepared(prepared, bus)
+          subscription.unsubscribe_prepared(prepared, bus)
           Outcome(200, False)
         }
         Ok(Nil) -> {
-          let active = activate(prepared, application, bus)
+          let active = subscription.activate(prepared, application, bus)
           let succeeded = subscription_loop(incoming, active, format)
           Outcome(200, succeeded)
         }
@@ -493,26 +461,26 @@ fn serve_subscription(
 
 fn subscription_loop(
   incoming: h3_server.Request,
-  active: Active,
-  format: SubscriptionFormat,
+  active: subscription.Active,
+  format: subscription.Format,
 ) -> Bool {
   let delivery = process.receive_forever(active.subject)
-  let payload = subscription_payload(delivery, format)
-  case h3_server.send_chunk(incoming, <<payload:utf8>>) {
+  case h3_server.send_chunk(incoming, subscription.payload(delivery, format)) {
     Error(_) -> {
       active.bus.unsubscribe(active.subscription)
       False
     }
-    Ok(Nil) -> {
-      after_delivery(active, delivery)
+    Ok(Nil) ->
       case delivery {
         broker.Overflow -> {
           active.bus.unsubscribe(active.subscription)
           h3_server.finish_response(incoming) |> result.is_ok
         }
-        _ -> subscription_loop(incoming, active, format)
+        _ -> {
+          subscription.after_delivery(active, delivery)
+          subscription_loop(incoming, active, format)
+        }
       }
-    }
   }
 }
 
@@ -527,17 +495,18 @@ fn serve_websocket(
   case request.path_segments(request) {
     [topic_names, "ws"] ->
       case
-        prepare_subscription(
+        subscription.prepare(
           request,
           application,
           bus,
           topic_names,
+          subscription.WebSocket,
           subscription_capacity,
         )
       {
-        Error(reply) -> {
+        Error(error) -> {
           let reply =
-            reply
+            prepare_error(error)
             |> apply_headers(rate_headers)
             |> with_request_id(context)
             |> fn(reply) {
@@ -561,7 +530,7 @@ fn serve_websocket(
             websocket.accept_with_headers(websocket.new(), incoming, headers)
           {
             Error(_) -> {
-              unsubscribe_prepared(prepared, bus)
+              subscription.unsubscribe_prepared(prepared, bus)
               send_bounded(
                 incoming,
                 json_response(
@@ -572,7 +541,7 @@ fn serve_websocket(
               )
             }
             Ok(socket) -> {
-              let active = activate(prepared, application, bus)
+              let active = subscription.activate(prepared, application, bus)
               let succeeded = websocket_subscription_loop(active, socket)
               Outcome(200, succeeded)
             }
@@ -593,7 +562,7 @@ fn serve_websocket(
 }
 
 fn websocket_subscription_loop(
-  active: Active,
+  active: subscription.Active,
   socket: websocket.Socket,
 ) -> Bool {
   let socket_subject = process.new_subject()
@@ -623,7 +592,7 @@ fn receive_websocket(
 }
 
 fn websocket_select(
-  active: Active,
+  active: subscription.Active,
   socket: websocket.Socket,
   selector: Selector(WebSocketLoopEvent),
 ) -> Bool {
@@ -638,14 +607,13 @@ fn websocket_select(
     }
     WebSocketInput(SocketEvent(_)) -> websocket_select(active, socket, selector)
     WebSocketDelivery(delivery) ->
-      case websocket.send_text(socket, websocket_payload(delivery)) {
+      case websocket.send_text(socket, subscription.structured_text(delivery)) {
         Error(_) -> {
           active.bus.unsubscribe(active.subscription)
           let _ = websocket.cancel(socket)
           False
         }
-        Ok(next) -> {
-          after_delivery(active, delivery)
+        Ok(next) ->
           case delivery {
             broker.Overflow -> {
               active.bus.unsubscribe(active.subscription)
@@ -663,116 +631,22 @@ fn websocket_select(
                 Error(_) -> False
               }
             }
-            _ -> websocket_select(active, next, selector)
+            _ -> {
+              subscription.after_delivery(active, delivery)
+              websocket_select(active, next, selector)
+            }
           }
-        }
       }
   }
 }
 
-fn prepare_subscription(
-  request: Request(BitArray),
-  application: Runtime,
-  bus: Broker,
-  topic_names: String,
-  capacity: Int,
-) -> Result(Prepared, Response(BitArray)) {
-  use topics <- result.try(parse_topics(topic_names))
-  let runtime.Clock(now) = application.clock
-  use _ <- result.try(
-    http_auth.check(request, application.access, topics, acl.Read, now())
-    |> result.map_error(access_failure),
-  )
-  use marker <- result.try(
-    since.parse(
-      parameter.read(request, ["x-since", "since", "si"]),
-      poll: False,
-      now: now(),
-    )
-    |> result.map_error(fn(_) { invalid_since() }),
-  )
-  use criteria <- result.try(
-    filter_params.parse(request)
-    |> result.map_error(fn(_) { invalid_priority() }),
-  )
-  let placeholder = process.new_subject()
-  let subscription =
-    bus.subscribe_paused_filtered(topics, criteria, placeholder, capacity)
-  let replay =
-    live.replay_messages(
-      application,
-      topics,
-      criteria,
-      marker,
-      parameter.read(request, ["x-scheduled", "scheduled", "sched"])
-        |> option.map(truthy)
-        |> option.unwrap(False),
-    )
-  case replay {
-    Error(_) -> {
-      bus.unsubscribe(subscription)
-      Error(storage_unavailable())
-    }
-    Ok(replay) -> Ok(Prepared(subscription:, topics:, replay:))
-  }
-}
-
-fn activate(prepared: Prepared, application: Runtime, bus: Broker) -> Active {
-  let Prepared(subscription:, topics:, replay:) = prepared
-  let subject = process.new_subject()
-  let active = Active(subscription:, subject:, topics:, bus:, application:)
-  bus.activate_prepared(
-    subscription,
-    subject,
-    open_delivery(application, topics),
-    replay,
-  )
-  schedule_keepalive(active)
-  active
-}
-
-fn unsubscribe_prepared(prepared: Prepared, bus: Broker) -> Nil {
-  let Prepared(subscription:, ..) = prepared
-  bus.unsubscribe(subscription)
-}
-
-fn schedule_keepalive(active: Active) -> Nil {
-  let _timer =
-    process.send_after(
-      active.subject,
-      keepalive_milliseconds,
-      keepalive_delivery(active.application, active.topics),
-    )
-  Nil
-}
-
-fn after_delivery(active: Active, delivery: Delivery) -> Nil {
-  case delivery {
-    broker.Message(_) | broker.Replay(_) -> active.bus.ack(active.subscription)
-    broker.Keepalive(..) -> schedule_keepalive(active)
-    broker.Open(..) | broker.Overflow -> Nil
-  }
-}
-
-fn open_delivery(application: Runtime, topics: List(Topic)) -> Delivery {
-  let runtime.Clock(now) = application.clock
-  let runtime.IdGenerator(next_id) = application.ids
-  broker.Open(next_id(), now(), topics)
-}
-
-fn keepalive_delivery(application: Runtime, topics: List(Topic)) -> Delivery {
-  let runtime.Clock(now) = application.clock
-  let runtime.IdGenerator(next_id) = application.ids
-  broker.Keepalive(next_id(), now(), topics)
-}
-
 fn subscription_route(
   request: Request(BitArray),
-) -> Option(#(String, SubscriptionFormat)) {
+) -> Option(#(String, subscription.Format)) {
   case request.method, request.path_segments(request), poll_requested(request) {
-    Get, [topics, "json"], False -> Some(#(topics, JsonFormat))
-    Get, [topics, "raw"], False -> Some(#(topics, RawFormat))
-    Get, [topics, "sse"], False -> Some(#(topics, SseFormat))
+    Get, [topics, "json"], False -> Some(#(topics, subscription.Json))
+    Get, [topics, "raw"], False -> Some(#(topics, subscription.Raw))
+    Get, [topics, "sse"], False -> Some(#(topics, subscription.Sse))
     _, _, _ -> None
   }
 }
@@ -785,17 +659,6 @@ fn poll_requested(request: Request(body)) -> Bool {
 
 fn truthy(value: String) -> Bool {
   list.contains(["1", "true", "yes", "on"], string.lowercase(value))
-}
-
-fn parse_topics(names: String) -> Result(List(Topic), Response(BitArray)) {
-  case topic.parse_many(names) {
-    Error(_) -> Error(invalid_topic())
-    Ok(topics) ->
-      case topic.any_disallowed(topics) {
-        True -> Error(disallowed_topic())
-        False -> Ok(topics)
-      }
-  }
 }
 
 fn access_failure(failure: http_auth.Failure) -> Response(BitArray) {
@@ -864,68 +727,24 @@ fn storage_unavailable() -> Response(BitArray) {
   |> response.set_header("cache-control", "no-store")
 }
 
-fn content_type(format: SubscriptionFormat) -> String {
+fn prepare_error(error: subscription.PrepareError) -> Response(BitArray) {
+  case error {
+    subscription.InvalidTopic -> invalid_topic()
+    subscription.DisallowedTopic -> disallowed_topic()
+    subscription.Authorization(failure) -> access_failure(failure)
+    subscription.InvalidSince -> invalid_since()
+    subscription.InvalidFilter -> invalid_priority()
+    subscription.StorageFailure(_) -> storage_unavailable()
+  }
+}
+
+fn content_type(format: subscription.Format) -> String {
   case format {
-    JsonFormat -> "application/x-ndjson; charset=utf-8"
-    RawFormat -> "text/plain; charset=utf-8"
-    SseFormat -> "text/event-stream; charset=utf-8"
+    subscription.Json -> "application/x-ndjson; charset=utf-8"
+    subscription.Raw -> "text/plain; charset=utf-8"
+    subscription.Sse -> "text/event-stream; charset=utf-8"
+    subscription.WebSocket -> "application/octet-stream"
   }
-}
-
-fn subscription_payload(
-  delivery: Delivery,
-  format: SubscriptionFormat,
-) -> String {
-  case format, delivery {
-    RawFormat, broker.Message(message) | RawFormat, broker.Replay(message) ->
-      message.message
-      |> string.replace("\n", " ")
-      |> string.replace("\r", " ")
-      |> fn(value) { value <> "\n" }
-    RawFormat, _ -> "\n"
-    JsonFormat, _ -> websocket_payload(delivery) <> "\n"
-    SseFormat, _ -> sse_payload(delivery)
-  }
-}
-
-fn websocket_payload(delivery: Delivery) -> String {
-  case delivery {
-    broker.Overflow -> overflow_json()
-    _ -> delivery_json(delivery)
-  }
-}
-
-fn sse_payload(delivery: Delivery) -> String {
-  let event = case delivery {
-    broker.Open(..) -> "event: open\n"
-    broker.Keepalive(..) -> "event: keepalive\n"
-    broker.Overflow -> "event: error\n"
-    broker.Message(_) | broker.Replay(_) -> ""
-  }
-  event <> "data: " <> websocket_payload(delivery) <> "\n\n"
-}
-
-fn delivery_json(delivery: Delivery) -> String {
-  case delivery {
-    broker.Open(id, time, topics) ->
-      message_json.encode_control(id:, time:, event: message.OpenEvent, topics:)
-      |> json.to_string
-    broker.Keepalive(id, time, topics) ->
-      message_json.encode_control(
-        id:,
-        time:,
-        event: message.KeepaliveEvent,
-        topics:,
-      )
-      |> json.to_string
-    broker.Message(message) | broker.Replay(message) ->
-      message_json.encode(message) |> json.to_string
-    broker.Overflow -> overflow_json()
-  }
-}
-
-fn overflow_json() -> String {
-  "{\"code\":42909,\"http\":429,\"error\":\"slow subscriber buffer exhausted\"}"
 }
 
 /// Convert validated HTTP/3 request components into the shared HTTP model.
