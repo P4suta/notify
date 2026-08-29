@@ -14,7 +14,7 @@ body:
     id: revision
     attributes:
       label: Notify revision
-      description: Commit SHA or container image identifier. No releases are published yet.
+      description: Release tag, commit SHA, or container image identifier.
       placeholder: 0123456789abcdef
     validations:
       required: true

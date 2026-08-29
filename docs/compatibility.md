@@ -80,5 +80,6 @@ as 40022, Firebase-disable aliases as accepted metadata, and UnifiedPush flags
 as an opaque ordinary publish. Compatibility with configuration-only behavior
 inside those absent subsystems is not claimed.
 
-No release, tag, GitHub Package, registry push, public binary distribution, or
-semantic-release automation is part of this work.
+Release Please automates SemVer, CHANGELOG entries, protected `vX.Y.Z` tags,
+and GitHub Release notes. GitHub Packages, registry pushes, and public binary
+distribution remain outside this work.

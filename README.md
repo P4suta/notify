@@ -22,8 +22,10 @@ The compatibility baseline is ntfy **v2.27.0**. Notify is an independent
 implementation based on the public protocol; it does not copy ntfy source code
 or web assets.
 
-No release artifacts are currently published. Build from source or use the
-local Docker and native packaging instructions below.
+Release Please maintains version and changelog pull requests and creates signed
+`vX.Y.Z` tags plus GitHub Release notes after those pull requests merge. Binary
+and container artifacts are not published; build from source or use the local
+Docker and native packaging instructions below.
 
 ## Quick start with SQLite
 
@@ -534,8 +536,10 @@ builds Linux amd64/arm64 and macOS amd64/arm64 on matching standard runners.
 Linux NIFs are rebuilt against musl in a digest-pinned compiler image; the
 supported Linux cross-build path produces Windows amd64 with explicit Zig-built
 PE NIFs, then transfers it to a Windows recovery smoke. That private workflow
-artifact expires after three days. No registry publication or release-page
-automation is included.
+artifact expires after three days. Release Please automates SemVer, CHANGELOG,
+tags, and GitHub Release notes as described in
+[the release guide](docs/releasing.md); registry and binary publication remain
+disabled.
 
 ## License
 

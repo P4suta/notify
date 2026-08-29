@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/v17.3.0/schemas/config.json",
+  "bootstrap-sha": "8e1830adfb31df147c48c3349023bf327ae9b114",
+  "release-type": "elixir",
+  "include-component-in-tag": false,
+  "include-v-in-tag": true,
+  "include-v-in-release-name": true,
+  "packages": {
+    ".": {
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "gleam.toml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "toml",
+          "path": "packages/notify_core/gleam.toml",
+          "jsonpath": "$.version"
+        },
+        {
+          "type": "generic",
+          "path": "packages/notify_core/mix.exs"
+        },
+        {
+          "type": "toml",
+          "path": "web/gleam.toml",
+          "jsonpath": "$.version"
+        }
+      ]
+    }
+  }
+}
