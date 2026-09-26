@@ -33,8 +33,10 @@ docker run "${container_options[@]}" "$actionlint_image"
 docker run "${container_options[@]}" "$hadolint_image" /bin/hadolint \
   Dockerfile packaging/native/linux-nif-builder.Dockerfile
 
-mapfile -d '' -t shell_files \
-  < <(git ls-files --cached --others --exclude-standard -z -- '*.sh' '*.bash')
+shell_files=()
+while IFS= read -r -d '' shell_file; do
+  shell_files+=("$shell_file")
+done < <(git ls-files --cached --others --exclude-standard -z -- '*.sh' '*.bash')
 if ((${#shell_files[@]} > 0)); then
   docker run "${container_options[@]}" "$shellcheck_image" -- "${shell_files[@]}"
 fi
@@ -43,8 +45,10 @@ docker run "${container_options[@]}" "$zizmor_image" --offline .
 docker run "${container_options[@]}" "$gitleaks_image" \
   dir --no-banner --redact .
 
-mapfile -d '' -t yaml_files \
-  < <(git ls-files --cached --others --exclude-standard -z -- '*.yml' '*.yaml')
+yaml_files=()
+while IFS= read -r -d '' yaml_file; do
+  yaml_files+=("$yaml_file")
+done < <(git ls-files --cached --others --exclude-standard -z -- '*.yml' '*.yaml')
 if ((${#yaml_files[@]} > 0)); then
   yamllint -- "${yaml_files[@]}"
 fi

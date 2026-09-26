@@ -237,53 +237,32 @@ attachments, idempotency, and attachment rollback after a database conflict.
 docker compose -f compose.cluster.yml up --build
 ```
 
-This starts three Notify nodes, PostgreSQL 17, and a development MinIO bucket.
-Nodes A, B, and C are exposed on ports 8080, 8081, and 8082. The
-development-only PostgreSQL and MinIO APIs are bound to loopback ports 15432
-and 19000; the MinIO console is on loopback port 19001. Replace all example
-credentials, place all nodes behind a trusted reverse proxy, and set the public
-base URL before any shared test deployment. This mode is not yet certified for
-production use.
+This starts three Notify nodes, PostgreSQL 17, and a development VersityGW S3 bucket.
+Nodes A, B, and C are exposed on ports 8080, 8081, and 8082.
+The development-only PostgreSQL and S3 APIs are bound to loopback ports 15432 and 19000.
+Replace all example credentials, place all nodes behind a trusted reverse proxy, and set the public base URL before any shared test deployment.
+This mode is not yet certified for production use.
 
 The first cluster-wide setup challenge is installed transactionally. Concurrent
 nodes never rotate it or print unusable competing URLs; any node can consume the
 single URL, after which reuse is rejected across the cluster.
 
-The durable PostgreSQL event log is authoritative. LISTEN/NOTIFY only wakes
-nodes; each node resumes from its stored cursor after lost notifications or a
-restart. The listener blocks on PostgreSQL notification frames instead of
-polling with queries, coalesces queued wakes for 25 milliseconds, and still
-performs a catch-up after a one-second quiet timeout. Event cursor heartbeat
-and the next 256-row page are read in one statement. A node advances its cursor
-only after the broker has synchronously
-applied every non-scheduled event, including its own origin, in sequence; a
-dispatch or cursor-write failure leaves the batch available for at-least-once
-retry. Cursor heartbeats protect
-active readers, cursors stale for seven days are removed, and compaction deletes
-only acknowledged event rows whose message has already expired. Scheduled
-publication uses `FOR UPDATE SKIP LOCKED` and commits the released message plus
-its event in one transaction. These paths have real-PostgreSQL contract
-coverage. The contract also terminates the dedicated LISTEN backend, commits an
-event while it is disconnected, requires a new listener PID to catch up from
-the log, and proves duplicate wake-ups do not duplicate delivery. A separate
-three-node data-plane contract requires every node to consume both local- and
-remote-origin events in the same durable order, stops one bus actor, commits on
-both surviving origins, and requires the restarted node to resume both events
-in sequence from its durable cursor. A weekly/manual full-container contract
-additionally terminates a dedicated listener, injects duplicate wake-ups,
-isolates a bounded-buffer slow subscriber, SIGKILLs two nodes simultaneously,
-and verifies ordered replay, cursor catch-up, and message-ID live resume. It
-also kills the origin of a scheduled message before its due time, stops
-PostgreSQL and MinIO independently, and kills an in-flight mobile-relay lease
-owner before requiring another node to reclaim and complete the content-blind
-job.
+The durable PostgreSQL event log is authoritative.
+LISTEN/NOTIFY only wakes nodes; each node resumes from its stored cursor after lost notifications or a restart.
+The listener blocks on PostgreSQL notification frames instead of polling with queries, coalesces queued wakes for 25 milliseconds, and still performs a catch-up after a one-second quiet timeout.
+Event cursor heartbeat and the next 256-row page are read in one statement.
+A node advances its cursor only after the broker has synchronously applied every non-scheduled event, including its own origin, in sequence; a dispatch or cursor-write failure leaves the batch available for at-least-once retry.
+Cursor heartbeats protect active readers, cursors stale for seven days are removed, and compaction deletes only acknowledged event rows whose message has already expired.
+Scheduled publication uses `FOR UPDATE SKIP LOCKED` and commits the released message plus its event in one transaction.
+These paths have real-PostgreSQL contract coverage.
+The contract also terminates the dedicated LISTEN backend, commits an event while it is disconnected, requires a new listener PID to catch up from the log, and proves duplicate wake-ups do not duplicate delivery.
+A separate three-node data-plane contract requires every node to consume both local- and remote-origin events in the same durable order, stops one bus actor, commits on both surviving origins, and requires the restarted node to resume both events in sequence from its durable cursor.
+A weekly/manual full-container contract additionally terminates a dedicated listener, injects duplicate wake-ups, isolates a bounded-buffer slow subscriber, SIGKILLs two nodes simultaneously, and verifies ordered replay, cursor catch-up, and message-ID live resume.
+It also kills the origin of a scheduled message before its due time, stops PostgreSQL and the S3 gateway independently, and kills an in-flight mobile-relay lease owner before requiring another node to reclaim and complete the content-blind job.
 The target-scale 10-minute steady-state soak has passed independently for JSON,
-raw, SSE, and WebSocket at source commit `5ecabbc`. On four separate 4-CPU
-GitHub-hosted runners, commit p95 ranged from 124.46 to 162.10 ms; every format
-committed 300,000 messages and delivered all 3,000,000 expected subscriber
-events with zero loss, duplicates, order errors, disconnects, durable-log
-mismatches, or final cursor lag. These are single-host measurements, not a
-portable capacity certificate.
+raw, SSE, and WebSocket at source commit `5ecabbc`.
+On four separate 4-CPU GitHub-hosted runners, commit p95 ranged from 124.46 to 162.10 ms; every format committed 300,000 messages and delivered all 3,000,000 expected subscriber events with zero loss, duplicates, order errors, disconnects, durable-log mismatches, or final cursor lag.
+These are single-host measurements, not a portable capacity certificate.
 
 SQLite uses WAL plus a per-database live-process lock and is strictly
 single-node.
@@ -470,16 +449,11 @@ graceful SIGTERM shutdown. The test runs the image with dropped
 capabilities, `no-new-privileges`, and a read-only root filesystem, then removes
 its container and volume.
 
-`test/cluster_fault.sh` builds one local image and starts three Notify
-containers with real PostgreSQL and MinIO. It exercises listener replacement,
-duplicate wake-ups, slow-subscriber isolation, simultaneous two-node crashes,
-scheduled-origin failover, fail-closed PostgreSQL recovery without a phantom
-commit, MinIO upload failure and cross-node recovery, and lease reclamation
-after killing an in-flight relay worker. The local relay mock rejects message
-bodies and malformed poll IDs. The harness uses a unique Compose project/image
-and removes its containers, volumes, temporary files, and image on every exit.
-The same test runs weekly and on manual dispatch; it is intentionally outside
-the pull-request fast path.
+`test/cluster_fault.sh` builds one local image and starts three Notify containers with real PostgreSQL and VersityGW.
+It exercises listener replacement, duplicate wake-ups, slow-subscriber isolation, simultaneous two-node crashes, scheduled-origin failover, fail-closed PostgreSQL recovery without a phantom commit, S3 upload failure and cross-node recovery, and lease reclamation after killing an in-flight relay worker.
+The local relay mock rejects message bodies and malformed poll IDs.
+The harness uses a unique Compose project/image and removes its containers, volumes, temporary files, and image on every exit.
+The same test runs weekly and on manual dispatch; it is intentionally outside the pull-request fast path.
 
 `test/cluster_soak.sh` is the fail-closed target load gate. Its defaults are
 three nodes, 10,000 live subscriptions, 1,000 topics, 500 publishes per second
@@ -504,26 +478,23 @@ weekly and manually and retains its private evidence for seven days; it does
 not publish an image or release artifact. The latest recorded local result and
 its scope are in [operational limits](docs/operations.md).
 
-Set `NOTIFY_TEST_POSTGRES_HOST` (plus optional `PORT` and `PASSWORD` variants)
-to enable the real PostgreSQL contract suite. Set `NOTIFY_TEST_S3_ENDPOINT`
-(plus optional `ACCESS_KEY` and `SECRET_KEY` variants) for the MinIO contract,
-and `NOTIFY_TEST_NETWORK=1` for loopback HTTP sender tests. Automated tests never
-contact public ntfy.sh. Against `compose.cluster.yml`, the adapter suite is:
+Set `NOTIFY_TEST_POSTGRES_HOST` (plus optional `PORT` and `PASSWORD` variants) to enable the real PostgreSQL contract suite.
+Set `NOTIFY_TEST_S3_ENDPOINT` (plus optional `ACCESS_KEY` and `SECRET_KEY` variants) for the S3-compatible gateway contract, and `NOTIFY_TEST_NETWORK=1` for loopback HTTP sender tests.
+Automated tests never contact public ntfy.sh.
+Against `compose.cluster.yml`, the adapter suite is:
 
 ```sh
 NOTIFY_TEST_POSTGRES_HOST=127.0.0.1 \
 NOTIFY_TEST_POSTGRES_PORT=15432 \
 NOTIFY_TEST_POSTGRES_PASSWORD=notify-development-password \
 NOTIFY_TEST_S3_ENDPOINT=http://127.0.0.1:19000 \
-NOTIFY_TEST_S3_ACCESS_KEY=notify-minio \
-NOTIFY_TEST_S3_SECRET_KEY=notify-minio-development-password \
+NOTIFY_TEST_S3_ACCESS_KEY=notify-s3 \
+NOTIFY_TEST_S3_SECRET_KEY=notify-s3-development-password \
 gleam test
 ```
 
-The `CI / PostgreSQL and MinIO` pull-request check starts these services in an
-isolated Compose project and runs the same suite. It is the required real-store
-counterpart to the default SQLite server test; failure logs are retained only
-inside the workflow run and its volumes are always removed.
+The `CI / PostgreSQL and S3` pull-request check starts these services in an isolated Compose project and runs the same suite.
+It is the required real-store counterpart to the default SQLite server test; failure logs are retained only inside the workflow run and its volumes are always removed.
 
 The pinned differential corpus lives in `test/compat`. Run it against the
 local `compose.compat.yml` stack to compare normalised status codes, media
