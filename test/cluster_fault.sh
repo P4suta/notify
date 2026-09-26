@@ -352,7 +352,7 @@ expect_attachment_failure() {
     --write-out '%{http_code}' \
     "$url/$publish_topic") || curl_status=$?
   if ((curl_status == 0)) && [[ $http_status == 2?? ]]; then
-    echo "attachment unexpectedly succeeded during MinIO outage" >&2
+    echo "attachment unexpectedly succeeded during S3 gateway outage" >&2
     return 1
   fi
 }
@@ -387,7 +387,7 @@ assert_message_absent() {
 }
 
 "${compose[@]}" build notify-a
-"${compose[@]}" up --detach --wait --wait-timeout 120 postgres minio
+"${compose[@]}" up --detach --wait --wait-timeout 120 postgres s3
 "${compose[@]}" run --rm --no-deps \
   --env "NOTIFY_PASSWORD=$password" \
   notify-a run setup \
@@ -638,10 +638,10 @@ readonly attachment_source=$fault_directory/attachment-source.bin
 readonly attachment_download=$fault_directory/attachment-download.bin
 printf 'cluster object storage recovery payload %s\n' "$run_suffix" \
   >"$attachment_source"
-"${compose[@]}" stop minio
+"${compose[@]}" stop s3
 expect_attachment_failure "$node_a" "$attachment_topic" \
   "$attachment_source" "$fault_directory/object-outage.json"
-"${compose[@]}" start minio
+"${compose[@]}" start s3
 wait_for_ready "$node_a"
 wait_for_ready "$node_b"
 wait_for_ready "$node_c"
@@ -728,4 +728,4 @@ case $relay_owner_service in
   notify-c) wait_for_ready "$node_c" ;;
 esac
 
-echo "three-node listener recovery, duplicate wake, slow-subscriber isolation, simultaneous crash catch-up, scheduled failover, PostgreSQL/MinIO outage, and lease reclamation passed"
+echo "three-node listener recovery, duplicate wake, slow-subscriber isolation, simultaneous crash catch-up, scheduled failover, PostgreSQL/S3 gateway outage, and lease reclamation passed"

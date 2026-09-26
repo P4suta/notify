@@ -182,7 +182,7 @@ case $scenario in
 esac
 
 "${compose[@]}" build notify-a
-"${compose[@]}" up --detach --wait --wait-timeout 180 postgres minio
+"${compose[@]}" up --detach --wait --wait-timeout 180 postgres s3
 case $scenario in
   webpush-relay | slow-provider)
     "${compose[@]}" up --detach --no-build relay-benchmark
@@ -214,7 +214,7 @@ server_containers=(
 container_names=(
   "${server_containers[@]}"
   "$project_name-postgres-1"
-  "$project_name-minio-1"
+  "$project_name-s3-1"
 )
 case $scenario in
   webpush-relay | slow-provider)

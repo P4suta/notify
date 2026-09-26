@@ -14,8 +14,10 @@ done
 
 if command -v pwsh >/dev/null 2>&1 && \
   pwsh -NoLogo -NoProfile -NonInteractive -Command 'exit 0' >/dev/null 2>&1; then
-  mapfile -d '' -t powershell_files \
-    < <(git ls-files --cached --others --exclude-standard -z -- '*.ps1')
+  powershell_files=()
+  while IFS= read -r -d '' powershell_file; do
+    powershell_files+=("$powershell_file")
+  done < <(git ls-files --cached --others --exclude-standard -z -- '*.ps1')
   for powershell_file in "${powershell_files[@]}"; do
     # PowerShell expands these expressions; Bash must pass them literally.
     # shellcheck disable=SC2016
@@ -25,8 +27,10 @@ if command -v pwsh >/dev/null 2>&1 && \
   done
 fi
 
-mapfile -d '' -t tracked_files \
-  < <(git ls-files --cached --others --exclude-standard -z)
+tracked_files=()
+while IFS= read -r -d '' tracked_file; do
+  tracked_files+=("$tracked_file")
+done < <(git ls-files --cached --others --exclude-standard -z)
 
 for tracked_file in "${tracked_files[@]}"; do
   case "$tracked_file" in
