@@ -282,24 +282,17 @@ container health, and OOM state.
 | Maximum Notify PIDs observed (A / B / C) | 40 / 39 / 39 |
 | Final PostgreSQL database size | 292,034,227 bytes |
 
-The loopback Compose host had 8 logical x86-64 CPUs and 16,703,741,952 bytes
-of memory, Linux 6.8.0-138-generic, Docker 29.7.2, Compose 5.5.0,
-PostgreSQL 17.11, Node.js 26.7.0, and the pinned MinIO image from
-`compose.cluster.yml`. Eighty-seven resource samples were retained; the sampler
-sleeps five seconds between polls. All five containers were running, healthy
-where a healthcheck was defined, and not OOM-killed when the verdict was
-captured. The isolated containers, network, volumes, and local image were
-removed afterward. The recorded maxima are observations from this run, not a
-proof of a universal heap, mailbox, or storage bound.
+The loopback Compose host had 8 logical x86-64 CPUs and 16,703,741,952 bytes of memory, Linux 6.8.0-138-generic, Docker 29.7.2, Compose 5.5.0, PostgreSQL 17.11, Node.js 26.7.0, and the S3 gateway image then pinned by `compose.cluster.yml`.
+Eighty-seven resource samples were retained; the sampler sleeps five seconds between polls.
+All five containers were running, healthy where a healthcheck was defined, and not OOM-killed when the verdict was captured.
+The isolated containers, network, volumes, and local image were removed afterward.
+The recorded maxima are observations from this run, not a proof of a universal heap, mailbox, or storage bound.
 
-These are single-host steady-state measurements, not portable capacity
-certificates. Each format runs alone. A separate compound test covers
-simultaneous node failures, slow-subscriber isolation, scheduled-origin
-failure, PostgreSQL and MinIO outages, and delivery-lease reclamation, but not
-while the full target load is running. Cross-host network latency and a
-deployment's own proxy, database, storage, and hardware still require an
-independent capacity run. Reconnect delivery remains at-least-once, never
-exactly-once.
+These are single-host steady-state measurements, not portable capacity certificates.
+Each format runs alone.
+A separate compound test covers simultaneous node failures, slow-subscriber isolation, scheduled-origin failure, PostgreSQL and S3 gateway outages, and delivery-lease reclamation, but not while the full target load is running.
+Cross-host network latency and a deployment's own proxy, database, storage, and hardware still require an independent capacity run.
+Reconnect delivery remains at-least-once, never exactly-once.
 
 At commit `1d2d9c3`, the old five-second resource observer overlapped enough of
 the four-CPU latency population to make WebSocket p95 fail at 497.11 ms and
@@ -444,28 +437,15 @@ Cleanup first removes seven-day-stale cursors, then uses the minimum remaining
 cursor as a watermark. It deletes only event rows at or below that watermark
 whose message row no longer exists.
 
-The current contract exercises paging, cursor resume, dispatch-before-ACK,
-dispatch failure, ACK failure and at-least-once batch replay, concurrent ordered
-commits, same-batch duplicate conflict, event-lock blocking, one forced backend
-termination and connection
-replacement, scheduled release, and compaction. It also terminates the dedicated
-LISTEN backend, commits during the disconnect, waits for a different backend PID
-to reconnect and catch up from the event log, and injects duplicate wake-ups
-without duplicate delivery. A three-node case verifies that all nodes consume
-local- and remote-origin events in the same sequence, stops one bus actor after
-its cursor is durable, commits on both
-surviving origins, and restarts the same node identity to catch up both events
-in sequence. These persistence cases run against real PostgreSQL in the
-pull-request gate. The weekly/manual compound container contract starts three
-complete nodes with PostgreSQL and MinIO. It replaces a terminated LISTEN
-connection, injects duplicate wake-ups, disconnects only a bounded-buffer slow
-subscriber, SIGKILLs two nodes simultaneously, and requires ordered replay,
-cursor catch-up, and message-ID resume. It then kills a scheduled message's
-origin before due time and requires exactly one release from the two surviving
-schedulers. Its storage faults stop PostgreSQL and MinIO separately, require
-fail-closed writes with no phantom message/attachment, and verify recovery plus
-cross-node object download. These are bounded fault contracts, not prolonged
-outage-at-target-load capacity results.
+The current contract exercises paging, cursor resume, dispatch-before-ACK, dispatch failure, ACK failure and at-least-once batch replay, concurrent ordered commits, same-batch duplicate conflict, event-lock blocking, one forced backend termination and connection replacement, scheduled release, and compaction.
+It also terminates the dedicated LISTEN backend, commits during the disconnect, waits for a different backend PID to reconnect and catch up from the event log, and injects duplicate wake-ups without duplicate delivery.
+A three-node case verifies that all nodes consume local- and remote-origin events in the same sequence, stops one bus actor after its cursor is durable, commits on both surviving origins, and restarts the same node identity to catch up both events in sequence.
+These persistence cases run against real PostgreSQL in the pull-request gate.
+The weekly/manual compound container contract starts three complete nodes with PostgreSQL and VersityGW.
+It replaces a terminated LISTEN connection, injects duplicate wake-ups, disconnects only a bounded-buffer slow subscriber, SIGKILLs two nodes simultaneously, and requires ordered replay, cursor catch-up, and message-ID resume.
+It then kills a scheduled message's origin before due time and requires exactly one release from the two surviving schedulers.
+Its storage faults stop PostgreSQL and the S3 gateway separately, require fail-closed writes with no phantom message/attachment, and verify recovery plus cross-node object download.
+These are bounded fault contracts, not prolonged outage-at-target-load capacity results.
 
 ## Durable delivery recovery
 

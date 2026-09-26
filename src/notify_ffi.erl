@@ -1449,7 +1449,7 @@ s3_copy_object({config, _Endpoint, Bucket, _Region, _AccessKey,
                SourceKey, TargetKey, Expires) ->
     RawSource = <<"/", Bucket/binary, "/", SourceKey/binary>>,
     CopySource = unicode:characters_to_binary(
-        uri_string:quote(binary_to_list(RawSource))),
+        uri_string:quote(binary_to_list(RawSource), "/")),
     Headers = [
         {<<"x-amz-copy-source">>, CopySource},
         {<<"x-amz-metadata-directive">>, <<"REPLACE">>},
