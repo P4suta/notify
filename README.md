@@ -375,13 +375,11 @@ test/vulnerability_scan.sh notify:security
 test/generate_sbom.sh notify:security /tmp/notify-sbom
 ```
 
-`test/security_lint.sh` runs actionlint, hadolint, ShellCheck, zizmor, and
-Gitleaks in network-disabled, read-only containers pinned by image digest.
-yamllint is installed separately from `requirements/security-lint.txt` with
-required hashes. Generated dependency/build trees are excluded from the
-working-tree Gitleaks scan; source, configuration, fixtures, and workflows
-remain in scope. Dependabot applies a seven-day cooldown to routine version
-updates; Dependabot security updates are not delayed by that setting.
+`test/security_lint.sh` runs actionlint, hadolint, ShellCheck, zizmor, and Gitleaks in network-disabled, read-only containers pinned by image digest.
+yamllint is installed separately from `requirements/security-lint.txt` with required hashes.
+Generated dependency/build trees are excluded from the working-tree Gitleaks scan; source, configuration, fixtures, and workflows remain in scope.
+Mend-hosted Renovate applies the shared P4suta schedule and three-day minimum release age to dependency updates.
+GitHub vulnerability alerts remain enabled and feed the normal reviewed remediation path.
 
 Native CI downloads Zig 0.15.2 directly from `ziglang.org`, verifies the
 official per-host SHA-256 before extraction, and never publishes the resulting
