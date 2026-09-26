@@ -163,8 +163,7 @@ jobs:
       - name: Smoke-test SQLite container lifecycle
         run: test/container_smoke.sh notify:ci
 
-  # The one status check branch protection requires,
-  # named the same in every P4suta repository.
+  # The one status check branch protection requires is named the same in every P4suta repository.
   # It passes only when every job it needs succeeded or was skipped.
   required:
     name: required
