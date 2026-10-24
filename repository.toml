@@ -1,0 +1,22 @@
+name = "Notify"
+summary = "Self-hosted notifications with a web client and partial ntfy compatibility"
+install = """
+git clone https://github.com/P4suta/notify.git
+cd notify
+docker compose -f compose.sqlite.yml up --build notify"""
+usage = """
+# Open the setup URL printed at startup within 15 minutes.
+# Create administrator admin with a password of 12 to 1024 characters.
+# Keep anonymous access set to deny.
+# In another terminal, enter that password when curl prompts.
+curl --user admin --data 'deployment complete' http://localhost:8080/alerts"""
+documentation_index = true
+license = "Apache-2.0"
+
+[[preserved_licenses.assets]]
+path = "LICENSE"
+sha256 = "11f8cff43f1b4b427244f99c2a50698d4628422cad378d44735c16f24452ff1a"
+
+[[preserved_licenses.assets]]
+path = "NOTICE"
+sha256 = "4c9a4da7e1e9837378b8f52b1f4252ecd08d0ca3f7c27338ab12b6f6656505f0"
