@@ -15,7 +15,8 @@ Keep changes focused, reviewable, and compatible with the documented project bou
 Notify uses vertical-slice TDD.
 Start with a failing acceptance or contract test, implement the smallest coherent behavior, refactor, and then add failure and concurrency coverage.
 
-Required local checks are documented in the README. At minimum, run:
+The [project guide](docs/README.md#builds-and-tests) lists the required local checks.
+Start with:
 
 ```sh
 gleam format --check src test packages/notify_core/src packages/notify_core/test
