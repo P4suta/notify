@@ -121,7 +121,10 @@ class NativeHttp3DependencyContractTest(unittest.TestCase):
         )
         self.assertIn("gleam_quic: :permanent", mix_project)
         self.assertIn("http3: :permanent", mix_project)
-        self.assertRegex(native_workflow, r"(?m)^  pull_request:\s*$")
+        self.assertRegex(
+            native_workflow,
+            r"(?m)^on:\s*\n  workflow_dispatch:\s*\n(?=\S)",
+        )
 
 
 if __name__ == "__main__":

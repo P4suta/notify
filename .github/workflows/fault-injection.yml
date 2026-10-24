@@ -2,8 +2,6 @@
 name: Cluster fault injection
 
 on:
-  schedule:
-    - cron: "23 19 * * 2"
   workflow_dispatch:
 
 permissions:

@@ -2,9 +2,6 @@
 name: Mutation
 
 on:
-  pull_request:
-  schedule:
-    - cron: "23 19 * * 0"
   workflow_dispatch:
 
 permissions:
@@ -13,10 +10,6 @@ permissions:
 concurrency:
   group: mutation-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
-
-env:
-  GLEAM_VERSION: "1.18.1"
-  OTP_VERSION: "29.0.5"
 
 jobs:
   mutation:
@@ -32,8 +25,8 @@ jobs:
       - name: Install Gleam and Erlang
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
-          otp-version: ${{ env.OTP_VERSION }}
-          gleam-version: ${{ env.GLEAM_VERSION }}
+          otp-version: "29.0.5"
+          gleam-version: "1.18.1"
           rebar3-version: "3"
       - name: Download dependencies
         working-directory: packages/notify_core

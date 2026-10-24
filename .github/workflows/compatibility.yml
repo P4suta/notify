@@ -12,8 +12,6 @@ on:
       - packages/notify_core/**
       - test/compat/**
       - .github/workflows/compatibility.yml
-  schedule:
-    - cron: "37 19 * * 2"
   workflow_dispatch:
 
 permissions:

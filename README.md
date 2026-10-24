@@ -257,7 +257,9 @@ Scheduled publication uses `FOR UPDATE SKIP LOCKED` and commits the released mes
 These paths have real-PostgreSQL contract coverage.
 The contract also terminates the dedicated LISTEN backend, commits an event while it is disconnected, requires a new listener PID to catch up from the log, and proves duplicate wake-ups do not duplicate delivery.
 A separate three-node data-plane contract requires every node to consume both local- and remote-origin events in the same durable order, stops one bus actor, commits on both surviving origins, and requires the restarted node to resume both events in sequence from its durable cursor.
-A weekly/manual full-container contract additionally terminates a dedicated listener, injects duplicate wake-ups, isolates a bounded-buffer slow subscriber, SIGKILLs two nodes simultaneously, and verifies ordered replay, cursor catch-up, and message-ID live resume.
+A manually dispatched full-container contract exercises failures across the three-node cluster.
+It terminates a dedicated listener, injects duplicate wake-ups, and isolates a bounded-buffer slow subscriber.
+It also SIGKILLs two nodes simultaneously and verifies ordered replay, cursor catch-up, and message-ID live resume.
 It also kills the origin of a scheduled message before its due time, stops PostgreSQL and the S3 gateway independently, and kills an in-flight mobile-relay lease owner before requiring another node to reclaim and complete the content-blind job.
 The target-scale 10-minute steady-state soak has passed independently for JSON,
 raw, SSE, and WebSocket at source commit `5ecabbc`.
@@ -381,6 +383,10 @@ Generated dependency/build trees are excluded from the working-tree Gitleaks sca
 Mend-hosted Renovate applies the shared P4suta schedule and three-day minimum release age to dependency updates.
 GitHub vulnerability alerts remain enabled and feed the normal reviewed remediation path.
 
+The native packaging, mutation, Scorecard, compound fault, and target soak workflows run only through manual dispatch.
+No workflow runs on a schedule.
+Manual campaigns run independently of Release Please.
+
 Native CI downloads Zig 0.15.2 directly from `ziglang.org`, verifies the
 official per-host SHA-256 before extraction, and never publishes the resulting
 executables. `test/native_zig_install_test.sh` proves unsupported versions and
@@ -451,7 +457,7 @@ its container and volume.
 It exercises listener replacement, duplicate wake-ups, slow-subscriber isolation, simultaneous two-node crashes, scheduled-origin failover, fail-closed PostgreSQL recovery without a phantom commit, S3 upload failure and cross-node recovery, and lease reclamation after killing an in-flight relay worker.
 The local relay mock rejects message bodies and malformed poll IDs.
 The harness uses a unique Compose project/image and removes its containers, volumes, temporary files, and image on every exit.
-The same test runs weekly and on manual dispatch; it is intentionally outside the pull-request fast path.
+The same test runs on manual dispatch, outside the pull-request fast path.
 
 `test/cluster_soak.sh` is the fail-closed target load gate. Its defaults are
 three nodes, 10,000 live subscriptions, 1,000 topics, 500 publishes per second
@@ -471,10 +477,10 @@ PostgreSQL evidence, checks every subscriber for loss, duplicates,
 disconnection, and topic order, then compares that order with the authoritative
 PostgreSQL event sequence. It also fails unless all three durable node cursors
 exist and finish at the event-log head. The harness removes its exact Compose
-project and local image on every exit. The target workflow runs all four formats
-weekly and manually and retains its private evidence for seven days; it does
-not publish an image or release artifact. The latest recorded local result and
-its scope are in [operational limits](docs/operations.md).
+project and local image on every exit.
+The manually dispatched target workflow runs all four formats and retains its private evidence for seven days.
+It doesn't publish an image or release artifact.
+The recorded local result and its scope are in [operational limits](docs/operations.md).
 
 Set `NOTIFY_TEST_POSTGRES_HOST` (plus optional `PORT` and `PASSWORD` variants) to enable the real PostgreSQL contract suite.
 Set `NOTIFY_TEST_S3_ENDPOINT` (plus optional `ACCESS_KEY` and `SECRET_KEY` variants) for the S3-compatible gateway contract, and `NOTIFY_TEST_NETWORK=1` for loopback HTTP sender tests.
@@ -500,8 +506,8 @@ types, JSON messages, and errors with ntfy v2.27.0. Upstream-main drift uses a
 separate endpoint/artifact and never rewrites the stable baseline.
 
 The optional ERTS-embedded native build scaffold is under `packaging/native`.
-It uses exact MixGleam, Mix lock, Zig, and Burrito inputs. Scheduled/main CI
-builds Linux amd64/arm64 and macOS amd64/arm64 on matching standard runners.
+It uses exact MixGleam, Mix lock, Zig, and Burrito inputs.
+The manually dispatched workflow builds Linux amd64/arm64 and macOS amd64/arm64 on matching standard runners.
 Linux NIFs are rebuilt against musl in a digest-pinned compiler image; the
 supported Linux cross-build path produces Windows amd64 with explicit Zig-built
 PE NIFs, then transfers it to a Windows recovery smoke. That private workflow

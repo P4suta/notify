@@ -314,9 +314,9 @@ single-node SQLite command is `test/sqlite_soak.sh`. Both are loopback-only by
 default and use isolated Compose projects. `NOTIFY_SOAK_FORMAT` selects JSON,
 raw, SSE, or WebSocket, and `NOTIFY_BENCHMARK_SCENARIO` selects ordinary
 publish, relay, scheduled delivery, a slow provider, or concurrent attachment
-traffic. The weekly/manual workflow runs both backends once per format. The driver paces
-publish starts independently of completion on a dedicated Node worker thread,
-so decoding 10,000 subscriber streams cannot delay the response-latency clock.
+traffic.
+The manually dispatched workflow runs both backends once per format.
+The driver paces publish starts independently of completion on a dedicated Node worker thread, so decoding 10,000 subscriber streams can't delay the response-latency clock.
 The resource observer defaults to a one-minute interval, records that value in
 `environment.json`, and can be changed with
 `NOTIFY_SOAK_RESOURCE_SAMPLE_SECONDS`. Because each
@@ -338,9 +338,8 @@ oracle evidence makes the verdict fail.
 Environment, database size and row counts, PostgreSQL statement/transaction
 counts, container CPU/RSS, BEAM run queue/mailboxes/timer delay, driver
 CPU/message, delivery p50/p95/p99, cursor positions, and container/OOM state
-are separate report evidence. The
-weekly/manual workflow uses the exact defaults above for all four formats and
-retains these private artifacts for seven days.
+are separate report evidence.
+The manually dispatched workflow uses the documented defaults for all four formats and retains its private artifacts for seven days.
 
 For optimization decisions, `test/backend_benchmark_matrix.mjs` accepts a JSON
 configuration containing separate baseline and candidate command arrays. Its
@@ -441,7 +440,7 @@ The current contract exercises paging, cursor resume, dispatch-before-ACK, dispa
 It also terminates the dedicated LISTEN backend, commits during the disconnect, waits for a different backend PID to reconnect and catch up from the event log, and injects duplicate wake-ups without duplicate delivery.
 A three-node case verifies that all nodes consume local- and remote-origin events in the same sequence, stops one bus actor after its cursor is durable, commits on both surviving origins, and restarts the same node identity to catch up both events in sequence.
 These persistence cases run against real PostgreSQL in the pull-request gate.
-The weekly/manual compound container contract starts three complete nodes with PostgreSQL and VersityGW.
+The manually dispatched compound container contract starts three complete nodes with PostgreSQL and VersityGW.
 It replaces a terminated LISTEN connection, injects duplicate wake-ups, disconnects only a bounded-buffer slow subscriber, SIGKILLs two nodes simultaneously, and requires ordered replay, cursor catch-up, and message-ID resume.
 It then kills a scheduled message's origin before due time and requires exactly one release from the two surviving schedulers.
 Its storage faults stop PostgreSQL and the S3 gateway separately, require fail-closed writes with no phantom message/attachment, and verify recovery plus cross-node object download.

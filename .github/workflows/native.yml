@@ -2,12 +2,6 @@
 name: Native packaging
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-  schedule:
-    - cron: "19 19 * * 4"
   workflow_dispatch:
 
 permissions:
@@ -18,9 +12,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ELIXIR_VERSION: "1.20.3"
-  GLEAM_VERSION: "1.18.1"
-  OTP_VERSION: "28.4.3"
   ZIG_VERSION: "0.15.2"
 
 jobs:
@@ -55,9 +46,9 @@ jobs:
       - name: Install BEAM and Gleam toolchains
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-          gleam-version: ${{ env.GLEAM_VERSION }}
-          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: "1.20.3"
+          gleam-version: "1.18.1"
+          otp-version: "28.4.3"
           rebar3-version: "3"
       - name: Install checksum-verified Zig
         run: packaging/native/install_zig.sh "$ZIG_VERSION"
@@ -80,9 +71,9 @@ jobs:
       - name: Install BEAM and Gleam toolchains
         uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
-          elixir-version: ${{ env.ELIXIR_VERSION }}
-          gleam-version: ${{ env.GLEAM_VERSION }}
-          otp-version: ${{ env.OTP_VERSION }}
+          elixir-version: "1.20.3"
+          gleam-version: "1.18.1"
+          otp-version: "28.4.3"
           rebar3-version: "3"
       - name: Install checksum-verified Zig
         run: packaging/native/install_zig.sh "$ZIG_VERSION"
@@ -109,7 +100,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 20
     permissions:
-      actions: read
+      actions: read # Download this run's Windows executable.
       contents: read
     steps:
       - name: Check out smoke harness

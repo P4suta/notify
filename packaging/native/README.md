@@ -20,13 +20,11 @@ With PowerShell on a supported Linux or macOS build host:
 ./packaging/native/build.ps1
 ```
 
-Outputs are written to `burrito_out/`. The pull-request, main, scheduled, and
-manual native workflow builds and runs every POSIX target on its matching
-standard runner. Linux
-rebuilds the bcrypt, SQLite, and Argon2id NIFs in a digest-pinned Alpine image,
-rejects glibc symbol versions, and then packages them with Burrito's musl ERTS.
-The compiler receives the exact ERTS NIF headers from the selected host OTP
-rather than depending on an Erlang version inside the compiler image.
+The build writes outputs to `burrito_out/`.
+The manually dispatched native workflow builds and runs every POSIX target on its matching standard runner.
+Linux rebuilds the bcrypt, SQLite, and Argon2id NIFs in a digest-pinned Alpine image.
+It rejects glibc symbol versions and packages the NIFs with Burrito's musl Erlang Runtime System (ERTS).
+The compiler receives the exact ERTS NIF headers from the selected host OTP rather than depending on an Erlang version inside the compiler image.
 
 The build first stages runtime source only, so Notify test modules and their
 development-only dependencies are excluded. The immutable `http3` Mix Git
