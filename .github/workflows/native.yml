@@ -2,12 +2,6 @@
 name: Native packaging
 
 on:
-  push:
-    branches:
-      - main
-  pull_request:
-  schedule:
-    - cron: "19 19 * * 4"
   workflow_dispatch:
 
 permissions:
@@ -109,7 +103,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 20
     permissions:
-      actions: read
+      actions: read # Download this run's Windows executable.
       contents: read
     steps:
       - name: Check out smoke harness

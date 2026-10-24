@@ -2,8 +2,6 @@
 name: Target cluster soak
 
 on:
-  schedule:
-    - cron: "23 19 * * 4"
   workflow_dispatch:
 
 permissions:
@@ -31,10 +29,11 @@ jobs:
       - name: Exercise the backend target
         env:
           NOTIFY_SOAK_FORMAT: ${{ matrix.format }}
+          NOTIFY_SOAK_BACKEND: ${{ matrix.backend }}
           NOTIFY_SOAK_PROJECT_NAME: notify-soak-${{ matrix.backend }}-${{ matrix.format }}-${{ github.run_id }}-${{ github.run_attempt }}
           NOTIFY_SOAK_REPORT_DIRECTORY: ${{ runner.temp }}/notify-soak-${{ matrix.backend }}-${{ matrix.format }}
         run: |
-          if [[ '${{ matrix.backend }}' == postgres ]]; then
+          if [[ "$NOTIFY_SOAK_BACKEND" == postgres ]]; then
             test/cluster_soak.sh
           else
             test/sqlite_soak.sh
