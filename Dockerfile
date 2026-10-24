@@ -1,16 +1,27 @@
 # syntax=docker/dockerfile:1.7
 
+ARG BUN_VERSION=1.2.22-alpine
+
 FROM ghcr.io/gleam-lang/gleam:v1.18.1-erlang-alpine@sha256:7c82e4a284b7c05c26eac34db497ea0e63ce7cb04bd019d966d70338eb172b68 AS gleam
 
+FROM oven/bun:${BUN_VERSION}@sha256:ab596b6d0dcad05d23799b89451e92f4cdc16da184a9a4d240c42eaf3c4b9278 AS bun
+
 FROM erlang:29.1.1.0-alpine@sha256:e7a27e743d17abf139518a69ba3861b43a88ad8396296f0a859d7f37031dbde0 AS build
+ARG BUN_VERSION
 COPY --from=gleam /bin/gleam /bin/gleam
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 RUN apk add --no-cache \
       bsd-compat-headers=0.7.2-r6 \
       build-base=0.5-r4 \
-      git=2.54.0-r0
+      git=2.54.0-r0 \
+      libgcc=15.2.0-r5 \
+      libstdc++=15.2.0-r5
 WORKDIR /source
 COPY . .
 WORKDIR /source/web
+RUN bun_version=$(/usr/local/bin/bun --version) \
+  && test "$bun_version" = "${BUN_VERSION%-alpine}" \
+  && printf '\n[tools.lustre.bin]\nbun = "/usr/local/bin/bun"\n' >> gleam.toml
 RUN gleam run -m lustre/dev build \
       --minify=true --no-html=true --no-tailwind=true \
       --outdir=../priv/public
