@@ -31,7 +31,7 @@ RUN gleam export erlang-shipment \
 
 FROM erlang:29.1.1.0-alpine@sha256:e7a27e743d17abf139518a69ba3861b43a88ad8396296f0a859d7f37031dbde0 AS runtime
 RUN apk add --no-cache \
-      ca-certificates=20260909-r0 \
+      ca-certificates=20261020-r0 \
       libcrypto3=3.5.8-r0 \
       libgcc=15.2.0-r5 \
       libssl3=3.5.8-r0 \
