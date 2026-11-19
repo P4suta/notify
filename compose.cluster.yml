@@ -62,7 +62,7 @@ services:
 
   s3:
     # renovate: datasource=docker depName=versity/versitygw
-    image: versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
+    image: versity/versitygw:v1.11.0@sha256:8319a530d08d537426e2f855bae5280709795dc73a3f0c347973ef915d6343c5
     command:
       - --port
       - :9000
@@ -91,7 +91,7 @@ services:
   s3-init:
     # Keep this image identical to the gateway so one verified artifact provides both the shell and the server.
     # renovate: datasource=docker depName=versity/versitygw
-    image: versity/versitygw:v1.8.0@sha256:30292fc2eeacc67a36993b01f7a7a5e3361a19cced0e80c1d71cfa2a4b0a2499
+    image: versity/versitygw:v1.11.0@sha256:8319a530d08d537426e2f855bae5280709795dc73a3f0c347973ef915d6343c5
     entrypoint: ["/bin/sh", "-c"]
     command: ["mkdir -p /data/notify"]
     volumes:
