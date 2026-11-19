@@ -36,7 +36,7 @@ defmodule Notify.MixProject do
       {:beecrypt, "== 0.4.0"},
       {:gleam_crypto, "== 1.6.0"},
       {:gleam_erlang, "== 1.3.0"},
-      {:gleam_http, "== 4.3.0"},
+      {:gleam_http, "== 4.5.0"},
       {:gleam_json, "== 3.1.0"},
       {:gleam_otp, "== 1.3.0"},
       {:gleam_stdlib, "== 1.0.5"},
@@ -47,9 +47,9 @@ defmodule Notify.MixProject do
        git: "https://github.com/P4suta/http3.git", ref: "48a8b3b0a609b7c33ff54c571c9c5935ad41336f"},
       {:mist, "== 6.0.3"},
       {:notify_core, path: "packages/notify_core"},
-      {:postgleam, "== 0.8.0"},
+      {:postgleam, "== 0.10.0"},
       {:sqlight, "== 1.2.0"},
-      {:burrito, "== 1.5.0", only: :prod, runtime: false}
+      {:burrito, "== 1.6.0", only: :prod, runtime: false}
     ]
   end
 

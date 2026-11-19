@@ -1,7 +1,7 @@
 ---
 services:
   ntfy-auth-init:
-    image: binwiederhier/ntfy:v2.27.0
+    image: binwiederhier/ntfy:v2.38.0
     entrypoint: /bin/sh
     command:
       - -ec
@@ -14,7 +14,7 @@ services:
       - ntfy-compat-auth:/var/lib/ntfy
 
   ntfy-auth-setup:
-    image: binwiederhier/ntfy:v2.27.0
+    image: binwiederhier/ntfy:v2.38.0
     command:
       - user
       - add
@@ -31,7 +31,7 @@ services:
       - ntfy-compat-auth:/var/lib/ntfy
 
   ntfy-v227:
-    image: binwiederhier/ntfy:v2.27.0
+    image: binwiederhier/ntfy:v2.38.0
     command: serve
     depends_on:
       ntfy-auth-setup:
