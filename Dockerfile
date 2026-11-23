@@ -13,7 +13,7 @@ COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 RUN apk add --no-cache \
       bsd-compat-headers=0.7.2-r6 \
       build-base=0.5-r4 \
-      git=2.54.0-r0 \
+      git=2.54.1-r0 \
       libgcc=15.2.0-r5 \
       libstdc++=15.2.0-r5
 WORKDIR /source
@@ -31,11 +31,14 @@ RUN gleam export erlang-shipment \
 
 FROM erlang:29.1.1.0-alpine@sha256:e7a27e743d17abf139518a69ba3861b43a88ad8396296f0a859d7f37031dbde0 AS runtime
 RUN apk add --no-cache \
-      ca-certificates=20260909-r0 \
+      ca-certificates=20261020-r0 \
       libcrypto3=3.5.8-r0 \
       libgcc=15.2.0-r5 \
       libssl3=3.5.8-r0 \
       libstdc++=15.2.0-r5 \
+      musl=1.2.6-r3 \
+      musl-utils=1.2.6-r3 \
+      zlib=1.4-r0 \
   && addgroup -S -g 10001 notify \
   && adduser -S -u 10001 -G notify -h /app notify \
   && mkdir -p /data \
