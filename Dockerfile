@@ -36,6 +36,9 @@ RUN apk add --no-cache \
       libgcc=15.2.0-r5 \
       libssl3=3.5.8-r0 \
       libstdc++=15.2.0-r5 \
+      musl=1.2.6-r3 \
+      musl-utils=1.2.6-r3 \
+      zlib=1.4-r0 \
   && addgroup -S -g 10001 notify \
   && adduser -S -u 10001 -G notify -h /app notify \
   && mkdir -p /data \
