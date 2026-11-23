@@ -1,12 +1,12 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1.29
 
-ARG BUN_VERSION=1.4.3-alpine
+ARG BUN_VERSION=1.4.5-alpine
 
 FROM ghcr.io/gleam-lang/gleam:v1.18.1-erlang-alpine@sha256:7c82e4a284b7c05c26eac34db497ea0e63ce7cb04bd019d966d70338eb172b68 AS gleam
 
-FROM oven/bun:${BUN_VERSION}@sha256:629e17411f1f129dbec3af78d5af9c9f2a937435c80349437206c6b0b7422373 AS bun
+FROM oven/bun:${BUN_VERSION}@sha256:da816670775f4c2b4e990b6b1847cf5540dcdc721a42033dd331ce7a88ba6a3b AS bun
 
-FROM erlang:29.1.1.0-alpine@sha256:e7a27e743d17abf139518a69ba3861b43a88ad8396296f0a859d7f37031dbde0 AS build
+FROM erlang:29.1.2.0-alpine@sha256:0ac9b63db11be156be4e2834546e44aa0d7446aaffb05fedd4aea8c5a33ad998 AS build
 ARG BUN_VERSION
 COPY --from=gleam /bin/gleam /bin/gleam
 COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
@@ -29,12 +29,12 @@ WORKDIR /source
 RUN gleam export erlang-shipment \
   && escript packaging/erlang_shipment/finalize.escript build/erlang-shipment
 
-FROM erlang:29.1.1.0-alpine@sha256:e7a27e743d17abf139518a69ba3861b43a88ad8396296f0a859d7f37031dbde0 AS runtime
+FROM erlang:29.1.2.0-alpine@sha256:0ac9b63db11be156be4e2834546e44aa0d7446aaffb05fedd4aea8c5a33ad998 AS runtime
 RUN apk add --no-cache \
       ca-certificates=20261020-r0 \
-      libcrypto3=3.5.8-r0 \
+      libcrypto3=3.5.9-r1 \
       libgcc=15.2.0-r5 \
-      libssl3=3.5.8-r0 \
+      libssl3=3.5.9-r1 \
       libstdc++=15.2.0-r5 \
       musl=1.2.6-r3 \
       musl-utils=1.2.6-r3 \

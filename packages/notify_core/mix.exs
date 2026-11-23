@@ -28,7 +28,7 @@ defmodule NotifyCore.MixProject do
   defp deps do
     [
       {:gleam_json, "== 3.1.0"},
-      {:gleam_stdlib, "== 1.0.5"}
+      {:gleam_stdlib, "== 1.1.0"}
     ]
   end
 end
