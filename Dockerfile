@@ -13,7 +13,7 @@ COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
 RUN apk add --no-cache \
       bsd-compat-headers=0.7.2-r6 \
       build-base=0.5-r4 \
-      git=2.54.0-r0 \
+      git=2.54.1-r0 \
       libgcc=15.2.0-r5 \
       libstdc++=15.2.0-r5
 WORKDIR /source
